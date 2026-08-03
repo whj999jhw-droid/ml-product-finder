@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ML Product Finder · 使用手册</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #f5f7fa; color: #1f2329; line-height: 1.7;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 32px 24px 80px; }
+  header {
+    background: linear-gradient(135deg, #00a859 0%, #0d8f6f 100%);
+    color: #fff; padding: 36px 24px; margin: -32px -24px 32px;
+  }
+  header h1 { margin: 0 0 8px; font-size: 26px; }
+  header p { margin: 0; opacity: .9; font-size: 14px; }
+  h2 {
+    font-size: 19px; margin: 40px 0 14px; padding-left: 11px;
+    border-left: 4px solid #00a859;
+  }
+  h3 { font-size: 15px; margin: 22px 0 8px; color: #0d8f6f; }
+  .card {
+    background: #fff; border: 1px solid #e3e6eb; border-radius: 10px;
+    padding: 18px 20px; margin: 14px 0;
+  }
+  .steps { counter-reset: s; list-style: none; padding: 0; margin: 0; }
+  .steps > li {
+    counter-increment: s; position: relative; padding: 12px 0 12px 46px;
+    border-bottom: 1px dashed #e8eaee;
+  }
+  .steps > li:last-child { border-bottom: none; }
+  .steps > li::before {
+    content: counter(s); position: absolute; left: 0; top: 12px;
+    width: 28px; height: 28px; border-radius: 50%;
+    background: #00a859; color: #fff; font-size: 14px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  code {
+    background: #eef1f4; padding: 2px 6px; border-radius: 4px;
+    font-family: Consolas, Monaco, monospace; font-size: 13px; color: #c0341d;
+  }
+  pre {
+    background: #23272e; color: #e6e6e6; padding: 14px 16px; border-radius: 8px;
+    overflow-x: auto; font-size: 13px; line-height: 1.6;
+  }
+  pre code { background: none; color: inherit; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
+  th, td { border: 1px solid #e3e6eb; padding: 9px 12px; text-align: left; }
+  th { background: #f0f3f6; font-weight: 600; }
+  .tip, .warn, .danger {
+    border-radius: 8px; padding: 13px 16px; margin: 14px 0; font-size: 14px;
+    border-left: 4px solid;
+  }
+  .tip { background: #e8f7f0; border-color: #00a859; }
+  .warn { background: #fff6e6; border-color: #e37318; }
+  .danger { background: #fdecee; border-color: #e34d59; }
+  .badge {
+    display: inline-block; padding: 2px 9px; border-radius: 11px;
+    font-size: 12px; font-weight: 600; margin-right: 6px;
+  }
+  .b-green { background: #d6f5e6; color: #007a41; }
+  .b-yellow { background: #ffedd6; color: #a5540f; }
+  .b-red { background: #fddfe2; color: #b3323c; }
+  .b-blue { background: #dbe9ff; color: #1a53b0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+  .mini { background: #fff; border: 1px solid #e3e6eb; border-radius: 9px; padding: 15px; }
+  .mini h4 { margin: 0 0 6px; font-size: 14px; color: #0d8f6f; }
+  .mini p { margin: 0; font-size: 13px; color: #5a6470; }
+  .kbd {
+    background: #fff; border: 1px solid #ccd1d8; border-bottom-width: 2px;
+    border-radius: 5px; padding: 1px 7px; font-size: 12px; font-family: Consolas, monospace;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>ML Product Finder 使用手册</h1>
+  <p>美客多爆款采集 → 货源利润测算 → 合规上架　·　更新于 2026-07-31</p>
+</header>
+
+<div class="tip">
+  <b>三步上手：</b>① 双击桌面 <code>MLProductFinder-Launcher.bat</code> → ② 浏览器打开 <code>http://localhost:5173</code> → ③ 左侧点「美客多商品抓取」，直接点绿色抓取按钮。
+</div>
+
+<h2>一、启动</h2>
+<div class="card">
+<ol class="steps">
+  <li>
+    <b>双击桌面启动器</b><br>
+    <code>C:\Users\whj87\Desktop\MLProductFinder-Launcher.bat</code><br>
+    它会先清理 5173 / 3000 端口，再同时拉起后端（3000）和前端（5173）。<span style="color:#e37318">不会自动开浏览器。</span>
+  </li>
+  <li>
+    <b>手动打开浏览器</b>，访问 <code>http://localhost:5173</code>
+  </li>
+  <li>
+    看到左侧出现「美客多商品抓取 / 货源与利润 / 合规上架」三个入口，即启动成功。
+  </li>
+</ol>
+<h3>命令行启动（备用）</h3>
+<pre><code>cd c:\Users\whj87\WorkBuddy\20260720124310\ml-product-finder
+npx tsx server/index.ts    # 后端 :3000
+npx vite                   # 前端 :5173（另开一个终端）</code></pre>
+</div>
+
+<h2>二、M1 · 抓爆款</h2>
+<div class="card">
+<ol class="steps">
+  <li><b>进入「美客多商品抓取」页</b></li>
+  <li>
+    <b>勾选站点</b>：墨西哥 MLM / 巴西 MLB / 智利 MLC / 哥伦比亚 MCO。<br>
+    新手建议先只勾 <b>墨西哥</b> 单站点试跑，快很多。
+  </li>
+  <li>
+    <b>设置价格上限</b>（默认 $15）与筛选开关：
+    <table>
+      <tr><th>开关</th><th>作用</th><th>建议</th></tr>
+      <tr><td>排除 ML Full</td><td>剔除平台仓发货的竞品</td><td>✅ 开（你是自发货）</td></tr>
+      <tr><td>仅跨境（排除本土）</td><td>剔除当地卖家</td><td>✅ 开</td></tr>
+      <tr><td>仅全新</td><td>剔除二手</td><td>✅ 开</td></tr>
+      <tr><td>展开子分类扩量</td><td>数据翻几倍但极慢</td><td>❌ 先关</td></tr>
+    </table>
+  </li>
+  <li>
+    <b>点「开始抓取」</b>，页面会实时显示进度条与当前分类。
+    <div class="warn" style="margin-top:8px">
+      全量 54 个分类约需 <b>20+ 分钟</b>。未配住宅代理时每个分类最多约 20 条（官方接口上限）；配了住宅代理可翻页放量到几百条/类。
+    </div>
+  </li>
+  <li>
+    抓完自动导出 xlsx 到 <code>data\exports\</code>，文件名形如 <code>ML_Products_2026-07-31.xlsx</code>。若开了邮件推送，会自动作为附件发到你邮箱。
+  </li>
+</ol>
+</div>
+
+<h2>三、M2 · 找货源 + 算利润</h2>
+<div class="card">
+<p>左侧点「<b>货源与利润</b>」，页面会自动读取 M1 最新导出的爆款清单。</p>
+
+<h3>① 填货源价</h3>
+<ol class="steps">
+  <li>
+    <b>手工模式（推荐，稳定）</b>：拿商品标题/图片去 1688 搜同款，把<b>采购价</b>填进「货源价CNY」列，链接粘到「货源链接」列。头程运费不填则系统按计费重自动估算。
+  </li>
+  <li>
+    <b>自动图搜</b>：点行尾「自动图搜」按钮。需先配环境变量 <code>ML_1688_APPKEY / ML_1688_SECRET / ML_1688_TOKEN</code>，没配会提示降级为手工模式。
+  </li>
+</ol>
+
+<h3>② 两种测算，用哪个？</h3>
+<div class="grid">
+  <div class="mini">
+    <h4>表格里的「净利润 / ROI」列</h4>
+    <p>输入货源价就实时刷新的<b>快速估算</b>，只算佣金+回款费，适合边填边扫一眼。</p>
+  </div>
+  <div class="mini">
+    <h4>「完整测算」按钮 <span class="badge b-blue">重要</span></h4>
+    <p>调用后端完整引擎，才是<b>真实到手利润</b>。点一次全表刷新。</p>
+  </div>
+</div>
+
+<p style="margin-top:14px">完整测算把这些全算进去：</p>
+<table>
+  <tr><th>成本项</th><th>说明</th></tr>
+  <tr><td>平台佣金</td><td>MLM 4% / MLB 12.5% / MLC·MCO 12%</td></tr>
+  <tr><td>Mercado Pago 手续费</td><td>4%~4.5%</td></tr>
+  <tr><td>官方物流费</td><td>按<b>体积重（长×宽×高÷5000）与实重取大</b>计费</td></tr>
+  <tr><td>头程运费</td><td>手填优先，未填按计费重 ×30~40 元/kg 估算</td></tr>
+  <tr><td>关税 / 进口税</td><td><span style="color:#e34d59">墨西哥无 RFC 税号扣 36%</span>，有 RFC 才 11.5%；巴西 ICMS 20%；智利/哥伦比亚 0</td></tr>
+  <tr><td>广告费</td><td>按 ACoS 默认 5%</td></tr>
+  <tr><td>退款损耗</td><td>退货率 × 40% 损失</td></tr>
+  <tr><td>汇率损耗 + 提现手续费</td><td>约 1% + 1%</td></tr>
+</table>
+
+<h3>③ 看结果</h3>
+<p>
+  <span class="badge b-green">绿</span> 净利率 ≥ 20%，可放心做<br>
+  <span class="badge b-yellow">黄</span> 净利率 5%~20%，需压成本或提价<br>
+  <span class="badge b-red">红</span> 净利率 &lt; 5%，别碰
+</p>
+<p>
+  <b>保本价</b>列：低于这个价卖必亏，会标红。<br>
+  <b>鼠标悬停</b>在净利率上可看风险预警，例如「体积重是实重的 6.2 倍，泡货运费失控，建议放弃」。
+</p>
+
+<h3>④ 一键筛选</h3>
+<p>点「<b>自动筛选（3层）</b>」自动跑三道关卡：</p>
+<table>
+  <tr><th>层级</th><th>过滤条件</th><th>结果标签</th></tr>
+  <tr><td>第 1 层 硬性</td><td>售价 $5~$100、销量 ≥5、仅全新、无违禁词/侵权品牌词</td><td><span class="badge b-red">硬性拒绝</span></td></tr>
+  <tr><td>第 2 层 货源</td><td>是否已填 1688 货源价</td><td><span class="badge b-yellow">缺货源价</span></td></tr>
+  <tr><td>第 3 层 利润</td><td>净利率 ≥5%、体积重比 ≤5、计费重 ≤2kg</td><td><span class="badge b-red">利润拒绝</span></td></tr>
+  <tr><td>全部通过</td><td>—</td><td><span class="badge b-green">通过</span></td></tr>
+</table>
+
+<h3>⑤ 导出</h3>
+<div class="grid">
+  <div class="mini">
+    <h4>导出含利润清单</h4>
+    <p>给自己看的选品表：<code>ML_Sourcing_日期.xlsx</code></p>
+  </div>
+  <div class="mini">
+    <h4>妙手素材包</h4>
+    <p>给妙手 ERP 导入的格式：<code>妙手素材包_日期.xlsx</code>，含货号/类目ID/售价/净收益/物流方式等 19 列</p>
+  </div>
+</div>
+</div>
+
+<h2>四、M3 · 合规上架</h2>
+<div class="danger">
+  <b>⚠️ 合规红线（必须遵守）：</b><br>
+  ① 标题必须<b>自己重写</b>，不能复制竞品标题；② 图片必须是你<b>自拍或供应商授权</b>的图，<b>严禁</b>盗用竞品原图；③ 品牌栏填 <code>Generic</code> 或你自己的品牌，<b>绝不</b>填 Nike/Apple 等他人品牌。<br>
+  违反 = 封店 + 侵权索赔。工具的预检会拦，但最终责任在你。
+</div>
+<div class="card">
+<ol class="steps">
+  <li>
+    <b>先授权店铺</b>：在「美客多商品抓取」页点「授权我的店铺」，走 OAuth 拿到含 <code>write</code> 权限的 token（上架必须）。
+  </li>
+  <li><b>左侧点「合规上架」</b>，从下拉里选一条 M2 筛出来的商品作为参考。</li>
+  <li>
+    <b>逐项填写你自己的内容</b>：
+    <table>
+      <tr><th>字段</th><th>怎么填</th></tr>
+      <tr><td>站点 / 类目ID</td><td>类目ID 从 M2 清单里带过来，可直接用</td></tr>
+      <tr><td>标题</td><td><b>自己写</b>，西语站用西语、巴西用葡语，突出材质+用途+规格</td></tr>
+      <tr><td>售价</td><td>参考 M2 的保本价，往上加 20%+ 利润</td></tr>
+      <tr><td>库存 / 品牌</td><td>库存按备货填；品牌填 <code>Generic</code></td></tr>
+      <tr><td>图片 URL</td><td>你自有图的公网地址（图床/OSS），多张用换行分隔</td></tr>
+      <tr><td>重量 / 长宽高</td><td>如实填，直接影响运费与体积重</td></tr>
+    </table>
+  </li>
+  <li>
+    <b>点「合规预检」</b>。会扫描品牌侵权词（75 个大牌）+ 西语/葡语平台违禁词（replica、cura、milagroso 等）。<br>
+    预检不过就改，改到显示「合规预检通过」。
+  </li>
+  <li><b>点「立即上架」</b>，成功后返回 itemId 和商品链接。</li>
+</ol>
+<div class="tip">
+  <b>批量上架</b>后端已就绪（并发 3、429 自动指数退避重试、逐条预检拦截、单批≤50 条），接口 <code>POST /api/ml/listing/publish-batch</code>，前端按钮还没接。需要的话可以让我补上。
+</div>
+</div>
+
+<h2>五、自动化：邮件推送 + 定时抓取</h2>
+<div class="card">
+<h3>邮件推送</h3>
+<p>在「美客多商品抓取」页找到「<b>邮件通知</b>」卡片：</p>
+<ol class="steps">
+  <li>展开「发件人 SMTP 设置」，填主机/端口/账号/授权码（QQ 邮箱用授权码不是登录密码）</li>
+  <li>填收件邮箱，打开开关，点「保存」</li>
+  <li>点「发送测试邮件」确认能收到</li>
+</ol>
+<p>之后每次抓取完成，xlsx 会自动作为附件发给你。</p>
+
+<h3>定时自动抓取</h3>
+<p>在「<b>定时自动抓取</b>」卡片设一个时间（如 <code>08:00</code>）并开启，程序开着的话每天到点自动跑一遍上次的站点与筛选条件。</p>
+<div class="warn">定时依赖程序常驻运行。关机或关掉启动器窗口就不会执行。</div>
+</div>
+
+<h2>六、进阶：住宅代理放量</h2>
+<div class="card">
+<p>不配代理时官方接口每类目只给约 20 条。想要几百条/类，需要地理匹配的<b>住宅代理</b>（MX/BR/CL/CO 出口 IP）：</p>
+<ol class="steps">
+  <li>在「住宅代理（可选）」卡片填入代理地址，如 <code>http://用户名:密码@mx.decodo.com:20000</code></li>
+  <li>点「保存」→ 点「测试」，通了就会自动解锁 search 接口翻页（最多 40 页 × 50 条/类）</li>
+</ol>
+<div class="warn">
+  数据中心代理（Cloudflare Worker / Render / 普通 VPS）<b>无效</b>，会被平台风控挡掉，必须是住宅 IP。
+</div>
+</div>
+
+<h2>七、常见问题</h2>
+<div class="card">
+<table>
+  <tr><th>现象</th><th>处理</th></tr>
+  <tr><td>页面打不开 / 白屏</td><td>确认启动器窗口没关；重新双击 bat（会自动清端口）</td></tr>
+  <tr><td>抓取一直 0 条</td><td>token 过期。程序每 30 分钟自动续期，实在不行重启一次启动器</td></tr>
+  <tr><td>「货源与利润」页没数据</td><td>先跑一次 M1；或点「刷新数据」重读最新导出</td></tr>
+  <tr><td>完整测算全是红灯</td><td>大概率是墨西哥站没 RFC 被扣 36%。要么注册 RFC，要么改做智利/哥伦比亚（0 进口税）</td></tr>
+  <tr><td>上架报 401 / 无 write 权限</td><td>重新走一遍「授权我的店铺」，确认 scope 含 write</td></tr>
+  <tr><td>自动图搜提示不可用</td><td>没配 1688 密钥，用手工粘贴模式即可，不影响使用</td></tr>
+</table>
+</div>
+
+<h2>八、选品经验（来自参考资料）</h2>
+<div class="card">
+<div class="grid">
+  <div class="mini"><h4>优选轻小件</h4><p>计费重 &lt; 1kg 最佳，超过 2kg 运费吃掉利润</p></div>
+  <div class="mini"><h4>怕泡货</h4><p>体积重/实重 &gt; 3 要压包装，&gt; 5 直接放弃</p></div>
+  <div class="mini"><h4>墨西哥先办 RFC</h4><p>36% vs 11.5%，差 24 个点，几乎决定生死</p></div>
+  <div class="mini"><h4>巴西要高客单</h4><p>佣金 12.5% + ICMS 20%，低价品做不动</p></div>
+  <div class="mini"><h4>智利/哥伦比亚更友好</h4><p>无额外进口税，适合新手起步</p></div>
+  <div class="mini"><h4>采购占比守住 50%</h4><p>采购成本超过售价一半，基本没利润</p></div>
+</div>
+</div>
+
+<p style="text-align:center;color:#8a94a0;font-size:13px;margin-top:44px">
+  ML Product Finder · 本地运行，数据不外传 · 导出目录 data\exports\
+</p>
+</div>
+</body>
+</html>

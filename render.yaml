@@ -1,0 +1,23 @@
+# Render 部署配置 —— ML Product Finder
+# 单服务（Web Service）：构建前端静态文件，由 Express 后端同时提供 API 与静态页面。
+# 文档见 DEPLOY-RENDER.md
+
+services:
+  - type: web
+    name: ml-product-finder
+    runtime: node
+    plan: free
+    region: oregon          # 美洲节点，距离美客多（巴西/墨西哥/智利/哥伦比亚）更近
+    branch: main            # 改成你的部署分支
+    buildCommand: npm install && npm run build
+    startCommand: npm run server
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Render 会自动注入 PORT，无需手动设置
+      - key: SESSION_SECRET
+        generateValue: true
+      # 可选：若后端需要访问外部代理或自定义域名，可在此添加
+      # - key: HTTPS_PROXY
+      #   sync: false
