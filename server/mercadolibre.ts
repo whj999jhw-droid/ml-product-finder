@@ -528,8 +528,9 @@ export function generateAuthUrl(usePkce: boolean = true, site?: string): string 
   if (!mlAppId) {
     throw new Error('请先设置 App ID');
   }
-  // 全局单应用授权走 /api/ml/oauth/callback（与店铺授权 store-callback 同域名，便于在美客多后台一次性配齐）
-  const redirectUri = getEffectiveRedirectBase() + '/api/ml/oauth/callback';
+  // 全局单应用授权复用与店铺授权相同的回调路径 /api/ml/oauth/store-callback
+  // 美客多要求 redirect_uri 必须与后台登记逐字一致；统一到已登记的 store-callback 路径避免被拒
+  const redirectUri = getEffectiveRedirectUri();
   if (!redirectUri || redirectUri.includes('localhost')) {
     throw new Error('Mercado Libre 不接受 localhost 回调地址，请先启动公网隧道或配置固定回调域名');
   }

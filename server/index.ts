@@ -998,8 +998,29 @@ app.get('/api/ml/oauth/store-callback', async (req, res) => {
     console.error('[store-callback] ML 返回错误:', error, error_description);
     return res.send(failHtml(`美客多拒绝授权：${error}`, error_description ? String(error_description) : undefined));
   }
-  if (!code || typeof code !== 'string' || !state || typeof state !== 'string') {
-    return res.status(400).send(failHtml('缺少授权码或状态参数（可能是直接打开了回调地址，或 ML 未正确回跳）'));
+  if (!code || typeof code !== 'string') {
+    return res.status(400).send(failHtml('缺少授权码（可能是直接打开了回调地址，或 ML 未正确回跳）'));
+  }
+  // 旧版「全局账号授权」（货源与利润页「授权」按钮走这里）：无 state，换取并保存全局 token 供上架使用
+  if (!state || typeof state !== 'string') {
+    try {
+      const cbProto = (req.headers['x-forwarded-proto'] as string) || (req.secure ? 'https' : 'http');
+      const cbHost = (req.headers['x-forwarded-host'] as string) || (req.headers.host as string) || '';
+      const cbOrigin = `${cbProto}://${cbHost}`;
+      const result = await exchangeCodeForToken(code);
+      if (result.success) {
+        return res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:40px;">
+          <h2 style="color:#67c23a;">✅ 全局账号授权成功！</h2>
+          <p>${result.message}</p>
+          <p>正在返回「货源与利润」页面...</p>
+          <script>setTimeout(() => { window.location.href = '${cbOrigin}/sourcing'; }, 1500);</script>
+        </body></html>`);
+      }
+      return res.send(failHtml('换取全局 token 失败', result.message));
+    } catch (err: any) {
+      console.error('[store-callback] 旧版全局授权换 token 失败:', err);
+      return res.send(failHtml('换取全局 token 失败', err?.message || String(err)));
+    }
   }
   try {
     const tok = await storeAuth.exchangeStoreCode(code, state);
