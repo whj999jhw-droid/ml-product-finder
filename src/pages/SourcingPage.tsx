@@ -7,9 +7,11 @@ import {
   InputNumber,
   Input,
   Select,
+  Radio,
   NotificationPlugin,
   Loading,
   Dialog,
+  MessagePlugin,
 } from 'tdesign-react';
 import type { PrimaryTableCol } from 'tdesign-react';
 
@@ -33,6 +35,10 @@ interface SourcingRow {
   thumbnail: string;
   /** 卖家自建的上架标题（由「AI生成」或手工填入，绝不复制竞品原标题） */
   mlTitle?: string;
+  /** AI 生成的商品描述（西语/葡语） */
+  mlDescription?: string;
+  /** 1688 货源标题（中文，AI 生成标题/描述时参考用） */
+  sourceTitle?: string;
   /** 1688 货源主图 URL（供应商图，自动配图用；非美客多竞品图） */
   sourceImages?: string[];
   // 测算结果（前端实时算）
@@ -86,16 +92,83 @@ export function SourcingPage() {
   // 税务模式（影响利润/筛选/导出测算）：跨境自发货直邮0% / CBT有RFC 16% / CBT无RFC 36% / 本土店 10.5%
   const [taxMode, setTaxMode] = useState<string>('direct_import');
   // 自动配图设置
-  const [autoImageMode, setAutoImageMode] = useState<string>('watermark'); // watermark=加水印(推荐) / direct=直传源图 / off=关
+  const [autoImageMode, setAutoImageMode] = useState<string>('ai'); // ai=AI修图 / watermark=仅水印 / direct=直传 / off=关
   const [watermarkText, setWatermarkText] = useState('TuTienda');
+  // AI 图片处理是否可用（rembg 是否已安装）
+  const [aiImageAvailable, setAiImageAvailable] = useState<boolean | null>(null);
   // 每张图处理好的美客多公网 URL（按 itemId 存）
   const [mlPictures, setMlPictures] = useState<Record<string, string[]>>({});
   const [batchGenLoading, setBatchGenLoading] = useState(false);
   const [imgLoading, setImgLoading] = useState(false);
+  // 描述生成
+  const [descGenLoading, setDescGenLoading] = useState(false);
+  // 一键全自动
+  const [autoAllLoading, setAutoAllLoading] = useState(false);
+  const [autoAllProgress, setAutoAllProgress] = useState<string>('');
+  // ML OAuth 状态
+  const [oauthStatus, setOauthStatus] = useState<{ hasRefreshToken: boolean; hasConfig: boolean } | null>(null);
   // 一键上架确认
   const [publishOpen, setPublishOpen] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [publishSummary, setPublishSummary] = useState<string>('');
+  // 当前站点 & ML 热搜词
+  const [currentSite, setCurrentSite] = useState<string>('MLM');
+  const [trendKeywords, setTrendKeywords] = useState<string[]>([]);
+  const [trendsLoading, setTrendsLoading] = useState(false);
+
+  // 1688 搜款方案切换
+  const [searchMethod, setSearchMethod] = useState<string>('onebound');
+  const [oneboundKey, setOneboundKey] = useState('');
+  const [oneboundSecret, setOneboundSecret] = useState('');
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [show1688Config, setShow1688Config] = useState(true);
+
+  // 加载已保存的 1688 搜款配置
+  const load1688Config = useCallback(async () => {
+    try {
+      const r = await fetch('/api/ml/sourcing/1688/config');
+      const d = await r.json();
+      if (d.success) {
+        setSearchMethod(d.method || 'onebound');
+        if (d.hasOneboundKey) setOneboundKey('******');
+        if (d.hasOneboundSecret) setOneboundSecret('******');
+      }
+    } catch { /* 用默认值 */ }
+  }, []);
+
+  // 保存 1688 搜款配置
+  const save1688Config = async () => {
+    setSavingConfig(true);
+    try {
+      const body: any = { method: searchMethod };
+      if (searchMethod === 'onebound') {
+        if (oneboundKey && oneboundKey !== '******') body.oneboundKey = oneboundKey;
+        if (oneboundSecret && oneboundSecret !== '******') body.oneboundSecret = oneboundSecret;
+      }
+      const r = await fetch('/api/ml/sourcing/1688/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      if (d.success) {
+        MessagePlugin.success({ content: `已切换到「${getMethodLabel(searchMethod)}」方案` });
+        // 遮罩处理
+        if (body.oneboundKey) setOneboundKey('******');
+        if (body.oneboundSecret) setOneboundSecret('******');
+      }
+    } catch (err: any) {
+      MessagePlugin.error({ content: err?.message || '保存失败' });
+    } finally {
+      setSavingConfig(false);
+    }
+  };
+
+  const methodLabels: Record<string, string> = {
+    onebound: 'OneBound（第三方）',
+    search1688api: 'search1688api（开源）',
+  };
+  const getMethodLabel = (m: string) => methodLabels[m] || m;
 
   // 前端实时利润测算（与后端 computeProfit 同公式）
   const calc = useCallback(
@@ -146,10 +219,40 @@ export function SourcingPage() {
     }
   }, []);
 
+  // 同步当前站点并加载 ML 热搜词
+  const loadTrends = useCallback(async (site: string) => {
+    setTrendsLoading(true);
+    try {
+      const r = await fetch(`/api/ml/trends?site=${encodeURIComponent(site)}&limit=20`);
+      const d = await r.json();
+      if (d.success) setTrendKeywords(d.keywords || []);
+    } catch {
+      setTrendKeywords([]);
+    } finally {
+      setTrendsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     loadRate();
     loadLatest();
-  }, [loadRate, loadLatest]);
+    load1688Config();
+    // 检查 AI 图片处理是否可用
+    fetch('/api/ml/listing/ai-image-status').then(r => r.json()).then(d => {
+      setAiImageAvailable(d.available === true);
+    }).catch(() => setAiImageAvailable(false));
+    // 检查 ML OAuth 状态
+    fetch('/api/ml/oauth/config').then(r => r.json()).then(d => {
+      setOauthStatus({ hasRefreshToken: !!d.hasRefreshToken, hasConfig: !!d.hasConfig });
+    }).catch(() => null);
+  }, [loadRate, loadLatest, load1688Config]);
+
+  // 当 rows 变化时，同步当前站点并刷新热搜词
+  useEffect(() => {
+    const site = rows.length > 0 ? rows[0].site : 'MLM';
+    setCurrentSite(site);
+    loadTrends(site);
+  }, [rows, loadTrends]);
 
   const updateRow = (itemId: string, patch: Partial<SourcingRow>) => {
     setRows((prev) => prev.map((r) => (r.itemId === itemId ? { ...r, ...patch } : r)));
@@ -158,10 +261,20 @@ export function SourcingPage() {
   const handleAutoSearch = async (row: SourcingRow) => {
     setSearching(row.itemId);
     try {
+      const body: any = {
+        method: searchMethod,
+        imageUrl: row.thumbnail || '',
+        title: row.title,
+      };
+      // OneBound：传页面配置的密钥（以页面填写的为准）
+      if (searchMethod === 'onebound') {
+        if (oneboundKey && oneboundKey !== '******') body.oneboundKey = oneboundKey;
+        if (oneboundSecret && oneboundSecret !== '******') body.oneboundSecret = oneboundSecret;
+      }
       const r = await fetch('/api/ml/sourcing/1688/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageUrl: row.thumbnail || '', title: row.title }),
+        body: JSON.stringify(body),
       });
       const d = await r.json();
       if (d.success && d.available && d.items && d.items.length) {
@@ -171,13 +284,14 @@ export function SourcingPage() {
           sourceLink: top.url || '',
           supplier: top.supplier || '',
           sourceImages: top.imageUrl ? [top.imageUrl] : [],
+          sourceTitle: top.title || '',
         });
-        NotificationPlugin.success({ title: '图搜完成', content: `找到 ${d.items.length} 条货源，已填入首条（${top.priceCNY} CNY）` });
+        NotificationPlugin.success({ title: `${getMethodLabel(searchMethod)} 搜款完成`, content: `找到 ${d.items.length} 条货源，已填入首条（${top.priceCNY} CNY）` });
       } else {
-        NotificationPlugin.warning({ title: '自动图搜不可用', content: d.message || '未配置 1688 密钥，请改用手工粘贴模式' });
+        NotificationPlugin.warning({ title: `${getMethodLabel(searchMethod)} 搜款不可用`, content: d.message || '未配置密钥或搜索无结果' });
       }
     } catch (err: any) {
-      NotificationPlugin.error({ title: '图搜失败', content: err?.message || '未知错误' });
+      NotificationPlugin.error({ title: '搜款失败', content: err?.message || '未知错误' });
     } finally {
       setSearching(null);
     }
@@ -193,7 +307,7 @@ export function SourcingPage() {
       const r = await fetch('/api/ml/listing/generate-title', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ competitorTitle: row.title, site: row.site, brand: row.brand }),
+        body: JSON.stringify({ competitorTitle: row.title, site: row.site, brand: row.brand, trendKeywords }),
       });
       const d = await r.json();
       if (d.success && d.titles?.length) {
@@ -238,6 +352,7 @@ export function SourcingPage() {
           sourceLink: top.url || '',
           supplier: top.supplier || '',
           sourceImages: top.imageUrl ? [top.imageUrl] : [],
+          sourceTitle: top.title || '',
         });
         NotificationPlugin.success({ title: '1688 找同款完成', content: `找到 ${d.items.length} 条，已回填首条（${top.priceCNY} CNY）` });
         setKwOpen(false);
@@ -334,7 +449,7 @@ export function SourcingPage() {
       const d = await r.json();
       if (d.success) {
         window.open(`/api/ml/download/${encodeURIComponent(d.fileName)}`, '_blank');
-        NotificationPlugin.success({ title: '妙手素材包已导出', content: `${d.fileName}（导出 ${d.exported} 条）` });
+        NotificationPlugin.success({ title: '利润分析表已导出', content: `${d.fileName}（导出 ${d.exported} 条）` });
       } else {
         NotificationPlugin.error({ title: '导出失败', content: d.message });
       }
@@ -380,7 +495,7 @@ export function SourcingPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          rows: rows.map((x) => ({ competitorTitle: x.title, site: x.site, brand: x.brand })),
+          rows: rows.map((x) => ({ competitorTitle: x.title, site: x.site, brand: x.brand, trendKeywords })),
         }),
       });
       const d = await r.json();
@@ -402,12 +517,17 @@ export function SourcingPage() {
     }
   };
 
-  // 批量配图（合规）：1688 货源图 → 可选水印 → 上传美客多，按 itemId 存公网 URL
+  // 批量配图（合规）：1688 货源图 → AI修图/水印 → 上传美客多，按 itemId 存公网 URL
   const handleBatchImages = async () => {
     const targets = rows.filter((r) => (r.sourceImages || []).length > 0);
     if (targets.length === 0) {
       NotificationPlugin.warning({ title: '无可配图商品', content: '请先对商品做 1688 图搜拿到货源图' });
       return;
+    }
+    // AI 模式但 rembg 不可用时自动降级到水印
+    const effectiveMode = autoImageMode === 'ai' && aiImageAvailable === false ? 'watermark' : autoImageMode;
+    if (autoImageMode === 'ai' && aiImageAvailable === false) {
+      NotificationPlugin.info({ title: 'AI修图不可用', content: 'rembg 未安装，自动降级为水印模式。可用 pip install rembg 安装' });
     }
     setImgLoading(true);
     try {
@@ -424,7 +544,7 @@ export function SourcingPage() {
               body: JSON.stringify({
                 site: row.site,
                 sourceImages: row.sourceImages,
-                watermark: autoImageMode !== 'direct',
+                mode: effectiveMode,
                 watermarkText,
                 max: 6,
               }),
@@ -439,13 +559,181 @@ export function SourcingPage() {
       await Promise.all(Array.from({ length: pool }, () => worker()));
       setMlPictures(newPics);
       const done = Object.values(newPics).filter((p) => p.length > 0).length;
-      NotificationPlugin.success({ title: '批量配图完成', content: `${done}/${targets.length} 个商品已生成美客多图` });
+      NotificationPlugin.success({ title: '批量配图完成', content: `${done}/${targets.length} 个商品已生成美客多图（模式: ${effectiveMode === 'ai' ? 'AI修图' : effectiveMode === 'watermark' ? '水印' : '直传'}）` });
     } finally {
       setImgLoading(false);
     }
   };
 
-  // 一键上架（用「我的标题」+「已配图」构建草稿并批量发布，合规预检在前端/后端双重把关）
+  // 批量生成描述：对已 有标题 的行调 AI 生成描述
+  const handleBatchDescriptions = async () => {
+    const targets = rows.filter((r) => (r.mlTitle || '').trim().length >= 5);
+    if (targets.length === 0) {
+      NotificationPlugin.warning({ title: '无可生成描述的商品', content: '请先生成标题' });
+      return;
+    }
+    setDescGenLoading(true);
+    try {
+      const r = await fetch('/api/ml/listing/generate-description/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rows: targets.map((x) => ({
+            title: x.mlTitle,
+            site: x.site,
+            sourceTitle: x.sourceTitle,
+            sourcePriceCNY: x.sourcePriceCNY,
+            categoryName: x.categoryName,
+            brand: x.brand,
+            trendKeywords,
+          })),
+        }),
+      });
+      const d = await r.json();
+      if (d.success && Array.isArray(d.descriptions)) {
+        targets.forEach((x, i) => {
+          if (d.descriptions[i]) updateRow(x.itemId, { mlDescription: d.descriptions[i] });
+        });
+        const done = d.descriptions.filter(Boolean).length;
+        NotificationPlugin.success({ title: '批量描述已生成', content: `已为 ${done} 条商品生成 AI 描述` });
+      } else {
+        NotificationPlugin.warning({ title: '生成失败', content: d.message || '未生成' });
+      }
+    } catch (err: any) {
+      NotificationPlugin.error({ title: '生成失败', content: err?.message || '未知错误' });
+    } finally {
+      setDescGenLoading(false);
+    }
+  };
+
+  // 一键全自动：对所有有货源图的商品，自动执行 标题→描述→配图
+  const handleAutoAll = async () => {
+    const targets = rows.filter((r) => (r.sourceImages || []).length > 0 || (r.sourcePriceCNY || 0) > 0);
+    if (targets.length === 0) {
+      NotificationPlugin.warning({ title: '无符合条件的商品', content: '请先对商品做 1688 搜款' });
+      return;
+    }
+    setAutoAllLoading(true);
+    setAutoAllProgress('正在生成标题...');
+    try {
+      // 1. 批量生成标题（对没有 mlTitle 的行）
+      const needTitle = targets.filter((r) => !r.mlTitle || r.mlTitle.trim().length < 5);
+      if (needTitle.length > 0) {
+        const r = await fetch('/api/ml/listing/generate-title/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            rows: needTitle.map((x) => ({
+              competitorTitle: x.title,
+              site: x.site,
+              sourceTitle: x.sourceTitle,
+              sourcePriceCNY: x.sourcePriceCNY,
+              brand: x.brand,
+              trendKeywords,
+            })),
+          }),
+        });
+        const d = await r.json();
+        if (d.success && Array.isArray(d.titles)) {
+          needTitle.forEach((x, i) => {
+            if (d.titles[i]) updateRow(x.itemId, { mlTitle: d.titles[i] });
+          });
+        }
+      }
+      setAutoAllProgress('正在生成描述...');
+
+      // 2. 批量生成描述（对有标题但没描述的行）
+      const needDesc = targets.filter((r) => r.mlTitle && (!r.mlDescription || r.mlDescription.trim().length < 10));
+      if (needDesc.length > 0) {
+        const r = await fetch('/api/ml/listing/generate-description/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            rows: needDesc.map((x) => ({
+              title: x.mlTitle,
+              site: x.site,
+              sourceTitle: x.sourceTitle,
+              sourcePriceCNY: x.sourcePriceCNY,
+              categoryName: x.categoryName,
+              brand: x.brand,
+              trendKeywords,
+            })),
+          }),
+        });
+        const d = await r.json();
+        if (d.success && Array.isArray(d.descriptions)) {
+          needDesc.forEach((x, i) => {
+            if (d.descriptions[i]) updateRow(x.itemId, { mlDescription: d.descriptions[i] });
+          });
+        }
+      }
+      setAutoAllProgress('正在处理图片...');
+
+      // 3. 批量配图（对有货源图但没配图的行）
+      const effectiveMode = autoImageMode === 'ai' && aiImageAvailable === false ? 'watermark' : autoImageMode;
+      const needImg = targets.filter((r) => (r.sourceImages || []).length > 0 && !(mlPictures[r.itemId]?.length > 0));
+      if (needImg.length > 0) {
+        const newPics: Record<string, string[]> = { ...mlPictures };
+        for (const row of needImg) {
+          try {
+            const r = await fetch('/api/ml/listing/prepare-images', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                site: row.site,
+                sourceImages: row.sourceImages,
+                mode: effectiveMode,
+                watermarkText,
+                max: 6,
+              }),
+            });
+            const d = await r.json();
+            newPics[row.itemId] = d.success && d.pictures?.length ? d.pictures : [];
+          } catch {
+            newPics[row.itemId] = [];
+          }
+        }
+        setMlPictures(newPics);
+      }
+
+      setAutoAllProgress('');
+      const ready = targets.filter((r) =>
+        (r.mlTitle || '').trim().length >= 5 &&
+        (r.mlDescription || '').trim().length >= 10 &&
+        (mlPictures[r.itemId]?.length || 0) > 0
+      ).length;
+      NotificationPlugin.success({
+        title: '一键全自动完成',
+        content: `共处理 ${targets.length} 个商品，${ready} 个已就绪可上架（标题+描述+图片齐全）`,
+      });
+    } catch (err: any) {
+      NotificationPlugin.error({ title: '全自动处理失败', content: err?.message || '未知错误' });
+    } finally {
+      setAutoAllLoading(false);
+      setAutoAllProgress('');
+    }
+  };
+
+  // ML OAuth 授权（本项目为 CBT 跨境卖家，使用 global-selling 授权入口）
+  const handleOauthAuthorize = async () => {
+    try {
+      const r = await fetch('/api/ml/oauth/auth-url?pkce=true&site=cbt');
+      const d = await r.json();
+      if (d.url) {
+        window.open(d.url, '_blank');
+        NotificationPlugin.info({
+          title: '授权窗口已打开（CBT 跨境卖家）',
+          content: '请在弹出的 Mercado Libre Global Selling 页面完成登录授权，授权后回调会自动保存 token。如回调失败，可手动复制授权码到「手动交换」',
+        });
+      } else {
+        NotificationPlugin.error({ title: '获取授权链接失败', content: d.error || '请先在设置页配置 App ID 和 Secret Key' });
+      }
+    } catch (err: any) {
+      NotificationPlugin.error({ title: '授权失败', content: err?.message || '未知错误' });
+    }
+  };
+
+  // 一键上架（用「我的标题」+「描述」+「已配图」构建草稿并批量发布，合规预检在前端/后端双重把关）
   const handlePublishConfirm = async () => {
     setPublishing(true);
     setPublishSummary('');
@@ -458,7 +746,9 @@ export function SourcingPage() {
           category_id: r.categoryId || '',
           price: r.priceUSD,
           available_quantity: 10,
-          description: `【${r.mlTitle}】 优选货源，质量保障，欢迎选购。`,
+          description: (r.mlDescription && r.mlDescription.trim().length >= 10)
+            ? r.mlDescription
+            : `【${r.mlTitle}】 优选货源，质量保障，欢迎选购。`,
           pictureUrls: mlPictures[r.itemId],
           brand: r.brand && r.brand.toLowerCase() !== 'generic' ? r.brand : 'Generic',
           weight: r.weight || 0.5,
@@ -639,9 +929,54 @@ export function SourcingPage() {
       ),
     },
     {
+      colKey: 'mlDescription',
+      title: '商品描述(上架用)',
+      width: 280,
+      cell: ({ row }) => (
+        <div className="flex items-start gap-1">
+          <Input
+            value={row.mlDescription || ''}
+            placeholder="手工填 或 AI生成"
+            onChange={(v) => updateRow(row.itemId, { mlDescription: v as string })}
+          />
+          <Button
+            size="small"
+            theme="primary"
+            variant="outline"
+            loading={descGenLoading}
+            disabled={!(row.mlTitle && row.mlTitle.trim().length >= 5)}
+            onClick={async () => {
+              const r = await fetch('/api/ml/listing/generate-description', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  title: row.mlTitle,
+                  site: row.site,
+                  sourceTitle: row.sourceTitle,
+                  sourcePriceCNY: row.sourcePriceCNY,
+                  categoryName: row.categoryName,
+                  brand: row.brand,
+                  trendKeywords,
+                }),
+              });
+              const d = await r.json();
+              if (d.success && d.description) {
+                updateRow(row.itemId, { mlDescription: d.description });
+                MessagePlugin.success({ content: '描述已生成' });
+              } else {
+                MessagePlugin.warning({ content: d.message || '生成失败' });
+              }
+            }}
+          >
+            AI生成
+          </Button>
+        </div>
+      ),
+    },
+    {
       colKey: 'op',
       title: '操作',
-      width: 110,
+      width: 130,
       cell: ({ row }) => (
         <div className="flex flex-col gap-1">
           <Button
@@ -650,8 +985,9 @@ export function SourcingPage() {
             variant="outline"
             loading={searching === row.itemId}
             onClick={() => handleAutoSearch(row)}
+            title={getMethodLabel(searchMethod)}
           >
-            API图搜
+            {getMethodLabel(searchMethod)}
           </Button>
           <Button size="small" theme="default" variant="outline" onClick={() => openKwSearch(row)}>
             1688找同款
@@ -699,7 +1035,7 @@ export function SourcingPage() {
               导出含利润清单
             </Button>
             <Button theme="default" variant="outline" onClick={handleErpExport} loading={erpExporting}>
-              妙手素材包
+              利润分析表
             </Button>
             <Button theme="primary" variant="outline" onClick={handleBatchGenTitles} loading={batchGenLoading}>
               一键生成标题
@@ -707,11 +1043,51 @@ export function SourcingPage() {
             <Button theme="default" variant="outline" onClick={handleBatchImages} loading={imgLoading}>
               批量配图
             </Button>
+            <Button theme="warning" onClick={handleAutoAll} loading={autoAllLoading}>
+              {autoAllLoading && autoAllProgress ? autoAllProgress : '一键全自动(标题+描述+配图)'}
+            </Button>
             <Button theme="success" onClick={() => setPublishOpen(true)}>
               一键上架
             </Button>
           </div>
+
+        {/* 店铺授权提示（一键上架需要 write token） */}
+        {oauthStatus && !oauthStatus.hasRefreshToken && (
+          <div className="p-3 rounded flex items-center justify-between gap-3" style={{ backgroundColor: 'var(--td-bg-color-secondarycontainer)', border: '1px solid #E37318' }}>
+            <div className="text-sm">
+              <b style={{ color: '#E37318' }}>⚠️ 尚未授权美客多店铺</b>
+              <span className="ml-2" style={{ color: 'var(--td-text-color-secondary)' }}>
+                「一键上架」需卖家 write token。点击右侧按钮，在弹出的美客多页面登录授权即可（授权一次长期有效）。
+              </span>
+            </div>
+            <Button theme="warning" onClick={handleOauthAuthorize}>
+              授权店铺
+            </Button>
+          </div>
+        )}
+        {oauthStatus && oauthStatus.hasRefreshToken && (
+          <div className="p-2 rounded text-sm" style={{ backgroundColor: 'var(--td-bg-color-secondarycontainer)' }}>
+            ✅ 店铺已授权，可直接一键上架。
+          </div>
+        )}
         </div>
+
+        <Card title={`ML 热搜词 · ${currentSite}`} bordered>
+          <div className="flex flex-wrap gap-2 items-center min-h-[32px]">
+            {trendsLoading ? (
+              <span className="text-sm" style={{ color: 'var(--td-text-color-placeholder)' }}>加载中...</span>
+            ) : trendKeywords.length === 0 ? (
+              <span className="text-sm" style={{ color: 'var(--td-text-color-placeholder)' }}>暂无热搜词（生成标题/描述时会自动重试）</span>
+            ) : (
+              trendKeywords.map((k) => (
+                <Tag key={k} theme="primary" variant="light">{k}</Tag>
+              ))
+            )}
+          </div>
+          <p className="text-xs mt-2" style={{ color: 'var(--td-text-color-secondary)' }}>
+            自动生成标题/描述时会参考这些热搜词；若与产品无关则会被 AI 忽略，避免堆砌。
+          </p>
+        </Card>
 
         <Card title="测算参数" bordered>
           <div className="flex flex-wrap gap-6 items-end">
@@ -769,8 +1145,9 @@ export function SourcingPage() {
             </label>
             <label className="flex flex-col gap-1 text-sm">
               <span>自动配图方式</span>
-              <Select value={autoImageMode} onChange={(v) => setAutoImageMode(v as string)} style={{ width: 220 }}>
-                <Select.Option value="watermark">1688源图 + 水印(推荐)</Select.Option>
+              <Select value={autoImageMode} onChange={(v) => setAutoImageMode(v as string)} style={{ width: 260 }}>
+                <Select.Option value="ai">AI修图(去背景+白底+增强+水印){aiImageAvailable === false ? '（未安装）' : ''}</Select.Option>
+                <Select.Option value="watermark">1688源图 + 水印(推荐兜底)</Select.Option>
                 <Select.Option value="direct">1688源图直传</Select.Option>
                 <Select.Option value="off">关闭自动配图</Select.Option>
               </Select>
@@ -783,6 +1160,76 @@ export function SourcingPage() {
           <p className="text-xs mt-2" style={{ color: 'var(--td-text-color-placeholder)' }}>
             配图只用 1688 货源供应商图（你是买家，供应商授权给分销商用），自动加水印做成你自己的图；绝不使用从美客多抓到的竞品图。
           </p>
+        </Card>
+
+        {/* 1688 搜款方案切换 */}
+        <Card
+          title={
+            <div className="flex items-center gap-2 cursor-pointer select-none" onClick={() => setShow1688Config(!show1688Config)}>
+              <span>🔍 1688 搜款方案（{getMethodLabel(searchMethod)}）</span>
+              <span style={{ fontSize: 12, color: 'var(--td-text-color-placeholder)' }}>点击{show1688Config ? '收起' : '展开'}</span>
+            </div>
+          }
+          bordered
+        >
+          {show1688Config && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap gap-4 items-end">
+                <label className="flex flex-col gap-1 text-sm">
+                  <span>搜款方案</span>
+                  <Radio.Group value={searchMethod} onChange={(v) => setSearchMethod(v as string)}>
+                    <Radio.Button value="onebound">OneBound（第三方，免费 500次/天）</Radio.Button>
+                    <Radio.Button value="search1688api">search1688api（开源，完全免费）</Radio.Button>
+                  </Radio.Group>
+                </label>
+              </div>
+
+              {searchMethod === 'onebound' && (
+                <div className="flex flex-wrap gap-4 items-end p-3 rounded" style={{ backgroundColor: 'var(--td-bg-color-secondarycontainer)' }}>
+                  <label className="flex flex-col gap-1 text-sm">
+                    <span>OneBound Key</span>
+                    <Input
+                      value={oneboundKey}
+                      placeholder="注册即得 → console.open.onebound.cn"
+                      onChange={(v) => setOneboundKey(v as string)}
+                      style={{ width: 260 }}
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 text-sm">
+                    <span>OneBound Secret</span>
+                    <Input
+                      value={oneboundSecret}
+                      type="password"
+                      placeholder="注册即得 → console.open.onebound.cn"
+                      onChange={(v) => setOneboundSecret(v as string)}
+                      style={{ width: 260 }}
+                    />
+                  </label>
+                  <Button theme="primary" loading={savingConfig} onClick={save1688Config}>
+                    保存并切换
+                  </Button>
+                </div>
+              )}
+
+              {searchMethod === 'search1688api' && (
+                <div className="p-3 rounded" style={{ backgroundColor: 'var(--td-bg-color-secondarycontainer)' }}>
+                  <p className="text-sm" style={{ color: 'var(--td-text-color-secondary)' }}>
+                    search1688api 是 MIT 开源 Python 库，<b>无需任何密钥</b>，直接调用 1688 网页端搜图接口。
+                    需要本机安装 Python 3.9+ 并运行 <code>pip install search1688api</code>。
+                    搜索速度较慢（约 5-10 秒），但完全免费。
+                  </p>
+                  <Button theme="primary" loading={savingConfig} onClick={save1688Config} className="mt-2">
+                    确认使用此方案
+                  </Button>
+                </div>
+              )}
+
+              <div className="flex flex-wrap gap-3 text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>
+                <span>A: OneBound — 注册即用，500次/天免费，有图搜API</span>
+                <span>B: search1688api — 开源免费，需 Python，无次数限制</span>
+              </div>
+            </div>
+          )}
         </Card>
 
         <Card title="爆款 → 货源 → 利润" bordered>

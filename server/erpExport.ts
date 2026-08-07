@@ -1,6 +1,6 @@
 /**
- * 妙手 ERP 素材包导出（参考文档《官方API抓取与妙手导入上架方案》设计）
- * 生成妙手可导入的 Excel：货号/标题/币种/货源链接/采购价/售价/净收益/颜色/尺码/
+ * 选品利润分析导出：1688货源匹配后，生成含利润测算的 Excel 明细表。
+ * 字段：货号/标题/币种/货源链接/采购价/售价/净收益/颜色/尺码/
  * 库存/类目ID/站点/物流方式/描述/图片URL。
  * 注意合规：图片 URL 列仅放你自有/已授权的图；缩略图列单独标注「参考图（禁止直接上架用）」。
  */
@@ -51,11 +51,11 @@ export async function writeErpExport(
   );
 
   const workbook = new ExcelJS.Workbook();
-  workbook.creator = 'ML Product Finder · 妙手素材包';
+  workbook.creator = 'ML Product Finder · 选品利润分析';
   workbook.created = new Date();
   const dateStr = new Date().toISOString().slice(0, 10);
-  const fileName = `妙手素材包_${dateStr}.xlsx`;
-  const sheet = workbook.addWorksheet('妙手导入', { properties: { tabColor: '3366FF' } });
+  const fileName = `选品利润分析_${dateStr}.xlsx`;
+  const sheet = workbook.addWorksheet('利润分析', { properties: { tabColor: '3366FF' } });
 
   sheet.columns = [
     { header: '货号', key: 'sku', width: 18 },

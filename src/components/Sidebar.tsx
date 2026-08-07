@@ -1,6 +1,6 @@
 import { Button, Tooltip } from 'tdesign-react';
-import { AddIcon, DeleteIcon, SettingIcon } from 'tdesign-icons-react';
-import { Bot, ShoppingBag } from 'lucide-react';
+import { AddIcon, DeleteIcon, SettingIcon, NotificationIcon } from 'tdesign-icons-react';
+import { Bot, ShoppingBag, Flame } from 'lucide-react';
 import { APP_CONFIG } from '../config';
 import { Session, Agent } from '../types';
 import { ICON_MAP } from '../utils/iconMap';
@@ -12,6 +12,10 @@ interface SidebarProps {
   isProductsPage?: boolean;
   isSourcingPage?: boolean;
   isListingPage?: boolean;
+  isStoresPage?: boolean;
+  isOrdersPage?: boolean;
+  isNotificationsPage?: boolean;
+  isTrendsPage?: boolean;
   sidebarOpen: boolean;
   agents: Agent[];
   getAgent: (id: string) => Agent | undefined;
@@ -22,6 +26,10 @@ interface SidebarProps {
   onOpenProducts: () => void;
   onOpenSourcing: () => void;
   onOpenListing: () => void;
+  onOpenStores?: () => void;
+  onOpenOrders?: () => void;
+  onOpenNotifications?: () => void;
+  onOpenTrends?: () => void;
 }
 
 export function Sidebar({
@@ -31,6 +39,10 @@ export function Sidebar({
   isProductsPage,
   isSourcingPage,
   isListingPage,
+  isStoresPage,
+  isOrdersPage,
+  isNotificationsPage,
+  isTrendsPage,
   sidebarOpen,
   agents,
   getAgent,
@@ -41,6 +53,10 @@ export function Sidebar({
   onOpenProducts,
   onOpenSourcing,
   onOpenListing,
+  onOpenStores,
+  onOpenOrders,
+  onOpenNotifications,
+  onOpenTrends,
 }: SidebarProps) {
   return (
     <aside 
@@ -104,6 +120,42 @@ export function Sidebar({
           theme={isListingPage ? 'primary' : 'default'}
         >
           合规上架
+        </Button>
+        <Button 
+          icon={<ShoppingBag size={16} />}
+          onClick={onOpenStores}
+          block
+          variant={isStoresPage ? 'outline' : 'text'}
+          theme={isStoresPage ? 'primary' : 'default'}
+        >
+          店铺管理
+        </Button>
+        <Button 
+          icon={<ShoppingBag size={16} />}
+          onClick={onOpenOrders}
+          block
+          variant={isOrdersPage ? 'outline' : 'text'}
+          theme={isOrdersPage ? 'primary' : 'default'}
+        >
+          订单管理
+        </Button>
+        <Button 
+          icon={<NotificationIcon />}
+          onClick={onOpenNotifications}
+          block
+          variant={isNotificationsPage ? 'outline' : 'text'}
+          theme={isNotificationsPage ? 'primary' : 'default'}
+        >
+          通知设置
+        </Button>
+        <Button 
+          icon={<Flame size={16} />}
+          onClick={onOpenTrends}
+          block
+          variant={isTrendsPage ? 'outline' : 'text'}
+          theme={isTrendsPage ? 'primary' : 'default'}
+        >
+          热搜词
         </Button>
       </div>
 

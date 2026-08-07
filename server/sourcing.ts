@@ -273,7 +273,35 @@ export async function writeEnrichedExport(
   return { fileName, filePath };
 }
 
-// ============ 1688 图搜 / 货源匹配（best-effort，需开放平台密钥）============
+// ============ 1688 搜款配置持久化 ============
+export interface Ali1688Config {
+  /** 当前选用的搜款方案 */
+  method: 'onebound' | 'search1688api';
+  /** OneBound API 密钥 */
+  oneboundKey?: string;
+  oneboundSecret?: string;
+}
+
+function configFilePath(): string {
+  const cfgDir = path.join(__dirname, '..', 'data');
+  if (!fs.existsSync(cfgDir)) fs.mkdirSync(cfgDir, { recursive: true });
+  return path.join(cfgDir, 'ml-1688-config.json');
+}
+
+export function loadAli1688Config(): Ali1688Config {
+  try {
+    const raw = fs.readFileSync(configFilePath(), 'utf-8');
+    return JSON.parse(raw);
+  } catch {
+    return { method: 'onebound' };
+  }
+}
+
+export function saveAli1688Config(cfg: Ali1688Config): void {
+  fs.writeFileSync(configFilePath(), JSON.stringify(cfg, null, 2), 'utf-8');
+}
+
+// ============ 1688 图搜 / 货源匹配（best-effort）============
 export interface Ali1688SearchResult {
   available: boolean;
   message: string;
@@ -289,84 +317,219 @@ export interface Ali1688SearchResult {
   }>;
 }
 
+// ======== 方案 A：OneBound 第三方 API ========
 /**
- * 1688 开放平台「以图搜货 / 关键词搜货」。
- * 需要环境变量：ML_1688_APPKEY、ML_1688_SECRET、ML_1688_TOKEN。
- * 未配置时返回 available=false，前端降级为「人工粘贴货源价」模式。
- * 注：1688 签名与具体 API 名以开放平台文档为准；此处为标准 param2 签名实现，
- * 若返回错误，请按平台最新文档微调 apiName / 字段。
+ * OneBound 聚合 API（1688.item_search_img / 1688.item_search）
+ * 注册即用，500次/天免费，无需企业资质。
+ * 配置：ML_ONEBOUND_KEY + ML_ONEBOUND_SECRET（或存 ml-1688-config.json）
  */
-export async function search1688(params: {
+async function search1688OneBound(params: {
   imageUrl?: string;
   title?: string;
+  key?: string;
+  secret?: string;
 }): Promise<Ali1688SearchResult> {
-  const appKey = process.env.ML_1688_APPKEY;
-  const secret = process.env.ML_1688_SECRET;
-  const token = process.env.ML_1688_TOKEN;
-  if (!appKey || !secret || !token) {
+  const key = params.key || process.env.ML_ONEBOUND_KEY;
+  const secret = params.secret || process.env.ML_ONEBOUND_SECRET;
+  if (!key || !secret) {
     return {
       available: false,
-      message: '未配置 1688 开放平台密钥（ML_1688_APPKEY / ML_1688_SECRET / ML_1688_TOKEN）。可在「货源与利润」页用人工粘贴模式，或在环境变量配置后启用自动图搜。',
+      message: '未配置 OneBound 密钥（Key/Secret）。请在「货源与利润」页填写 OneBound 配置，或设置环境变量 ML_ONEBOUND_KEY / ML_ONEBOUND_SECRET。',
     };
   }
   try {
-    // 选择 API：有图走图搜，否则走关键词搜索
-    const apiName = params.imageUrl ? 'alibaba.product.image.search' : 'alibaba.product.search';
-    const apiGroup = 'com.alibaba.product';
-    const protocol = 'param2';
-    const version = '1';
-
-    const sysParams: Record<string, string> = {
-      access_token: token,
-      _aop_timestamp: String(Math.floor(Date.now() / 1000)),
-    };
-    const apiParams: Record<string, string> = {};
-    if (params.imageUrl) apiParams.imageUrl = params.imageUrl;
-    else apiParams.q = params.title || '';
-    apiParams.pageSize = '20';
-
-    // 1688 param2 签名：secret + 按字典序拼接 所有参数 + secret，MD5
-    const allParams: Record<string, string> = {
-      ...sysParams,
-      ...apiParams,
-    };
-    const sortedKeys = Object.keys(allParams).sort();
-    let signStr = secret;
-    for (const k of sortedKeys) signStr += k + allParams[k];
-    signStr += secret;
-    const signature = crypto.createHash('md5').update(signStr).digest('hex').toUpperCase();
-
-    const base = `https://gw.open.1688.com/openapi/${protocol}/${version}/${apiGroup}/${apiName}/${appKey}`;
-    const qs = new URLSearchParams();
-    for (const [k, v] of Object.entries(allParams)) qs.append(k, v);
-    qs.append('_aop_signature', signature);
-    const url = `${base}?${qs.toString()}`;
-
-    const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-    const text = await resp.text();
-    let json: any;
-    try {
-      json = JSON.parse(text);
-    } catch {
-      json = { error_response: { sub_msg: text.slice(0, 200) } };
+    const apiName = params.imageUrl ? '1688/item_search_img' : '1688/item_search';
+    const qs = new URLSearchParams({
+      key,
+      secret,
+      page: '1',
+      sort: 'sales_desc',
+    });
+    if (params.imageUrl) {
+      qs.set('imgid', params.imageUrl);
+    } else {
+      qs.set('q', params.title || '');
     }
-    if (json.error_response) {
-      return { available: true, message: `1688 返回错误：${json.error_response.sub_msg || json.error_response.msg || '未知错误'}` };
+    const url = `https://api-gw.onebound.cn/${apiName}?${qs.toString()}`;
+    const resp = await fetch(url, {
+      headers: { 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(15000),
+    });
+    const json = await resp.json();
+    if (json.error || json.code) {
+      return { available: true, message: `OneBound 错误：${json.error || json.msg || json.error_msg || '未知错误'}` };
     }
-    // 结果字段因 API 而异，做宽松解析
-    const resultObj = json.result || json.alibaba_product_search_response?.result || json;
-    const list = resultObj?.productList || resultObj?.list || resultObj?.resultList || [];
-    const items = (Array.isArray(list) ? list : []).map((it: any) => ({
-      title: it.subject || it.title || it.name || '',
-      priceCNY: Number(it.priceRange?.begin || it.price?.begin || it.minPrice || it.priceCNY || 0),
-      moq: Number(it.minOrderQuantity || it.moq || 1),
-      supplier: it.supplierName || it.companyName || '',
-      supplierLevel: it.supplierLevel || it.companyLevel || '',
-      url: it.detailUrl || it.url || it.productUrl || '',
-      imageUrl: it.imgUrl || it.image || it.pictureUrl || it.productImgUrl || it.imageUrl || '',
+    const list = json.items?.item || json.items || json.data || [];
+    const items = (Array.isArray(list) ? list : []).slice(0, 20).map((it: any) => ({
+      title: it.title || it.name || '',
+      priceCNY: Number(it.price || 0),
+      moq: Number(it.moq || it.min_quantity || 1),
+      supplier: it.seller_nick || it.supplier || '',
+      supplierLevel: it.seller_level || '',
+      url: it.detail_url || it.url || '',
+      imageUrl: it.pic_url || it.image || it.img || '',
     }));
-    return { available: true, message: `找到 ${items.length} 条货源`, items };
+    return { available: true, message: `OneBound 找到 ${items.length} 条货源`, items };
   } catch (err: any) {
-    return { available: true, message: `1688 调用异常：${err?.message || '未知错误'}（请检查密钥与 API 名）` };
+    return { available: true, message: `OneBound 调用异常：${err?.message || '未知错误'}` };
+  }
+}
+
+// ======== 方案 B：search1688api 开源 Python 库 ========
+/**
+ * 调用本机 Python 运行 search1688api，支持图搜/关键词搜。
+ * 完全免费，无需任何密钥，MIT 开源。
+ * 需要：pip install search1688api
+ */
+async function search1688ByPython(params: {
+  imageUrl?: string;
+  title?: string;
+}): Promise<Ali1688SearchResult> {
+  // 先检查 Python 环境
+  try {
+    const { execSync } = await import('child_process');
+    let pythonCmd = 'python3';
+    try { execSync('python3 --version', { stdio: 'pipe' }); } catch {
+      try { execSync('python --version', { stdio: 'pipe' }); pythonCmd = 'python'; } catch {
+        return { available: false, message: '本机未安装 Python。请安装 Python 3.9+ 后重试。' };
+      }
+    }
+    // 检查 search1688api 是否安装
+    try {
+      execSync(`${pythonCmd} -c "import search1688api"`, { stdio: 'pipe' });
+    } catch {
+      return { available: false, message: 'search1688api 库未安装。请运行：pip install search1688api' };
+    }
+
+    // 构建 Python 脚本
+    const tmpDir = path.join(__dirname, '..', 'data', 'tmp');
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+
+    const scriptPath = path.join(tmpDir, '_1688_search.py');
+    const outPath = path.join(tmpDir, '_1688_result.json');
+
+    let pyCode: string;
+    if (params.imageUrl) {
+      // 图搜：先下载图片到临时文件
+      const imgPath = path.join(tmpDir, '_search_img.jpg');
+      try {
+        const imgResp = await fetch(params.imageUrl, { signal: AbortSignal.timeout(10000) });
+        if (imgResp.ok) {
+          const buf = Buffer.from(await imgResp.arrayBuffer());
+          fs.writeFileSync(imgPath, buf);
+        } else {
+          return { available: false, message: '商品图片下载失败，请检查图片链接是否有效' };
+        }
+      } catch {
+        return { available: false, message: '商品图片下载超时' };
+      }
+      pyCode = `
+import json, sys
+try:
+    from search1688api import Sync1688Session
+    with Sync1688Session() as s:
+        products = s.search_by_image(r"${imgPath.replace(/\\/g, '\\\\')}")
+    items = []
+    for p in products[:20]:
+        items.append({
+            "title": getattr(p, "title", "") or "",
+            "priceCNY": float(getattr(p, "price", 0) or 0),
+            "moq": int(getattr(p, "moq", 1) or 1),
+            "supplier": getattr(p, "supplier", "") or "",
+            "url": getattr(p, "url", "") or "",
+            "imageUrl": getattr(p, "image_url", "") or ""
+        })
+    with open(r"${outPath.replace(/\\/g, '\\\\')}", "w", encoding="utf-8") as f:
+        json.dump({"success": True, "items": items, "count": len(items)}, f, ensure_ascii=False)
+except Exception as e:
+    with open(r"${outPath.replace(/\\/g, '\\\\')}", "w", encoding="utf-8") as f:
+        json.dump({"success": False, "error": str(e)}, f, ensure_ascii=False)
+`;
+    } else {
+      const keyword = (params.title || '').replace(/"/g, '\\"');
+      pyCode = `
+import json, sys
+try:
+    from search1688api import Sync1688Session
+    with Sync1688Session() as s:
+        products = s.search_by_keyword("${keyword}")
+    items = []
+    for p in products[:20]:
+        items.append({
+            "title": getattr(p, "title", "") or "",
+            "priceCNY": float(getattr(p, "price", 0) or 0),
+            "moq": int(getattr(p, "moq", 1) or 1),
+            "supplier": getattr(p, "supplier", "") or "",
+            "url": getattr(p, "url", "") or "",
+            "imageUrl": getattr(p, "image_url", "") or ""
+        })
+    with open(r"${outPath.replace(/\\/g, '\\\\')}", "w", encoding="utf-8") as f:
+        json.dump({"success": True, "items": items, "count": len(items)}, f, ensure_ascii=False)
+except Exception as e:
+    with open(r"${outPath.replace(/\\/g, '\\\\')}", "w", encoding="utf-8") as f:
+        json.dump({"success": False, "error": str(e)}, f, ensure_ascii=False)
+`;
+    }
+    fs.writeFileSync(scriptPath, pyCode, 'utf-8');
+
+    // 执行 Python 脚本（最多 30 秒）
+    try {
+      execSync(`${pythonCmd} "${scriptPath}"`, { timeout: 30000, stdio: 'pipe' });
+    } catch (e: any) {
+      const stderr = e.stderr?.toString() || '';
+      return { available: true, message: `Python 执行失败：${stderr.slice(0, 200) || e.message}` };
+    }
+
+    // 读取结果
+    if (!fs.existsSync(outPath)) {
+      return { available: true, message: 'Python 脚本未产出结果文件' };
+    }
+    const resultJson = JSON.parse(fs.readFileSync(outPath, 'utf-8'));
+    // 清理临时文件
+    try { fs.unlinkSync(scriptPath); fs.unlinkSync(outPath); } catch {}
+    if (!resultJson.success) {
+      return { available: true, message: `search1688api 错误：${resultJson.error || '未知错误'}` };
+    }
+    return {
+      available: true,
+      message: `search1688api 找到 ${resultJson.count || resultJson.items?.length || 0} 条货源`,
+      items: (resultJson.items || []).slice(0, 20),
+    };
+  } catch (err: any) {
+    return { available: true, message: `search1688api 调用异常：${err?.message || '未知错误'}` };
+  }
+}
+
+// ======== 统一分发：按 method 参数路由到不同方案 ========
+/**
+ * 统一的 1688 搜款入口，支持两种方案切换。
+ * @param method - 'onebound' | 'search1688api'
+ * @param imageUrl - 商品图 URL（图搜）
+ * @param title - 关键词（文本搜）
+ * @param oneboundKey - OneBound Key（可选，不传则从配置/环境变量读取）
+ * @param oneboundSecret - OneBound Secret（可选）
+ */
+export async function search1688(params: {
+  method?: string;
+  imageUrl?: string;
+  title?: string;
+  oneboundKey?: string;
+  oneboundSecret?: string;
+}): Promise<Ali1688SearchResult> {
+  const method = params.method || loadAli1688Config().method || 'onebound';
+
+  switch (method) {
+    case 'search1688api':
+      return search1688ByPython({ imageUrl: params.imageUrl, title: params.title });
+    case 'onebound':
+    default: {
+      const cfg = loadAli1688Config();
+      return search1688OneBound({
+        imageUrl: params.imageUrl,
+        title: params.title,
+        key: params.oneboundKey || cfg.oneboundKey,
+        secret: params.oneboundSecret || cfg.oneboundSecret,
+      });
+    }
   }
 }

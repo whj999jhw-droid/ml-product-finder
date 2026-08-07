@@ -15,6 +15,7 @@ import {
   DeleteIcon,
 } from 'tdesign-icons-react';
 import { ShoppingBag } from 'lucide-react';
+import { ProductTable, type ProductItem } from '../components/ProductTable';
 
 // 进度消息类型
 interface FetchProgress {
@@ -24,6 +25,7 @@ interface FetchProgress {
   message: string;
   site?: string;
   category?: string;
+  products?: ProductItem[]; // product_batch 阶段携带的商品列表
 }
 
 // 导出文件信息
@@ -48,6 +50,8 @@ export function ProductFinderPage() {
   const [progress, setProgress] = useState<FetchProgress | null>(null);
   const [progressLog, setProgressLog] = useState<string[]>([]);
   const [result, setResult] = useState<FetchResult | null>(null);
+  // 实时商品列表（从 SSE product_batch 事件累积）
+  const [products, setProducts] = useState<ProductItem[]>([]);
   // 跨站点全局进度（累计所有站点分类，呈现一条 0→100% 的总进度条）
   const [globalProgress, setGlobalProgress] = useState<{ current: number; total: number }>({ current: 0, total: 0 });
   const globalBaseRef = useRef(0); // 已完成站点的分类总数累计
@@ -57,6 +61,20 @@ export function ProductFinderPage() {
   const [selectedSites, setSelectedSites] = useState<string[]>(['MLM', 'MLB', 'MLC', 'MCO']);
   const logEndRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null); // token 轮询定时器
+
+  // 断点续传
+  const [checkpoint, setCheckpoint] = useState<{
+    hasCheckpoint: boolean;
+    jobId?: string;
+    startedAt?: string;
+    productCount?: number;
+    completedSites?: string[];
+    currentSite?: string;
+    completedCategoryIndex?: number;
+    totalCategories?: number;
+    siteStats?: Record<string, number>;
+  } | null>(null);
+  const [showResumeBanner, setShowResumeBanner] = useState(true);
 
   // Token 状态
   const [tokenInput, setTokenInput] = useState('');
@@ -539,8 +557,29 @@ export function ProductFinderPage() {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [progressLog]);
 
+  // 检查断点续传状态
+  const checkCheckpoint = useCallback(async () => {
+    try {
+      const r = await fetch('/api/ml/checkpoint');
+      const d = await r.json();
+      setCheckpoint(d);
+      setShowResumeBanner(true);
+    } catch { /* 忽略 */ }
+  }, []);
+
+  useEffect(() => { checkCheckpoint(); }, [checkCheckpoint]);
+
+  // 清除 checkpoint（全新开始）
+  const clearCheckpoint = useCallback(async () => {
+    try {
+      await fetch('/api/ml/checkpoint', { method: 'DELETE' });
+      setCheckpoint(null);
+      setShowResumeBanner(false);
+    } catch { /* 忽略 */ }
+  }, []);
+
   // 开始抓取（根据代理配置选择模式）
-  const handleFetchViaBrowser = useCallback(async () => {
+  const handleFetchViaBrowser = useCallback(async (resumeMode = false) => {
     if (selectedSites.length === 0) {
       NotificationPlugin.warning({ title: '请至少选择一个站点', content: '' });
       return;
@@ -555,10 +594,14 @@ export function ProductFinderPage() {
     setProgress(null);
     setProgressLog([]);
     setResult(null);
+    if (!resumeMode) {
+      setProducts([]); // 全新抓取才清空，续传保留已有
+    }
     setGlobalProgress({ current: 0, total: 0 });
     globalBaseRef.current = 0;
     currentSiteTotalRef.current = 0;
     fetchStartTimeRef.current = Date.now();
+    setShowResumeBanner(false);
 
     const addLog = (msg: string) => {
       setProgressLog((prev) => [...prev, msg]);
@@ -567,6 +610,7 @@ export function ProductFinderPage() {
     // ===== 后端直连抓取（highlights → products 链路，免 VPN）=====
     {
       addLog(`☁️ 后端直连模式：通过后端调用 ML API（免 VPN）...`);
+      if (resumeMode) addLog('📌 断点续传模式：从上次中断处继续');
       try {
         const response = await fetch('/api/ml/fetch', {
           method: 'POST',
@@ -581,6 +625,7 @@ export function ProductFinderPage() {
               includeSubcategories,
               miaoshouPackage,
             },
+            resume: resumeMode,
           }),
         });
 
@@ -601,12 +646,20 @@ export function ProductFinderPage() {
           for (const line of lines) {
             if (line.startsWith('data: ')) {
               try {
-                const data: FetchProgress | FetchResult = JSON.parse(line.slice(6));
+                const data: any = JSON.parse(line.slice(6));
                 if (data.phase === 'complete') {
                   setResult(data as FetchResult);
                   addLog(`✅ ${data.message}`);
                   setGlobalProgress({ current: 1, total: 1 });
                   fetchFiles();
+                  setCheckpoint(null); // 完成后清除前端 checkpoint 状态
+                } else if (data.phase === 'product_batch' && data.products) {
+                  // 实时商品数据：累积到商品列表
+                  setProducts((prev) => {
+                    const existing = new Set(prev.map((p) => p.itemId));
+                    const newProducts = data.products!.filter((p: ProductItem) => !existing.has(p.itemId));
+                    return [...prev, ...newProducts];
+                  });
                 } else if (data.phase === 'error') {
                   setResult(data as FetchResult);
                   addLog(`❌ ${data.message}`);
@@ -691,6 +744,31 @@ export function ProductFinderPage() {
       }
     } catch (err: any) {
       NotificationPlugin.error({ title: '删除失败', content: err?.message || '' });
+    }
+  }, [fetchFiles]);
+
+  // 导出选中商品
+  const handleExportSelected = useCallback(async (selectedProducts: ProductItem[]) => {
+    if (selectedProducts.length === 0) {
+      NotificationPlugin.warning({ title: '请先选择商品', content: '' });
+      return;
+    }
+    try {
+      const res = await fetch('/api/ml/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ products: selectedProducts }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        NotificationPlugin.success({ title: '导出成功', content: data.message || `已导出 ${selectedProducts.length} 个商品` });
+        handleDownload(data.fileName);
+        fetchFiles();
+      } else {
+        NotificationPlugin.error({ title: '导出失败', content: data.error || '' });
+      }
+    } catch (err: any) {
+      NotificationPlugin.error({ title: '导出失败', content: err?.message || '' });
     }
   }, [fetchFiles]);
 
@@ -1145,7 +1223,7 @@ export function ProductFinderPage() {
                 </div>
                 <div className="flex items-center gap-2">
                   <Switch value={miaoshouPackage} onChange={(val) => setMiaoshouPackage(val as boolean)} />
-                  <span className="text-sm" style={{ color: 'var(--td-text-color-primary)' }}>导出妙手素材包（ZIP 含商品主图，推荐导入方式）</span>
+                  <span className="text-sm" style={{ color: 'var(--td-text-color-primary)' }}>导出妙手素材包（ZIP·格式2：产品导入表格 + 产品图片/货号目录树）</span>
                 </div>
               </div>
             </div>
@@ -1178,13 +1256,60 @@ export function ProductFinderPage() {
             </div>
           </div>
 
+          {/* 断点续传提示 */}
+          {!isFetching && checkpoint?.hasCheckpoint && showResumeBanner && (
+            <div className="mt-4 p-4 rounded-lg" style={{ border: '2px solid var(--td-warning-color)', backgroundColor: 'var(--td-warning-color-1)' }}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-lg">📌</span>
+                    <span className="font-bold" style={{ color: 'var(--td-warning-color)' }}>发现未完成的抓取</span>
+                  </div>
+                  <div className="text-sm space-y-1" style={{ color: 'var(--td-text-color-secondary)' }}>
+                    <p>上次抓取：{checkpoint.startedAt ? new Date(checkpoint.startedAt).toLocaleString('zh-CN') : '未知'}，已收集 <b>{checkpoint.productCount || 0}</b> 个商品</p>
+                    {checkpoint.completedSites && checkpoint.completedSites.length > 0 && (
+                      <p>已完成站点：{checkpoint.completedSites.join(', ')}（各 {Object.entries(checkpoint.siteStats || {}).map(([k, v]) => `${k}=${v}`).join(', ')} 个）</p>
+                    )}
+                    {checkpoint.currentSite && (
+                      <p>当前站点：{checkpoint.currentSite}，已完成 {((checkpoint.completedCategoryIndex ?? -1) + 1)} / {checkpoint.totalCategories} 个分类</p>
+                    )}
+                  </div>
+                  <div className="flex gap-3 mt-3">
+                    <Button
+                      theme="warning"
+                      size="medium"
+                      icon={<RefreshIcon />}
+                      onClick={() => handleFetchViaBrowser(true)}
+                    >
+                      继续上次抓取
+                    </Button>
+                    <Button
+                      size="medium"
+                      variant="outline"
+                      onClick={clearCheckpoint}
+                    >
+                      重新开始
+                    </Button>
+                  </div>
+                </div>
+                <Button
+                  size="small"
+                  variant="text"
+                  icon={<CloseIcon />}
+                  onClick={() => setShowResumeBanner(false)}
+                  title="暂不处理"
+                />
+              </div>
+            </div>
+          )}
+
           {/* 操作按钮 */}
           <div className="mt-6 flex gap-3 flex-wrap">
             <Button
               theme="primary"
               size="large"
               icon={isFetching ? <LoadingIcon /> : <SearchIcon />}
-              onClick={handleFetchViaBrowser}
+              onClick={() => handleFetchViaBrowser(false)}
               loading={isFetching}
               disabled={isFetching || selectedSites.length === 0 || !tokenStatus.hasToken}
             >
@@ -1445,10 +1570,36 @@ export function ProductFinderPage() {
           </Card>
         )}
 
+        {/* 实时商品表格 — 抓取过程中/完成后展示 */}
+        <Card
+          title={products.length > 0 ? `📊 商品列表（${products.length} 条）` : '📊 商品列表'}
+          bordered
+          actions={
+            products.length > 0 ? (
+              <Button
+                size="small"
+                theme="primary"
+                variant="outline"
+                icon={<DownloadIcon />}
+                onClick={() => handleDownload(result?.filePath || '')}
+                disabled={!result?.filePath}
+              >
+                下载完整 Excel
+              </Button>
+            ) : undefined
+          }
+        >
+          <ProductTable
+            products={products}
+            isFetching={isFetching}
+            onExportSelected={handleExportSelected}
+          />
+        </Card>
+
         {/* 已导出文件列表 */}
         <Card title="已导出文件" bordered>
           <div className="mb-3 text-xs leading-relaxed" style={{ color: 'var(--td-text-color-secondary)' }}>
-            带 <Tag theme="warning" size="small" variant="light">妙手素材包</Tag> 标记的 <b>*.zip</b>（含商品主图）可直接拖入妙手「素材包导入」走 采集箱→认领→发布；<b>*.xlsx</b> 为 14 列明细，供妙手「产品导入表格」使用。两者下载按钮通用。
+            带 <Tag theme="warning" size="small" variant="light">妙手素材包</Tag> 标记的 <b>*.zip</b>（含产品导入表格.xlsx + 产品图片/货号/主图·SKU图·详情图·证书·尺寸图·视频目录树）可直接拖入妙手「素材包导入」走 采集箱→认领→发布；<b>*.xlsx</b> 为 16 列明细（对齐格式2模板 + 类目ID/站点/物流方式）。两者下载按钮通用。
           </div>
           {files.length === 0 ? (
             <div
@@ -1475,7 +1626,7 @@ export function ProductFinderPage() {
                   title: '文件名',
                   ellipsis: true,
                   render: ({ row }: any) => {
-                    const isZip = row.fileName.endsWith('.zip');
+                    const isZip = (row.fileName || '').endsWith('.zip');
                     return (
                       <div className="flex items-center gap-2">
                         {isZip ? <FileIcon style={{ color: '#e37318' }} /> : <FileExcelIcon style={{ color: '#1a8e3f' }} />}
@@ -1498,7 +1649,7 @@ export function ProductFinderPage() {
                         theme="primary"
                         variant="outline"
                         icon={<DownloadIcon />}
-                        onClick={() => handleDownload(row.operation)}
+                        onClick={() => row.operation && handleDownload(row.operation)}
                       >
                         下载
                       </Button>
@@ -1506,7 +1657,7 @@ export function ProductFinderPage() {
                         size="small"
                         theme="default"
                         variant="outline"
-                        onClick={() => handleResendEmail(row.operation)}
+                        onClick={() => row.operation && handleResendEmail(row.operation)}
                       >
                         发邮件
                       </Button>
@@ -1515,7 +1666,7 @@ export function ProductFinderPage() {
                         theme="danger"
                         variant="outline"
                         icon={<DeleteIcon />}
-                        onClick={() => handleDeleteFile(row.operation)}
+                        onClick={() => row.operation && handleDeleteFile(row.operation)}
                       >
                         删除
                       </Button>

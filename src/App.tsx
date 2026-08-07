@@ -16,6 +16,10 @@ import { ChatPage } from './pages/ChatPage';
 import { ProductFinderPage } from './pages/ProductFinderPage';
 import { SourcingPage } from './pages/SourcingPage';
 import { ListingPage } from './pages/ListingPage';
+import { StoreManagementPage } from './pages/StoreManagementPage';
+import { OrdersPage } from './pages/OrdersPage';
+import { TrendsPage } from './pages/TrendsPage';
+import { NotificationSettingsPage } from './pages/NotificationSettingsPage';
 
 function App() {
   return (
@@ -26,6 +30,10 @@ function App() {
       <Route path="/products" element={<AppContent />} />
       <Route path="/sourcing" element={<AppContent />} />
       <Route path="/listing" element={<AppContent />} />
+      <Route path="/stores" element={<AppContent />} />
+      <Route path="/orders" element={<AppContent />} />
+      <Route path="/notifications" element={<AppContent />} />
+      <Route path="/trends" element={<AppContent />} />
     </Routes>
   );
 }
@@ -38,7 +46,11 @@ function AppContent() {
   const isProductsPage = location.pathname === '/products';
   const isSourcingPage = location.pathname === '/sourcing';
   const isListingPage = location.pathname === '/listing';
-  
+  const isStoresPage = location.pathname === '/stores';
+  const isOrdersPage = location.pathname === '/orders';
+  const isNotificationsPage = location.pathname === '/notifications';
+  const isTrendsPage = location.pathname === '/trends';
+
   // Hooks
   const { theme, toggleTheme } = useTheme();
   const { agents, addAgent, updateAgent, deleteAgent, getAgent } = useAgents();
@@ -150,6 +162,22 @@ function AppContent() {
     navigate('/listing');
   }, [navigate]);
 
+  const handleOpenStores = useCallback(() => {
+    navigate('/stores');
+  }, [navigate]);
+
+  const handleOpenOrders = useCallback(() => {
+    navigate('/orders');
+  }, [navigate]);
+
+  const handleOpenNotifications = useCallback(() => {
+    navigate('/notifications');
+  }, [navigate]);
+
+  const handleOpenTrends = useCallback(() => {
+    navigate('/trends');
+  }, [navigate]);
+
   // Sidebar 状态
   const [sidebarOpen, setSidebarOpen] = useState(true);
   
@@ -169,6 +197,10 @@ function AppContent() {
         isProductsPage={isProductsPage}
         isSourcingPage={isSourcingPage}
         isListingPage={isListingPage}
+        isStoresPage={isStoresPage}
+        isOrdersPage={isOrdersPage}
+        isNotificationsPage={isNotificationsPage}
+        isTrendsPage={isTrendsPage}
         sidebarOpen={sidebarOpen}
         agents={agents}
         getAgent={getAgent}
@@ -179,11 +211,15 @@ function AppContent() {
         onOpenProducts={handleOpenProducts}
         onOpenSourcing={handleOpenSourcing}
         onOpenListing={handleOpenListing}
+        onOpenStores={handleOpenStores}
+        onOpenOrders={handleOpenOrders}
+        onOpenNotifications={handleOpenNotifications}
+        onOpenTrends={handleOpenTrends}
       />
 
       {/* 主内容区 */}
       <main 
-        className="flex-1 flex flex-col min-w-0"
+        className="flex-1 flex flex-col min-w-0 overflow-auto"
         style={{ backgroundColor: 'var(--td-bg-color-page)' }}
       >
         {/* 顶部栏 */}
@@ -192,6 +228,10 @@ function AppContent() {
           isProductsPage={isProductsPage}
           isSourcingPage={isSourcingPage}
           isListingPage={isListingPage}
+          isStoresPage={isStoresPage}
+          isOrdersPage={isOrdersPage}
+          isNotificationsPage={isNotificationsPage}
+          isTrendsPage={isTrendsPage}
           sidebarOpen={sidebarOpen}
           theme={theme}
           currentSession={currentSession}
@@ -216,6 +256,14 @@ function AppContent() {
           <SourcingPage />
         ) : isListingPage ? (
           <ListingPage />
+        ) : isStoresPage ? (
+          <StoreManagementPage />
+        ) : isOrdersPage ? (
+          <OrdersPage />
+        ) : isNotificationsPage ? (
+          <NotificationSettingsPage />
+        ) : isTrendsPage ? (
+          <TrendsPage />
         ) : (
           <ChatPage
             currentSession={currentSession}

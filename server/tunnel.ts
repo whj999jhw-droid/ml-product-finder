@@ -37,7 +37,7 @@ export async function startTunnel(port: number = 3000): Promise<TunnelInfo> {
     tunnelInstance = await localtunnel({ port });
   }
 
-  const callbackUrl = `${tunnelInstance.url}/api/ml/oauth/callback`;
+  const callbackUrl = `${tunnelInstance.url}/api/ml/oauth/store-callback`;
   tunnelInfo = {
     url: tunnelInstance.url,
     callbackUrl,

@@ -11,6 +11,8 @@ import { fileURLToPath } from 'url';
 import ExcelJS from 'exceljs';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
+// 公网隧道（localtunnel）：固定域名不可达时自动回退用
+import { startTunnel, stopTunnel, isTunnelRunning, getTunnelInfo } from './tunnel.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -228,6 +230,8 @@ function loadPersistedTokenData() {
     mlAppId = data.appId || '';
     mlSecretKey = data.secretKey || '';
     mlRedirectUri = data.redirectUri || 'http://localhost:3000/api/ml/oauth/callback';
+    // 环境变量 ML_REDIRECT_URI 优先于持久化值（便于部署时覆盖，避免被旧 localhost 覆盖）
+    if (process.env.ML_REDIRECT_URI) mlRedirectUri = process.env.ML_REDIRECT_URI;
     mlTokenExpiry = data.expiry ? new Date(data.expiry) : null;
     console.log('[ML Token] 从文件加载凭证:', {
       hasToken: mlAccessToken.length > 0,
@@ -347,8 +351,146 @@ export function getTunnelCallbackUrl(): string {
   return tunnelCallbackUrl;
 }
 
+// ============= 默认固定回调域名 + 自动探测 =============
+// 项目统一使用 cloudflared 自定义域名，OAuth 回调地址固定不变。
+// 启动时自动探测该域名是否可达（cloudflared 是否运行），不可达则自动退回到 localtunnel 临时地址，
+// 并提示用户去美客多后台把「重定向 URI」改成临时地址。
+export const DEFAULT_FIXED_REDIRECT_URI = 'https://ml-callback.w999w.dpdns.org/api/ml/oauth/store-callback';
+
+export type RedirectMode = 'env' | 'fixed' | 'tunnel';
+
+export interface ResolvedRedirect {
+  uri: string;            // 当前生效的回调地址（含 /api/ml/oauth/store-callback 后缀）
+  mode: RedirectMode;     // env=手动环境变量 / fixed=固定域名 / tunnel=临时隧道回退
+  reachable: boolean;     // 是否为可达状态
+  fixedDomain: string;    // 项目固定的回调域名（完整路径）
+  notice?: string;        // mode==='tunnel' 时：提示去美客多后台改重定向 URI
+  tunnelUrl?: string;     // mode==='tunnel' 时：localtunnel 公网地址
+}
+
+let resolvedRedirect: ResolvedRedirect | null = null;
+let resolvePromise: Promise<ResolvedRedirect> | null = null;
+
+/**
+ * 专用自检路径：cloudflared 把流量转回本机后端时，本机会返回 {ok:true}。
+ * 若 cloudflared 已停但隧道仍在 Cloudflare，域名会返回 502 错误页（非 json），此时视为不可达。
+ */
+const REDIRECT_PING_PATH = '/api/ml/oauth/ping';
+
+/**
+ * 探测固定回调域名是否真的可达（流量确实转回本机后端）：
+ * 仅当返回 200 且 JSON 含 ok:true 才算可达；Cloudflare 的错误页（502/html）视为不可达。
+ */
+async function probeRedirectReachable(baseUrl: string, timeoutMs = 6000): Promise<boolean> {
+  try {
+    const res = await fetch(`${baseUrl}${REDIRECT_PING_PATH}`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (res.status !== 200) return false;
+    const ct = res.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) return false; // Cloudflare 错误页是 text/html
+    const data = await res.json().catch(() => null);
+    return !!data && data.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 解析当前生效的 OAuth 回调地址（带自动探测 + 自动回退）：
+ * 1. 显式设置 ML_REDIRECT_URI 环境变量 → 直接用（mode='env'，优先级最高）
+ * 2. 否则探测默认固定域名 ml-callback.w999w.dpdns.org 是否可达
+ *    - 可达 → 用固定域名（mode='fixed'）；若之前起过隧道则顺手关掉
+ *    - 不可达 → 自动启动 localtunnel，用临时地址（mode='tunnel'，并附提示）
+ */
+async function resolveOAuthRedirect(): Promise<ResolvedRedirect> {
+  // 1. 环境变量最高优先级
+  if (process.env.ML_REDIRECT_URI) {
+    return {
+      uri: process.env.ML_REDIRECT_URI,
+      mode: 'env',
+      reachable: true,
+      fixedDomain: DEFAULT_FIXED_REDIRECT_URI,
+    };
+  }
+  // 2. 探测固定域名是否可达（用基座地址 + 自检路径，确认流量真的转回本机后端）
+  const base = DEFAULT_FIXED_REDIRECT_URI.replace(/\/api\/ml\/oauth\/store-callback\/?$/, '');
+  const ok = await probeRedirectReachable(base);
+  if (ok) {
+    // 已从临时隧道切回固定域名：关掉多余隧道，释放资源
+    if (isTunnelRunning()) {
+      try { stopTunnel(); setTunnelCallbackUrl(''); } catch { /* ignore */ }
+    }
+    return {
+      uri: DEFAULT_FIXED_REDIRECT_URI,
+      mode: 'fixed',
+      reachable: true,
+      fixedDomain: DEFAULT_FIXED_REDIRECT_URI,
+    };
+  }
+  // 3. 不可达 → 自动回退 localtunnel
+  try {
+    const t = await startTunnel();
+    setTunnelCallbackUrl(t.callbackUrl);
+    return {
+      uri: t.callbackUrl,
+      mode: 'tunnel',
+      reachable: true,
+      fixedDomain: DEFAULT_FIXED_REDIRECT_URI,
+      notice: `固定回调域名 ${DEFAULT_FIXED_REDIRECT_URI} 当前不可达（cloudflared 可能未运行，或域名尚未解析到隧道）。已自动生成临时地址：${t.callbackUrl}\n请到 美客多开发者后台 → 你的应用 → 重定向 URI，把它改成上面这个临时地址后再授权；启动 cloudflared 后点「重新测试回调地址」即可恢复固定域名，无需再改后台。`,
+      tunnelUrl: t.url,
+    };
+  } catch (e: any) {
+    // 连隧道都起不来：仍返回固定域名（generateAuthUrl 会拦截并提示），但标记不可达
+    return {
+      uri: DEFAULT_FIXED_REDIRECT_URI,
+      mode: 'fixed',
+      reachable: false,
+      fixedDomain: DEFAULT_FIXED_REDIRECT_URI,
+      notice: `固定域名与公网隧道均不可用：${e?.message || e}。请先启动 cloudflared（或设置环境变量 ML_REDIRECT_URI）后重试。`,
+    };
+  }
+}
+
+/** 首次 / 需要时触发解析，带缓存，避免重复探测；解析中并发请求复用同一 Promise */
+export function ensureOAuthRedirectResolved(): Promise<ResolvedRedirect> {
+  if (resolvedRedirect) return Promise.resolve(resolvedRedirect);
+  if (!resolvePromise) {
+    resolvePromise = resolveOAuthRedirect().then((r) => { resolvedRedirect = r; return r; });
+  }
+  return resolvePromise;
+}
+
+/** 强制重新解析（例如用户启动 cloudflared 后手动点「重新测试」） */
+export async function reresolveOAuthRedirect(): Promise<ResolvedRedirect> {
+  resolvedRedirect = null;
+  resolvePromise = null;
+  return ensureOAuthRedirectResolved();
+}
+
+/** 手动覆盖解析结果（例如前端手动启动/停止隧道时同步） */
+export function overrideResolvedRedirect(r: ResolvedRedirect) {
+  resolvedRedirect = r;
+  resolvePromise = null;
+}
+
+/** 读取当前已解析结果（可能为空，调用方应优先用 ensureOAuthRedirectResolved） */
+export function getResolvedRedirect(): ResolvedRedirect | null {
+  return resolvedRedirect;
+}
+
+/** 当前生效的回调地址（同步，供 getOAuthConfig / generateAuthUrl / buildStoreAuthUrl 等使用） */
 export function getEffectiveRedirectUri(): string {
-  return tunnelCallbackUrl || mlRedirectUri;
+  if (resolvedRedirect) return resolvedRedirect.uri;
+  if (process.env.ML_REDIRECT_URI) return process.env.ML_REDIRECT_URI;
+  // 解析尚未完成时的兜底：默认就是固定域名（公网地址，不会是 localhost）
+  return DEFAULT_FIXED_REDIRECT_URI;
+}
+
+/** 当前生效回调地址的「域名基座」（去掉 /api/ml/oauth/store-callback 后缀） */
+export function getEffectiveRedirectBase(): string {
+  return getEffectiveRedirectUri().replace(/\/api\/ml\/oauth\/store-callback\/?$/, '');
 }
 
 export function hasOAuthConfig(): boolean {
@@ -363,16 +505,33 @@ export function getRefreshToken(): string {
   return mlRefreshToken;
 }
 
+/** per-store OAuth / 订单拉取复用：暴露 App ID（未打码） */
+export function getMlAppId(): string {
+  return mlAppId;
+}
+
+/** per-store OAuth / 订单拉取复用：暴露 Secret Key（未打码，仅服务端内部使用） */
+export function getMlSecretKeyRaw(): string {
+  return mlSecretKey;
+}
+
+/** per-store OAuth / 订单拉取复用：暴露当前 API 基础地址 */
+export function getMlApiBase(): string {
+  return getApiBase();
+}
+
 /**
  * 生成 OAuth2 授权 URL
+ * @param site 站点；传 'cbt' 或 'CBT' 表示 CBT 跨境卖家，使用 global-selling 授权入口
  */
-export function generateAuthUrl(usePkce: boolean = true): string {
+export function generateAuthUrl(usePkce: boolean = true, site?: string): string {
   if (!mlAppId) {
     throw new Error('请先设置 App ID');
   }
-  const redirectUri = getEffectiveRedirectUri();
+  // 全局单应用授权走 /api/ml/oauth/callback（与店铺授权 store-callback 同域名，便于在美客多后台一次性配齐）
+  const redirectUri = getEffectiveRedirectBase() + '/api/ml/oauth/callback';
   if (!redirectUri || redirectUri.includes('localhost')) {
-    throw new Error('Mercado Libre 不接受 localhost 回调地址，请先启动公网隧道');
+    throw new Error('Mercado Libre 不接受 localhost 回调地址，请先启动公网隧道或配置固定回调域名');
   }
   // 保存授权时使用的 redirect_uri，token 交换时必须一致
   pendingRedirectUri = redirectUri;
@@ -397,7 +556,11 @@ export function generateAuthUrl(usePkce: boolean = true): string {
     pendingCodeVerifier = '';
   }
 
-  return `https://auth.mercadolibre.com.mx/authorization?${params.toString()}`;
+  // CBT 跨境卖家使用独立的 global-selling 授权入口；其余站点用本地站 auth 入口
+  const isCbt = (site || '').toUpperCase() === 'CBT';
+  const host = isCbt ? 'global-selling.mercadolibre.com' : 'auth.mercadolibre.com.mx';
+  console.log(`[ML OAuth] 授权入口: ${host} (site=${site || 'local'})`);
+  return `https://${host}/authorization?${params.toString()}`;
 }
 
 /**
@@ -689,6 +852,13 @@ export function initAutoRenew() {
   console.log('[ML Token] 自动续期已启用（启动预热 + 每 30 分钟保活）');
 }
 
+// 启动即探测固定回调域名是否可达（不阻塞启动；store-begin / callback-status 会 await 最终结果）
+if (!process.env.ML_REDIRECT_URI) {
+  ensureOAuthRedirectResolved()
+    .then((r) => console.log(`[ML OAuth] 回调地址解析完成: mode=${r.mode}, uri=${r.uri}`))
+    .catch((e) => console.warn('[ML OAuth] 回调地址解析异常:', e?.message || e));
+}
+
 // 标记 /search 是否已被确认全局封锁（数据中心 IP 被 ML 封禁）
 // 一旦观察到一次 403，后续分类直接跳过 search 各策略、走 highlights 兜底，省去无效重试
 let searchConfirmedBlocked = false;
@@ -730,9 +900,55 @@ export interface FetchProgress {
   message: string;
   site?: string;
   category?: string;
+  products?: MLProduct[]; // 携带商品数据（phase='product_batch' 时，供前端实时展示表格）
 }
 
 type ProgressCallback = (progress: FetchProgress) => void;
+
+// ============ 断点续传 Checkpoint ============
+export interface FetchCheckpoint {
+  jobId: string;                     // 任务 ID（时间戳）
+  startedAt: string;                 // 开始时间 ISO
+  sites: MLSiteCode[];               // 用户选择的站点列表
+  options: FetchOptions;             // 抓取选项
+  completedSites: MLSiteCode[];      // 已完成的站点
+  currentSite: MLSiteCode | null;    // 当前正在处理的站点
+  completedCategoryIndex: number;    // 当前站点已完成分类索引 (0-based, -1 表示还没开始)
+  totalCategories: number;           // 当前站点分类总数
+  collectedProducts: MLProduct[];   // 已收集的商品
+  siteStats: Record<string, number>; // 各站点统计
+  exchangeRates: Record<string, number>; // 汇率缓存
+}
+
+const CHECKPOINT_FILE = path.join(__dirname, '..', 'data', 'checkpoint.json');
+
+export function saveCheckpoint(cp: FetchCheckpoint): void {
+  try {
+    const dataDir = path.join(__dirname, '..', 'data');
+    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(CHECKPOINT_FILE, JSON.stringify(cp, null, 2), 'utf-8');
+  } catch (e) {
+    console.error('[Checkpoint] 保存失败:', e);
+  }
+}
+
+export function loadCheckpoint(): FetchCheckpoint | null {
+  try {
+    if (!fs.existsSync(CHECKPOINT_FILE)) return null;
+    const raw = fs.readFileSync(CHECKPOINT_FILE, 'utf-8');
+    return JSON.parse(raw) as FetchCheckpoint;
+  } catch {
+    return null;
+  }
+}
+
+export function deleteCheckpoint(): void {
+  try {
+    if (fs.existsSync(CHECKPOINT_FILE)) fs.unlinkSync(CHECKPOINT_FILE);
+  } catch { /* 忽略 */ }
+}
+
+export { CHECKPOINT_FILE };
 
 // 浏览器风格 User-Agent 列表（轮换使用，避免被限速）
 const USER_AGENTS = [
@@ -1524,7 +1740,29 @@ async function fetchTopProductsForCategory(
   if (allResults.length === 0) {
     console.log(`[ML] ${siteName} - ${category.name} search 无结果，尝试 Best Sellers fallback`);
     try {
-      return await fetchBestSellersByCategory(siteId, siteName, category, exchangeRate, options);
+      const bestProducts = await fetchBestSellersByCategory(siteId, siteName, category, exchangeRate, options);
+      if (onProgress) {
+        onProgress({
+          phase: 'category_done',
+          current: 0,
+          total: 0,
+          message: `${siteName} - ${category.name}: 筛选出 ${bestProducts.length} 个商品 (Best Sellers)`,
+          site: siteId,
+          category: category.name,
+        });
+        if (bestProducts.length > 0) {
+          onProgress({
+            phase: 'product_batch',
+            current: 0,
+            total: 0,
+            message: '',
+            site: siteId,
+            category: category.name,
+            products: bestProducts,
+          });
+        }
+      }
+      return bestProducts;
     } catch (fallbackErr: any) {
       console.warn(`[ML] Best Sellers fallback 也失败 ${category.id}: ${fallbackErr.message?.slice(0, 100)}`);
     }
@@ -1632,18 +1870,34 @@ async function fetchTopProductsForCategory(
       site: siteId,
       category: category.name,
     });
+    // 将商品数据推送给前端，供实时表格展示
+    if (products.length > 0) {
+      onProgress({
+        phase: 'product_batch',
+        current: 0,
+        total: 0,
+        message: '',
+        site: siteId,
+        category: category.name,
+        products,
+      });
+    }
   }
 
   return products;
 }
 
 /**
- * 获取指定站点的所有品类 Top 商品
+ * 获取指定站点的所有品类 Top 商品。
+ * @param startFromCategoryIndex 断点续传：从第几个分类开始（0-based），默认 0
+ * @param onCheckpoint 每完成一个分类后调用的 checkpoint 保存回调
  */
 async function fetchSiteProducts(
   siteCode: MLSiteCode,
   options: FetchOptions = {},
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
+  startFromCategoryIndex = 0,
+  onCheckpoint?: (siteCode: MLSiteCode, completedIndex: number, total: number) => void
 ): Promise<MLProduct[]> {
   const site = ML_SITES[siteCode];
   const allProducts: MLProduct[] = [];
@@ -1709,7 +1963,8 @@ async function fetchSiteProducts(
   });
 
   // 逐个分类获取商品
-  for (let i = 0; i < categories.length; i++) {
+  const startIdx = Math.max(0, startFromCategoryIndex);
+  for (let i = startIdx; i < categories.length; i++) {
     const cat = categories[i];
     onProgress?.({
       phase: 'fetching',
@@ -1727,6 +1982,9 @@ async function fetchSiteProducts(
       console.error(`[ML] 获取分类商品失败 ${cat.id}:`, err);
     }
 
+    // 每完成一个分类，保存 checkpoint
+    onCheckpoint?.(siteCode, i, categories.length);
+
     // 请求间隔，避免被限速（代理模式下需要更长间隔）
     const delayMs = getProxyAgent() ? 2000 : 200;
     await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -1736,18 +1994,49 @@ async function fetchSiteProducts(
 }
 
 /**
- * 主函数：获取所有站点商品并导出 xlsx
+ * 主函数：获取所有站点商品并导出 xlsx。
+ * @param resumeFromCheckpoint 传入已有的 checkpoint 则从断点续传，否则全新开始。
  */
 export async function fetchAllProductsAndExport(
   sites: MLSiteCode[],
   options: FetchOptions = {},
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
+  resumeFromCheckpoint?: FetchCheckpoint | null
 ): Promise<{ filePath: string; fileName: string; zipPath?: string; zipName?: string; totalCount: number; siteStats: Record<string, number> }> {
   await ensureValidToken();
-  const allProducts: MLProduct[] = [];
-  const siteStats: Record<string, number> = {};
+  let allProducts: MLProduct[] = [];
+  let siteStats: Record<string, number> = {};
+
+  // 断点续传：恢复已收集的商品
+  const cp = resumeFromCheckpoint || null;
+  if (cp) {
+    allProducts = [...(cp.collectedProducts || [])];
+    siteStats = { ...(cp.siteStats || {}) };
+    onProgress?.({
+      phase: 'site_start',
+      current: 0,
+      total: 0,
+      message: `📌 断点续传：从 ${cp.currentSite || cp.completedSites[cp.completedSites.length - 1] || '上次'} 恢复，已有 ${allProducts.length} 个商品`,
+    });
+  }
+
+  // 站点循环计数（用于 checkpoint 中追踪）
+  let siteIndex = 0;
 
   for (const siteCode of sites) {
+    // 断点续传：跳过已完成的站点
+    if (cp && cp.completedSites.includes(siteCode)) {
+      siteIndex++;
+      onProgress?.({
+        phase: 'site_done',
+        current: 0,
+        total: 0,
+        message: `⏭️ 跳过已完成: ${ML_SITES[siteCode].name} (${siteStats[siteCode] || 0} 个商品)`,
+        site: siteCode,
+      });
+      continue;
+    }
+
     onProgress?.({
       phase: 'site_start',
       current: 0,
@@ -1756,9 +2045,42 @@ export async function fetchAllProductsAndExport(
       site: siteCode,
     });
 
-    const products = await fetchSiteProducts(siteCode, options, onProgress);
-    allProducts.push(...products);
-    siteStats[siteCode] = products.length;
+    // 断点续传：当前站点从哪个分类继续
+    const resumeCategoryIndex = (cp && cp.currentSite === siteCode)
+      ? cp.completedCategoryIndex + 1
+      : 0;
+
+    const products = await fetchSiteProducts(
+      siteCode,
+      options,
+      onProgress,
+      resumeCategoryIndex,
+      // checkpoint 回调：每完成一个分类保存一次
+      (completedSiteCode, completedIdx, totalCats) => {
+        const cpNow: FetchCheckpoint = {
+          jobId: cp?.jobId || String(Date.now()),
+          startedAt: cp?.startedAt || new Date().toISOString(),
+          sites,
+          options,
+          completedSites: cp ? [...cp.completedSites] : [],
+          currentSite: completedSiteCode,
+          completedCategoryIndex: completedIdx,
+          totalCategories: totalCats,
+          collectedProducts: [...allProducts, ...products],
+          siteStats: { ...siteStats },
+          exchangeRates: {},
+        };
+        saveCheckpoint(cpNow);
+      }
+    );
+
+    // 断点续传：把本次累积的加到已有商品中
+    if (cp && cp.currentSite === siteCode && allProducts.length > 0) {
+      allProducts.push(...products);
+    } else {
+      allProducts.push(...products);
+    }
+    siteStats[siteCode] = (siteStats[siteCode] || 0) + products.length;
 
     onProgress?.({
       phase: 'site_done',
@@ -1767,7 +2089,28 @@ export async function fetchAllProductsAndExport(
       message: `${ML_SITES[siteCode].name} 完成, 共 ${products.length} 个商品`,
       site: siteCode,
     });
+
+    // 每完成一个站点，更新 checkpoint（标记该站点已完成）
+    const cpAfterSite: FetchCheckpoint = {
+      jobId: cp?.jobId || String(Date.now()),
+      startedAt: cp?.startedAt || new Date().toISOString(),
+      sites,
+      options,
+      completedSites: [...(cp?.completedSites || []), siteCode],
+      currentSite: null,
+      completedCategoryIndex: -1,
+      totalCategories: 0,
+      collectedProducts: [...allProducts],
+      siteStats: { ...siteStats },
+      exchangeRates: {},
+    };
+    saveCheckpoint(cpAfterSite);
+
+    siteIndex++;
   }
+
+  // 全部完成：清除 checkpoint
+  deleteCheckpoint();
 
   // 导出 xlsx
   onProgress?.({
@@ -1856,9 +2199,9 @@ export async function dumpLatestProducts(products: MLProduct[]): Promise<void> {
 }
 
 /**
- * 构建妙手「产品导入」工作簿（含 产品导入 + 汇总 两张 Sheet）。
- * 字段严格对齐妙手「产品导入表格」（见《官方API抓取与妙手导入上架方案.pdf》2.3/2.4）。
- * 货源链接/采购价/净收益/颜色/尺码/描述由后续 1688 图搜与定价引擎补全；物流方式固定 remote（自发货）。
+ * 构建妙手「产品导入表格」工作簿（含 产品导入表格 + 汇总 两张 Sheet）。
+ * 列对齐妙手官方格式2模板（本地素材包导入），包含 产品导入表格.xlsx + 产品图片/货号目录树（见 exportToMiaoshouPackage）。
+ * 货源链接/详情描述/属性/规格由后续 1688 图搜与定价引擎补全；物流方式默认 remote（自发货）。
  */
 function createMiaoshouWorkbook(
   products: MLProduct[],
@@ -1868,45 +2211,51 @@ function createMiaoshouWorkbook(
   workbook.creator = 'ML Product Finder';
   workbook.created = new Date();
 
-  // === 妙手导入数据 Sheet（第一张，供妙手 ERP 直接导入）===
-  const dataSheet = workbook.addWorksheet('产品导入', {
+  // === 妙手「产品导入表格」（第一张，对齐官方格式2模板-本地素材包导入）===
+  const dataSheet = workbook.addWorksheet('产品导入表格', {
     properties: { tabColor: '00A859' },
   });
 
+  // 列对齐妙手官方模板：*货号|*产品名称|货币类型|货源链接|货源平台|详情描述|属性|规格1|SKU规格2|*SKU售价|SKU库存|SKU重量(KG)|SKU尺寸(CM)
+  // 额外增加 类目ID/站点/物流方式 列（妙手会忽略不识别列，不影响导入）
   dataSheet.columns = [
-    { header: '货号', key: 'sku', width: 24 },
-    { header: '产品标题', key: 'title', width: 50 },
-    { header: '币种', key: 'currency', width: 8 },
+    { header: '* 货号', key: 'sku', width: 24 },
+    { header: '* 产品名称', key: 'title', width: 50 },
+    { header: '货币类型', key: 'currency', width: 8 },
     { header: '货源链接', key: 'sourceUrl', width: 40 },
-    { header: '采购价(¥)', key: 'purchasePrice', width: 12 },
-    { header: '售价', key: 'price', width: 12 },
-    { header: '净收益(希望利润)', key: 'netProfit', width: 16 },
-    { header: '颜色规格', key: 'colors', width: 18 },
-    { header: '尺码规格', key: 'sizes', width: 18 },
-    { header: '库存', key: 'stock', width: 10 },
+    { header: '货源平台', key: 'platform', width: 10 },
+    { header: '详情描述', key: 'description', width: 40 },
+    { header: '属性', key: 'attrs', width: 30 },
+    { header: '规格1', key: 'spec1', width: 14 },
+    { header: 'SKU规格2', key: 'spec2', width: 14 },
+    { header: '* SKU售价', key: 'price', width: 12 },
+    { header: 'SKU库存', key: 'stock', width: 10 },
+    { header: 'SKU重量(KG)', key: 'weight', width: 12 },
+    { header: 'SKU尺寸(CM)', key: 'dimensions', width: 14 },
     { header: '类目ID', key: 'categoryId', width: 18 },
     { header: '站点', key: 'site', width: 10 },
     { header: '物流方式', key: 'shippingType', width: 10 },
-    { header: '描述', key: 'description', width: 40 },
   ];
 
-  // 添加数据（映射为妙手字段）
+  // 添加数据
   for (const product of products) {
     dataSheet.addRow({
       sku: `${product.site}-${product.itemId}`,
       title: product.title || '',
       currency: product.currency || '',
       sourceUrl: '',
-      purchasePrice: '',
+      platform: '1688',
+      description: '',
+      attrs: '',
+      spec1: '',
+      spec2: '',
       price: product.price || 0,
-      netProfit: '',
-      colors: '',
-      sizes: '',
       stock: product.availableQuantity > 0 ? product.availableQuantity : 100,
+      weight: product.weight || '',
+      dimensions: '',
       categoryId: product.categoryId || '',
       site: product.site || '',
-      shippingType: 'remote', // 自发货
-      description: '',
+      shippingType: 'remote',
     });
   }
 
@@ -1916,7 +2265,7 @@ function createMiaoshouWorkbook(
   dataSheet.views = [{ state: 'frozen', ySplit: 1 }];
   dataSheet.autoFilter = {
     from: { row: 1, column: 1 },
-    to: { row: products.length + 1, column: 14 },
+    to: { row: products.length + 1, column: 16 },
   };
 
   // === 汇总 Sheet（第二张，供用户概览；妙手会忽略此表）===
@@ -1980,13 +2329,19 @@ async function exportToXlsx(
 }
 
 /**
- * 导出妙手「素材包」（推荐导入方式）：产品导入表格.xlsx + 每个货号的主图文件夹，打包成 ZIP。
- * 素材包结构（见《官方API抓取与妙手导入上架方案.pdf》2.2）：
+ * 导出妙手「素材包」（推荐导入方式）：对齐官方格式2模板（本地素材包导入）。
+ * ZIP 结构（与官方「产品素材包模版(格式2)」一致）：
  *   <ZIP>/
  *     ├── 产品导入表格.xlsx
- *     └── <货号>/
- *         └── 产品主图/主图_1.jpg ...
- * 图片下载失败（404/超时）时跳过该图，不影响 ZIP 生成。
+ *     └── 产品图片/
+ *         └── <货号>/
+ *             ├── 产品主图/主图_1.jpg ...
+ *             ├── SKU图/          （空，待用户从1688图搜后补入）
+ *             ├── 产品证书/        （空）
+ *             ├── 尺寸图表/        （空）
+ *             ├── 详情图/          （空，待用户自行添加）
+ *             └── 产品视频/        （空）
+ * 图片下载失败（404/超时）时跳过该图，不影响 ZIP 生成。空文件夹通过占位 .gitkeep 确保 JSON 中有条目。
  */
 export async function exportToMiaoshouPackage(
   products: MLProduct[],
@@ -2017,18 +2372,25 @@ export async function exportToMiaoshouPackage(
     // Excel 作为素材包根文件
     archive.append(xlsxBuf as Buffer, { name: '产品导入表格.xlsx' });
 
+    // 空文件夹占位子目录列表（妙手素材包需要的目录结构）
+    const placeholderDirs = ['SKU图', '产品证书', '尺寸图表', '详情图', '产品视频'];
+
     const CONCURRENCY = 6;
     const appendImages = async (product: MLProduct) => {
       const imgs = (product.pictures && product.pictures.length ? product.pictures : [product.thumbnail]).filter(Boolean);
-      if (!imgs.length) return;
       const sku = sanitizeSku(`${product.site}-${product.itemId}`);
+      // 产品主图（妙手识别 "主图_N.jpg" 命名）
       for (let i = 0; i < imgs.length; i++) {
         try {
           const buf = await downloadImageToBuffer(imgs[i], 8000);
-          archive.append(buf, { name: `${sku}/产品主图/主图_${i + 1}.jpg` });
+          archive.append(buf, { name: `产品图片/${sku}/产品主图/主图_${i + 1}.jpg` });
         } catch {
           /* 单张失败跳过，不影响整体 */
         }
+      }
+      // 空文件夹占位（确保目录结构在 ZIP 中存在，妙手可识别）
+      for (const dir of placeholderDirs) {
+        archive.append('', { name: `产品图片/${sku}/${dir}/.gitkeep`, store: true });
       }
     };
     for (let i = 0; i < products.length; i += CONCURRENCY) {
@@ -2039,7 +2401,7 @@ export async function exportToMiaoshouPackage(
     await archive.finalize();
     await zipDone;
 
-    console.log(`[ML Export] 妙手素材包已生成: ${zipName} (${products.length} 个商品)`);
+    console.log(`[ML Export] 妙手素材包已生成: ${zipName} (${products.length} 个商品，含产品图片/)`);
     return { zipPath, zipName };
   } catch (err: any) {
     console.error('[ML Export] 妙手素材包生成失败:', err?.message || err);

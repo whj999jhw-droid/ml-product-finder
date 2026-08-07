@@ -9,7 +9,7 @@
 import { execSync } from 'node:child_process';
 
 const root = process.cwd();
-const nodeBin = process.env.MANAGED_NODE || process.execPath;
+const nodeBin = 'C:\\Users\\whj87\\.workbuddy\\binaries\\node\\versions\\22.22.2\\node.exe';
 
 function log(...a) { console.log('[build-electron]', ...a); }
 

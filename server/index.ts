@@ -696,14 +696,26 @@ import {
   getEffectiveRedirectUri,
   setTunnelCallbackUrl,
   getTunnelCallbackUrl,
+  ensureOAuthRedirectResolved,
+  reresolveOAuthRedirect,
+  overrideResolvedRedirect,
+  DEFAULT_FIXED_REDIRECT_URI,
   exportProductsToXlsx,
   getFallbackCategories,
   setProxyConfig,
   getProxyConfig,
   setApiProxyUrl,
   getApiProxyConfig,
+  loadCheckpoint,
+  saveCheckpoint,
+  deleteCheckpoint,
+  type FetchCheckpoint,
 } from './mercadolibre.js';
 import { sendXlsxResult, sendTestEmail, getEmailConfig, saveEmailConfig, loadEmailConfig } from './email.js';
+import * as storeAuth from './storeAuth.js';
+import * as stores from './stores.js';
+import * as notify from './notify.js';
+import * as orders from './orders.js';
 import { getSchedule, saveSchedule, startScheduler } from './scheduler.js';
 import { startTunnel, stopTunnel, getTunnelInfo, isTunnelRunning } from './tunnel.js';
 import * as sourcing from './sourcing.js';
@@ -712,7 +724,20 @@ import * as profit from './profit.js';
 import { runFilterPipeline, defaultFilterConfig } from './filterPipeline.js';
 import { writeErpExport } from './erpExport.js';
 import * as titleGen from './titleGenerator.js';
+import {
+  aiGenerateTitles,
+  aiGenerateDescription,
+  aiGenerateTitlesBatch,
+  aiGenerateDescriptionsBatch,
+  getLlmConfig,
+  saveLlmConfig,
+  translateTrendsKeywords,
+  testLlmTranslation,
+  probeLlmReachability,
+  translateOrderTexts,
+} from './aiService.js';
 import * as imagePipeline from './imagePipeline.js';
+import { getTrendsKeywords, getTrends } from './trends.js';
 
 // 获取可用站点列表
 app.get('/api/ml/sites', (req, res) => {
@@ -798,8 +823,9 @@ app.post('/api/ml/oauth/config', (req, res) => {
 app.get('/api/ml/oauth/auth-url', (req, res) => {
   try {
     const usePkce = req.query.pkce !== 'false';
-    const url = generateAuthUrl(usePkce);
-    res.json({ url, pkce: usePkce });
+    const site = typeof req.query.site === 'string' ? req.query.site : undefined;
+    const url = generateAuthUrl(usePkce, site);
+    res.json({ url, pkce: usePkce, site: site || 'local' });
   } catch (error: any) {
     res.status(400).json({ error: error?.message || '生成授权 URL 失败' });
   }
@@ -890,6 +916,293 @@ app.post('/api/ml/oauth/refresh', async (req, res) => {
   res.json(result);
 });
 
+// ===================== 多店铺管理 =====================
+
+// 生成「添加店铺」授权 URL（PKCE，按昵称/站点绑定 state）
+app.get('/api/ml/oauth/store-auth-url', (req, res) => {
+  try {
+    const nickname = (req.query.nickname as string) || '';
+    const site = (req.query.site as string) || 'MLM';
+    const { url, state } = storeAuth.buildStoreAuthUrl({ nickname, site });
+    res.json({ url, state });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || '生成授权链接失败' });
+  }
+});
+
+// 一键「添加店铺」：自动确保公网隧道已启动 → 生成店铺授权 URL
+// 这样前端点一次就能打开美客多授权页，无需手动起隧道（ML 不接受 localhost 回调）
+app.post('/api/ml/oauth/store-begin', async (req, res) => {
+  try {
+    const { nickname, site: reqSite } = req.body || {};
+    const site = ['MLM', 'MLB', 'MLC', 'MCO', 'CBT'].includes(reqSite) ? reqSite : 'MLM';
+    // 1) 解析并探测当前生效的回调地址：固定域名可达直接用，不可达自动回退隧道
+    const resolved = await ensureOAuthRedirectResolved();
+    // 2) 生成店铺授权 URL（内部使用 getEffectiveRedirectUri() = resolved.uri）
+    const { url, state } = storeAuth.buildStoreAuthUrl({
+      nickname: (nickname || '').toString(),
+      site: (site || 'MLM').toString(),
+    });
+    res.json({
+      success: true,
+      url,
+      state,
+      callbackUrl: resolved.uri,
+      tunnelUrl: resolved.tunnelUrl || '',
+      mode: resolved.mode,
+      fixedRedirect: resolved.mode === 'fixed' || resolved.mode === 'env',
+      reachable: resolved.reachable,
+      notice: resolved.notice || '',
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || '生成授权链接失败' });
+  }
+});
+
+// 店铺授权回调：ML 授权后跳转此处，用 code+state 换该店铺 token 并入库
+app.get('/api/ml/oauth/store-callback', async (req, res) => {
+  const { code, state, error, error_description } = req.query;
+  // 每次被访问都打日志，便于排查「回跳没到达后端 / 换 token 报错」
+  console.log('[store-callback] 收到回调', {
+    hasCode: !!code,
+    hasState: !!state,
+    error: error || null,
+    error_description: error_description || null,
+    url: req.originalUrl,
+  });
+  const effectiveCb = getEffectiveRedirectUri();
+  const okHtml = (msg: string, warning?: string) =>
+    `<html><body style="font-family:sans-serif;text-align:center;padding:40px;">
+      <h2 style="color:#67c23a;">${msg}</h2>
+      ${warning ? `<div style="max-width:560px;margin:16px auto;background:#fff7e6;border:1px solid #ffd591;padding:14px;border-radius:6px;color:#614700;font-size:14px;line-height:1.6;text-align:left;">${warning}</div>` : ''}
+      <p>正在返回店铺管理...</p>
+      <script>setTimeout(() => { window.location.href = '/stores'; }, 1500);</script>
+    </body></html>`;
+  const failHtml = (msg: string, detail?: string) =>
+    `<html><body style="font-family:sans-serif;max-width:640px;margin:0 auto;padding:40px;line-height:1.6;">
+      <h2 style="color:#f56c6c;">授权未成功</h2>
+      <p style="color:#333;">${msg}</p>
+      ${detail ? `<pre style="background:#f5f5f5;padding:12px;border-radius:6px;white-space:pre-wrap;word-break:break-all;font-size:13px;color:#c0392b;">${detail}</pre>` : ''}
+      <div style="background:#fff7e6;border:1px solid #ffd591;padding:12px;border-radius:6px;margin:16px 0;font-size:13px;color:#614700;">
+        <b>排查清单：</b><br/>
+        1. 美客多开发者后台 → 你的应用 → <b>重定向 URI</b> 必须是完整地址：<br/>
+        &nbsp;&nbsp;<code>${effectiveCb}</code>（含 <code>/api/ml/oauth/store-callback</code> 后缀，不能只填域名）<br/>
+        2. 该地址的<b>公网隧道必须正在运行</b>（或已配置固定回调域名），店铺管理页「授权回调设置」可查看当前生效地址。<br/>
+        3. 应用状态必须是 <b>Published</b>（Draft 仅应用所有者可授权）。<br/>
+        4. 使用的 <b>ML_APP_ID / ML_SECRET_KEY</b> 必须和生成授权链接的是同一个应用。
+      </div>
+      <p><a href="/stores" style="color:#1677ff;">← 返回店铺管理</a></p>
+    </body></html>`;
+
+  if (error) {
+    console.error('[store-callback] ML 返回错误:', error, error_description);
+    return res.send(failHtml(`美客多拒绝授权：${error}`, error_description ? String(error_description) : undefined));
+  }
+  if (!code || typeof code !== 'string' || !state || typeof state !== 'string') {
+    return res.status(400).send(failHtml('缺少授权码或状态参数（可能是直接打开了回调地址，或 ML 未正确回跳）'));
+  }
+  try {
+    const tok = await storeAuth.exchangeStoreCode(code, state);
+    let mlUserNick = '';
+    let mlUserId = '';
+    let mlUserEmail = '';
+    let mlSeller = false;
+    let sellerLevel: string | null = null;
+    try {
+      const sellerInfo = await stores.getStoreSellerInfo({
+        id: '', nickname: tok.nickname, site: tok.site, accessToken: tok.accessToken,
+        refreshToken: tok.refreshToken, expiresAt: Date.now() + tok.expiresIn * 1000,
+        enabled: true, createdAt: '',
+      } as any);
+      mlUserNick = sellerInfo.nickname || '';
+      mlUserId = String(sellerInfo.id || '');
+      mlUserEmail = sellerInfo.email || '';
+      mlSeller = sellerInfo.isSeller || false;
+      sellerLevel = sellerInfo.sellerLevel || null;
+    } catch { /* ignore */ }
+
+    const saved = stores.addStore({
+      nickname: tok.nickname || mlUserNick || `${tok.site}店铺`,
+      site: tok.site,
+      accessToken: tok.accessToken,
+      refreshToken: tok.refreshToken,
+      expiresAt: Date.now() + tok.expiresIn * 1000,
+      mlUserId,
+      mlUserNick,
+      mlUserEmail,
+      mlSeller,
+      enabled: true,
+    });
+    console.log('[store-callback] 店铺已添加:', saved.id, saved.mlUserNick || saved.nickname, 'isSeller=', mlSeller);
+    const warning = mlSeller
+      ? undefined
+      : `<b>⚠️ 未检测到卖家资质</b><br/>授权账号 <code>${mlUserEmail || mlUserNick || '未知'}</code> 看起来不是卖家账号（无卖家声誉/销售权限）。请在浏览器中<b>退出该账号或切换到卖家账号</b>，然后回到店铺管理页删除本店铺并重新点击「添加店铺」授权。如果继续授权错误账号，订单将拉取为空。`;
+    res.send(okHtml('店铺授权成功，已添加到多店铺列表！', warning));
+  } catch (err: any) {
+    console.error('[store-callback] 换 token / 入库失败:', err);
+    res.send(failHtml('换取店铺 token 失败', err?.message || String(err)));
+  }
+});
+
+// 店铺列表（token 已掩码）
+app.get('/api/ml/stores', (req, res) => {
+  res.json({ success: true, stores: stores.listStores() });
+});
+
+// 更新店铺（备注简称 / 启用开关 / 站点）
+app.put('/api/ml/stores/:id', (req, res) => {
+  const patch = req.body || {};
+  const updated = stores.updateStore(req.params.id, patch);
+  if (!updated) return res.status(404).json({ success: false, message: '店铺不存在' });
+  res.json({ success: true, store: { ...updated, accessToken: '', refreshToken: '' } });
+});
+
+// 删除店铺
+app.delete('/api/ml/stores/:id', (req, res) => {
+  const ok = stores.deleteStore(req.params.id);
+  res.json({ success: ok });
+});
+
+// 店铺最近订单（用于页面展示，拉前几笔已付款订单）—— CBT 兼容
+app.get('/api/ml/stores/:id/orders', async (req, res) => {
+  try {
+    const store = stores.getStoreRaw(req.params.id);
+    if (!store) return res.status(404).json({ success: false, message: '店铺不存在' });
+    const recent = await orders.fetchRecentOrdersForStore(store, 10);
+    res.json({ success: true, orders: recent });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+// 店铺全部订单（分页拉取各状态，分类为 未发货/已发货/已取消），供订单管理页使用
+app.get('/api/ml/stores/:id/all-orders', async (req, res) => {
+  try {
+    const store = stores.getStoreRaw(req.params.id);
+    if (!store) return res.status(404).json({ success: false, message: '店铺不存在' });
+    // 注意：不要解构出 orders，否则会与 import * as orders 模块同名造成「暂时性死区」
+    const list = await orders.fetchAllOrdersForStore(store);
+    res.json({ success: true, orders: list.orders, counts: list.counts });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+// 单个订单完整详情（含物流、商品图片），供弹窗展示
+app.get('/api/ml/orders/:id/detail', async (req, res) => {
+  try {
+    const storeId = (req.query.storeId as string) || '';
+    const store = stores.getStoreRaw(storeId);
+    if (!store) return res.status(404).json({ success: false, message: '店铺不存在或缺失 storeId' });
+    const detail = await orders.fetchOrderDetail(store, req.params.id);
+    res.json({ success: true, ...detail });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+// 翻译订单中的西/葡语文本（商品标题、买家留言、地址备注等）为中文
+app.post('/api/ml/translate-order', async (req, res) => {
+  try {
+    const { texts, site } = req.body || {};
+    if (!Array.isArray(texts) || !texts.length) {
+      return res.status(400).json({ success: false, message: 'texts 必须是且不能为空数组' });
+    }
+    const map = await translateOrderTexts(texts, site || 'MLM');
+    res.json({ success: true, translations: map });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+// ===================== 通知配置 =====================
+
+// 短信配置（Twilio / Webhook）
+app.get('/api/ml/sms-config', (req, res) => {
+  res.json({ success: true, config: notify.getSmsConfig() });
+});
+app.post('/api/ml/sms-config', (req, res) => {
+  const cfg = notify.saveSmsConfig(req.body || {});
+  res.json({ success: true, config: cfg });
+});
+
+// 订单提醒总开关（含轮询间隔）
+app.get('/api/ml/notify-config', (req, res) => {
+  res.json({ success: true, config: notify.getNotifyConfig() });
+});
+app.post('/api/ml/notify-config', (req, res) => {
+  const prevInterval = notify.getPollIntervalMs();
+  const cfg = notify.saveNotifyConfig(req.body || {});
+  // 如果轮询间隔发生变化，重启定时器
+  if (notify.getPollIntervalMs() !== prevInterval) {
+    restartOrderPolling();
+  }
+  res.json({ success: true, config: cfg });
+});
+
+// 短信测试（支持前端传入临时配置，未保存也能测；useLastOrder 用真实最近订单为例）
+app.post('/api/ml/sms/test', async (req, res) => {
+  const { text, config, useLastOrder } = req.body || {};
+  try {
+    if (useLastOrder) {
+      const last = await orders.getLastRealOrderForTest();
+      if (!last) return res.json({ success: false, message: '未找到任何已付款订单用于测试，请先确保店铺有订单' });
+      const notifyResult = await notify.notifyNewOrder(last.store, last.order);
+      const cfg = config && typeof config === 'object' ? config : undefined;
+      const r = await notify.sendTestSmsWithConfig(notifyResult.smsText, cfg);
+      return res.json({ ...r, preview: { smsText: notifyResult.smsText, html: notifyResult.html, text: notifyResult.text } });
+    }
+    const r = await notify.sendTestSmsWithConfig(
+      typeof text === 'string' ? text : 'ML Product Finder 短信测试',
+      config && typeof config === 'object' ? config : undefined,
+    );
+    res.json(r);
+  } catch (e: any) {
+    res.json({ success: false, message: e?.message || String(e) });
+  }
+});
+
+// ===================== 订单轮询 =====================
+
+// 手动触发一次全店订单轮询
+app.post('/api/ml/orders/poll', async (req, res) => {
+  try {
+    const report = await orders.pollAllStores();
+    res.json({ success: true, report });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+// 订单提醒日志
+app.get('/api/ml/orders/alerts', (req, res) => {
+  res.json({ success: true, alerts: orders.getAlertLog() });
+});
+
+// 手动追加一条提醒记录（把「测试发送」结果也写入发送记录列表，带详情/删除）
+app.post('/api/ml/orders/alerts', (req, res) => {
+  try {
+    const alert = req.body?.alert;
+    if (!alert || typeof alert !== 'object' || !alert.orderId) {
+      return res.status(400).json({ success: false, message: 'alert 对象缺少 orderId' });
+    }
+    orders.addAlert(alert);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || '写入提醒记录失败' });
+  }
+});
+
+// 删除一条提醒记录（按 orderId）
+app.delete('/api/ml/orders/alerts/:orderId', (req, res) => {
+  try {
+    const ok = orders.deleteAlert(req.params.orderId);
+    res.json({ success: ok });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || '删除失败' });
+  }
+});
+
 // 使用 client_credentials 获取应用级 token（无需用户授权）
 app.post('/api/ml/oauth/client-credentials', async (req, res) => {
   const result = await getClientCredentialsToken();
@@ -898,6 +1211,11 @@ app.post('/api/ml/oauth/client-credentials', async (req, res) => {
 
 // ============= 公网隧道（OAuth2 回调用） =============
 
+// 自检路径：供后端探测固定回调域名是否真的可达（cloudflared 把流量转回本机后端时返回 {ok:true}）
+app.get('/api/ml/oauth/ping', (req, res) => {
+  res.json({ ok: true, ts: Date.now() });
+});
+
 // 获取隧道状态
 app.get('/api/ml/oauth/tunnel', (req, res) => {
   const tunnel = getTunnelInfo();
@@ -905,14 +1223,24 @@ app.get('/api/ml/oauth/tunnel', (req, res) => {
     running: isTunnelRunning(),
     url: tunnel?.url || '',
     callbackUrl: tunnel?.callbackUrl || '',
+    fixedRedirect: !!process.env.ML_REDIRECT_URI,
+    redirectUri: getEffectiveRedirectUri(),
   });
 });
 
-// 启动公网隧道
+// 启动公网隧道（手动覆盖：将当前生效回调切到临时隧道地址）
 app.post('/api/ml/oauth/tunnel', async (req, res) => {
   try {
     const tunnel = await startTunnel();
     setTunnelCallbackUrl(tunnel.callbackUrl);
+    overrideResolvedRedirect({
+      uri: tunnel.callbackUrl,
+      mode: 'tunnel',
+      reachable: true,
+      fixedDomain: DEFAULT_FIXED_REDIRECT_URI,
+      tunnelUrl: tunnel.url,
+      notice: `当前为临时 localtunnel 地址，每次启动可能变化。请在美客多开发者后台 → 你的应用 → 重定向 URI 改为：${tunnel.callbackUrl}。如需固定，请启动 cloudflared 后点「重新测试回调地址」。`,
+    });
     res.json({ success: true, ...tunnel });
   } catch (error: any) {
     console.error('[Tunnel] 启动失败:', error);
@@ -920,10 +1248,51 @@ app.post('/api/ml/oauth/tunnel', async (req, res) => {
   }
 });
 
+// 查询当前 OAuth 回调地址解析状态（fixed / tunnel / env + 可达性 + 提示）
+app.get('/api/ml/oauth/callback-status', async (req, res) => {
+  const r = await ensureOAuthRedirectResolved();
+  const tunnel = getTunnelInfo();
+  res.json({
+    mode: r.mode,
+    uri: r.uri,
+    reachable: r.reachable,
+    fixedDomain: r.fixedDomain,
+    notice: r.notice || '',
+    tunnelRunning: isTunnelRunning(),
+    tunnelUrl: tunnel?.url || '',
+  });
+});
+
+// 强制重新探测固定域名（用户启动 cloudflared 后点「重新测试」恢复固定域名用）
+app.post('/api/ml/oauth/callback-test', async (req, res) => {
+  try {
+    const r = await reresolveOAuthRedirect();
+    res.json({
+      success: true,
+      mode: r.mode,
+      uri: r.uri,
+      reachable: r.reachable,
+      fixedDomain: r.fixedDomain,
+      notice: r.notice || '',
+      tunnelRunning: isTunnelRunning(),
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || '重新测试失败' });
+  }
+});
+
 // 关闭公网隧道
 app.delete('/api/ml/oauth/tunnel', (req, res) => {
   stopTunnel();
   setTunnelCallbackUrl('');
+  // 隧道关闭后：把当前生效回调切回固定域名（标记不可达，提示去启动 cloudflared / 重新测试）
+  overrideResolvedRedirect({
+    uri: DEFAULT_FIXED_REDIRECT_URI,
+    mode: 'fixed',
+    reachable: false,
+    fixedDomain: DEFAULT_FIXED_REDIRECT_URI,
+    notice: `临时隧道已手动停止。固定域名 ${DEFAULT_FIXED_REDIRECT_URI} 当前不可达，请启动 cloudflared 后点「重新测试回调地址」，或重新生成授权链接（会自动回退隧道）。`,
+  });
   res.json({ success: true, message: '隧道已关闭' });
 });
 
@@ -1001,6 +1370,38 @@ app.get('/api/ml/download/:filename', (req, res) => {
   } catch (error: any) {
     console.error('[ML Download] Error:', error);
     res.status(500).json({ error: error?.message || '下载失败' });
+  }
+});
+
+// 图片代理：代理下载 ML 图片（解决跨域下载问题）
+app.get('/api/ml/image-proxy', (req, res) => {
+  try {
+    const imageUrl = req.query.url as string;
+    if (!imageUrl) {
+      return res.status(400).json({ error: '缺少 url 参数' });
+    }
+    // 安全检查：仅允许 https 链接，且只允许 ML/ML CDN 域名
+    const allowed = /^https?:\/\/(http2\.mlstatic\.com|mlstatic\.com|www\.mercadolibre\.\w+|.*\.mlstatic\.com)/i;
+    if (!allowed.test(imageUrl)) {
+      return res.status(403).json({ error: '不允许的图片源' });
+    }
+    const client = imageUrl.startsWith('https') ? https : http;
+    client.get(imageUrl, (proxyRes) => {
+      if (proxyRes.statusCode !== 200) {
+        return res.status(proxyRes.statusCode || 502).json({ error: '图片获取失败' });
+      }
+      const ct = proxyRes.headers['content-type'] || 'image/jpeg';
+      res.setHeader('Content-Type', ct);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.setHeader('Content-Disposition', `attachment; filename="product_image.${ct.split('/')[1] || 'jpg'}"`);
+      proxyRes.pipe(res);
+    }).on('error', (err) => {
+      console.error('[Image Proxy] Error:', err.message);
+      res.status(502).json({ error: '图片代理失败: ' + err.message });
+    });
+  } catch (error: any) {
+    console.error('[Image Proxy] Error:', error);
+    res.status(500).json({ error: error?.message || '代理失败' });
   }
 });
 
@@ -1200,14 +1601,41 @@ app.post('/api/ml/export', async (req, res) => {
   }
 });
 
+// 断点续传：查询是否有未完成的 checkpoint
+app.get('/api/ml/checkpoint', (_req, res) => {
+  const cp = loadCheckpoint();
+  if (!cp) return res.json({ hasCheckpoint: false });
+  // 返回精简信息，不暴露完整商品列表给前端（数据量大）
+  res.json({
+    hasCheckpoint: true,
+    jobId: cp.jobId,
+    startedAt: cp.startedAt,
+    sites: cp.sites,
+    completedSites: cp.completedSites,
+    currentSite: cp.currentSite,
+    completedCategoryIndex: cp.completedCategoryIndex,
+    totalCategories: cp.totalCategories,
+    productCount: cp.collectedProducts?.length || 0,
+    siteStats: cp.siteStats,
+  });
+});
+
+// 断点续传：清除 checkpoint
+app.delete('/api/ml/checkpoint', (_req, res) => {
+  deleteCheckpoint();
+  res.json({ success: true });
+});
+
+// ============= 原有抓取端点（全新抓取 or 断点续传）============
+
 // 抓取商品数据 (SSE 流式进度)
 // 运行一次抓取任务（前端 /api/ml/fetch、外部 /api/ml/trigger、定时调度共用）
 let lastRunSites: MLSiteCode[] = ['MLM', 'MLB'];
 let lastRunOptions: FetchOptions = {};
-async function runExportJob(sites: MLSiteCode[], options: FetchOptions, onProgress?: (p: any) => void) {
+async function runExportJob(sites: MLSiteCode[], options: FetchOptions, onProgress?: (p: any) => void, resumeCp?: FetchCheckpoint | null) {
   lastRunSites = sites;
   lastRunOptions = options;
-  const result = await fetchAllProductsAndExport(sites, options, onProgress);
+  const result = await fetchAllProductsAndExport(sites, options, onProgress, resumeCp);
   // 抓取完成自动发邮件
   const emailCfg = getEmailConfig();
   if (emailCfg.enabled) {
@@ -1222,9 +1650,24 @@ async function runExportJob(sites: MLSiteCode[], options: FetchOptions, onProgre
 }
 
 app.post('/api/ml/fetch', async (req, res) => {
-  const { sites = ['MLM', 'MLB'], options = {} } = req.body;
+  const { sites = ['MLM', 'MLB'], options = {}, resume = false } = req.body;
 
-  console.log(`[ML Fetch] 开始抓取, 站点: ${sites.join(', ')}, 选项: ${JSON.stringify(options)}`);
+  // 断点续传：加载 checkpoint 并恢复
+  let resumeCp: FetchCheckpoint | null = null;
+  if (resume) {
+    resumeCp = loadCheckpoint();
+    if (resumeCp) {
+      console.log(`[ML Fetch] 断点续传: jobId=${resumeCp.jobId}, 已有 ${resumeCp.collectedProducts?.length || 0} 个商品`);
+    } else {
+      console.log('[ML Fetch] 请求续传但无 checkpoint，从头开始');
+    }
+  } else {
+    // 非续传：清除旧 checkpoint
+    deleteCheckpoint();
+    console.log('[ML Fetch] 全新抓取，已清除旧 checkpoint');
+  }
+
+  console.log(`[ML Fetch] 开始抓取, 站点: ${sites.join(', ')}, 选项: ${JSON.stringify(options)}${resumeCp ? ', 模式: 断点续传' : ''}`);
 
   // 设置 SSE
   res.setHeader('Content-Type', 'text/event-stream');
@@ -1243,9 +1686,9 @@ app.post('/api/ml/fetch', async (req, res) => {
   };
 
   try {
-    sendProgress({ phase: 'start', current: 0, total: 0, message: '正在初始化（校验 Token / 准备抓取）...' });
+    sendProgress({ phase: 'start', current: 0, total: 0, message: resumeCp ? '正在从断点恢复...' : '正在初始化（校验 Token / 准备抓取）...' });
     await ensureValidToken();
-    const result = await runExportJob(sites as MLSiteCode[], options as FetchOptions, sendProgress);
+    const result = await runExportJob(sites as MLSiteCode[], options as FetchOptions, sendProgress, resumeCp);
 
     res.write(`data: ${JSON.stringify({
       phase: 'complete',
@@ -1308,10 +1751,46 @@ app.get('/api/ml/sourcing/export/latest', async (req, res) => {
   }
 });
 
-// 1688 自动图搜 / 货源匹配（需配置 ML_1688_* 环境变量；否则返回 available=false）
+// 1688 货源匹配配置（读写方案选择 + OneBound 密钥）
+app.get('/api/ml/sourcing/1688/config', (req, res) => {
+  try {
+    const cfg = sourcing.loadAli1688Config();
+    // 不返回 oneboundSecret 原文，只返回是否有配置
+    res.json({
+      success: true,
+      method: cfg.method || 'onebound',
+      hasOneboundKey: !!cfg.oneboundKey,
+      hasOneboundSecret: !!cfg.oneboundSecret,
+    });
+  } catch (err: any) {
+    res.json({ success: false, message: err?.message || '读取配置失败' });
+  }
+});
+
+app.post('/api/ml/sourcing/1688/config', (req, res) => {
+  try {
+    const { method, oneboundKey, oneboundSecret } = req.body || {};
+    const current = sourcing.loadAli1688Config();
+    if (method && ['onebound', 'search1688api'].includes(method)) {
+      current.method = method;
+    }
+    if (oneboundKey !== undefined) current.oneboundKey = oneboundKey;
+    // oneboundSecret：只有传入非空且非遮罩才更新
+    if (oneboundSecret !== undefined && oneboundSecret !== '' && !oneboundSecret.startsWith('***')) {
+      current.oneboundSecret = oneboundSecret;
+    }
+    sourcing.saveAli1688Config(current);
+    res.json({ success: true, method: current.method });
+  } catch (err: any) {
+    res.json({ success: false, message: err?.message || '保存配置失败' });
+  }
+});
+
+// 1688 自动图搜 / 货源匹配（支持两种免费方案：onebound / search1688api）
 app.post('/api/ml/sourcing/1688/search', async (req, res) => {
   try {
-    const result = await sourcing.search1688(req.body || {});
+    const { method, imageUrl, title, oneboundKey, oneboundSecret } = req.body || {};
+    const result = await sourcing.search1688({ method, imageUrl, title, oneboundKey, oneboundSecret });
     res.json({ success: true, ...result });
   } catch (err: any) {
     res.json({ success: false, message: err?.message || '1688 搜索失败' });
@@ -1404,29 +1883,196 @@ app.get('/api/ml/listing/quota', async (req, res) => {
   }
 });
 
-// 合规标题自动生成：提取竞品要素 → 用自有模板/卖点词重组，给出多候选 + 相似度预警
-app.post('/api/ml/listing/generate-title', (req, res) => {
+// ============ ML 热搜词 & LLM 配置 ============
+
+// 获取站点热搜词（带 1 小时缓存）
+app.get('/api/ml/trends', async (req, res) => {
   try {
-    const { competitorTitle, site, brand, customPoints, count, maxLength } = req.body || {};
+    const site = (req.query.site as string) || 'MLM';
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 20, 50);
+    const keywords = await getTrendsKeywords(site, limit);
+    res.json({ success: true, site, keywords, count: keywords.length });
+  } catch (err: any) {
+    res.json({ success: false, message: err?.message || '获取热搜失败' });
+  }
+});
+
+// 完整热搜词数据（用于热搜词页面）：GET /api/ml/trends/MLM?refresh=1
+app.get('/api/ml/trends/:site', async (req, res) => {
+  // 翻译改为后台非阻塞补译，本接口只负责拉取热搜词（通常 1~2s），超时留足余量即可
+  const TRENDS_TIMEOUT_MS = 60000;
+  try {
+    const site = (req.params.site as string) || 'MLM';
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 50);
+    const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
+    const items = await Promise.race([
+      getTrends(site, limit, forceRefresh),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('获取热搜词超时，请稍后重试')), TRENDS_TIMEOUT_MS)
+      ),
+    ]);
+    res.json({
+      success: true,
+      site: site.toUpperCase(),
+      count: items.length,
+      refreshed: forceRefresh,
+      items,
+    });
+  } catch (err: any) {
+    res.status(502).json({ success: false, message: err?.message || '获取热搜失败' });
+  }
+});
+
+// 查询 LLM 配置状态（apiKey 不返回；baseUrl 仅公开服务地址，无需脱敏，必须返回完整值，
+// 否则前端 loadLlmStatus 回填表单时会把截断后的地址写回输入框，再保存即损坏配置）
+app.get('/api/ml/llm-config', (req, res) => {
+  const cfg = getLlmConfig();
+  res.json({
+    success: true,
+    configured: !!cfg,
+    baseUrl: cfg?.baseUrl || '',
+    model: cfg?.model || '',
+  });
+});
+
+// 保存 LLM 配置文件（data/llm-config.json），环境变量优先级更高
+app.post('/api/ml/llm-config', (req, res) => {
+  try {
+    const { baseUrl, apiKey, model } = req.body || {};
+    if (!baseUrl || !model) {
+      return res.status(400).json({ success: false, message: '请提供 baseUrl、model' });
+    }
+    const existing = getLlmConfig();
+    // apiKey 留空表示不修改：已有配置则复用旧 key，首次保存必须提供
+    const finalApiKey = (apiKey && apiKey.trim()) ? apiKey.trim() : existing?.apiKey;
+    if (!finalApiKey) {
+      return res.status(400).json({ success: false, message: '首次保存必须提供 apiKey' });
+    }
+    const result = saveLlmConfig({ baseUrl: baseUrl.replace(/\/+$/, ''), apiKey: finalApiKey, model });
+    if (!result.success) {
+      return res.status(400).json({ success: false, message: result.message });
+    }
+    res.json({ success: true, message: 'LLM 配置已保存' });
+  } catch (err: any) {
+    res.json({ success: false, message: err?.message || '保存失败' });
+  }
+});
+
+// 测试 LLM 连通性：用 translateTrendsKeywords 翻译一个样例词，验证 baseUrl/apiKey/model 是否正确
+app.post('/api/ml/llm-config/test', async (req, res) => {
+  // 允许在测试请求里临时带配置（不持久化），方便未保存时先试
+  const { baseUrl, apiKey, model } = req.body || {};
+  if (baseUrl && apiKey && model) {
+    // 先校验再临时保存；校验失败直接返回，避免把错误配置写进文件
+    const normalized = baseUrl.replace(/\/+$/, '').trim();
+    if (normalized.includes('...')) {
+      return res.json({
+        success: false,
+        message: `baseUrl 不能包含省略号 "..."，你填写的是 "${normalized}"，请填写完整地址，如 https://api.siliconflow.cn`,
+      });
+    }
+    // 临时写一遍再测（进程内生效，下一次请求仍走正式配置）
+    const saveResult = saveLlmConfig({ baseUrl: normalized, apiKey, model });
+    if (!saveResult.success) {
+      return res.json({ success: false, message: saveResult.message });
+    }
+  }
+  const cfg = getLlmConfig();
+  if (!cfg) {
+    return res.json({ success: false, message: '尚未配置 LLM（baseUrl/apiKey/model 至少一个为空）' });
+  }
+
+  // 先探测网络是否可达（不看鉴权），帮助用户区分「后端没网」和「Key/Model 错」
+  const reachability = await probeLlmReachability(cfg.baseUrl, 8000);
+  if (!reachability.ok) {
+    return res.json({
+      success: false,
+      message: `后端无法访问 LLM 服务地址：${reachability.error}。请检查本机/服务器网络、代理、DNS，或换一家可访问的厂商。`,
+      networkError: reachability.error,
+      url: reachability.url,
+      raw: '',
+    });
+  }
+
+  try {
+    const diag = await testLlmTranslation('MLM');
+    if (diag.success && diag.sample) {
+      res.json({ success: true, message: '连接成功，翻译示例：' + JSON.stringify(diag.sample), sample: diag.sample, url: reachability.url });
+    } else {
+      res.json({
+        success: false,
+        message: diag.error || '已连到模型但未返回有效翻译',
+        raw: diag.raw,
+        status: reachability.status,
+        url: reachability.url,
+      });
+    }
+  } catch (err: any) {
+    res.json({ success: false, message: `连接失败：${err?.message || err}` });
+  }
+});
+
+// 合规标题自动生成（AI 优先，规则引擎兜底）
+// AI 基于 1688 货源信息 + 竞品要素 + ML 热搜词生成；AI 不可用时回退规则引擎
+app.post('/api/ml/listing/generate-title', async (req, res) => {
+  try {
+    const { competitorTitle, site, brand, customPoints, count, maxLength, sourceTitle, sourcePriceCNY, trendKeywords } = req.body || {};
     if (!competitorTitle || typeof competitorTitle !== 'string') {
       return res.status(400).json({ success: false, message: '请提供竞品标题（competitorTitle）' });
     }
+
+    // 1) 先尝试 AI 生成（自动注入站点热搜词）
+    const aiResult = await aiGenerateTitles({
+      competitorTitle,
+      site: site || 'MLM',
+      sourceTitle,
+      sourcePriceCNY,
+      brand,
+      count: count || 3,
+      trendKeywords: Array.isArray(trendKeywords) ? trendKeywords : undefined,
+    });
+
+    if (aiResult.titles.length > 0) {
+      // 给 AI 结果也计算相似度
+      const titlesWithSim = aiResult.titles.map((t) => {
+        const sim = titleGen.titleSimilarity(t, competitorTitle);
+        return { title: t, length: t.length, similarity: Math.round(sim * 100) / 100, safe: sim < 0.5 };
+      });
+      return res.json({ success: true, titles: titlesWithSim, engine: 'ai' });
+    }
+
+    // 2) AI 不可用 → 回退规则引擎
     const titles = titleGen.generateTitles({ competitorTitle, site: site || 'MLM', brand, customPoints, count, maxLength });
-    res.json({ success: true, titles });
+    res.json({ success: true, titles, engine: 'rule', aiError: aiResult.error });
   } catch (err: any) {
     res.json({ success: false, message: err?.message || '生成失败' });
   }
 });
 
-// 批量生成标题：对整批爆款一次性生成，自动选取「相似度最低(最安全)」的候选填回
-app.post('/api/ml/listing/generate-title/batch', (req, res) => {
+// 批量生成标题（AI 优先，规则兜底）
+app.post('/api/ml/listing/generate-title/batch', async (req, res) => {
   try {
     const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
     if (rows.length === 0) {
       return res.status(400).json({ success: false, message: '请提供 rows 数组' });
     }
     const { count, maxLength } = req.body;
-    const titles: string[] = rows.map((r: any) => {
+
+    // 1) 先尝试 AI 批量生成（自动注入站点热搜词）
+    const aiTitles = await aiGenerateTitlesBatch(
+      rows.map((r: any) => ({
+        competitorTitle: r.competitorTitle || r.title || '',
+        site: r.site || 'MLM',
+        sourceTitle: r.sourceTitle,
+        sourcePriceCNY: r.sourcePriceCNY,
+        brand: r.brand,
+        trendKeywords: Array.isArray(r.trendKeywords) ? r.trendKeywords : undefined,
+      }))
+    );
+
+    // 2) AI 未能生成的条目用规则引擎补全
+    const titles: string[] = rows.map((r: any, i: number) => {
+      if (aiTitles[i]) return aiTitles[i];
       const list = titleGen.generateTitles({
         competitorTitle: r.competitorTitle || r.title || '',
         site: r.site || 'MLM',
@@ -1435,34 +2081,111 @@ app.post('/api/ml/listing/generate-title/batch', (req, res) => {
         maxLength,
       });
       if (!list.length) return '';
-      // 优先选相似度最低（与竞品差异最大、最安全）的候选
       const sorted = [...list].sort((a, b) => a.similarity - b.similarity);
       return sorted[0].title;
     });
-    res.json({ success: true, titles });
+
+    const aiCount = aiTitles.filter(Boolean).length;
+    res.json({ success: true, titles, engine: 'ai+rule', aiGenerated: aiCount, ruleFallback: titles.length - aiCount });
   } catch (err: any) {
     res.json({ success: false, message: err?.message || '批量生成失败' });
   }
 });
 
-// 批量配图（合规）：1688 货源图 → 可选水印 → 上传美客多，返回公网 URL
-// 前端对每行带 sourceImages 的商品调用，回填 mlPictures。绝不使用 ML 竞品图。
+// ============ AI 商品描述生成 ============
+
+// 单条描述生成
+app.post('/api/ml/listing/generate-description', async (req, res) => {
+  try {
+    const { title, site, sourceTitle, sourcePriceCNY, competitorDescription, categoryName, brand, trendKeywords } = req.body || {};
+    if (!title || typeof title !== 'string') {
+      return res.status(400).json({ success: false, message: '请提供商品标题（title）' });
+    }
+
+    const result = await aiGenerateDescription({
+      title,
+      site: site || 'MLM',
+      sourceTitle,
+      sourcePriceCNY,
+      competitorDescription,
+      categoryName,
+      brand,
+      trendKeywords: Array.isArray(trendKeywords) ? trendKeywords : undefined,
+    });
+
+    if (result.description) {
+      res.json({ success: true, description: result.description, engine: 'ai' });
+    } else {
+      // AI 失败时给一个基础模板
+      const lang = (site || '').toUpperCase() === 'MLB' ? 'pt' : 'es';
+      const fallback = lang === 'pt'
+        ? `${title}\n\nProduto de alta qualidade. Material premium, acabamento refinado. Pronto para uso diario.\n\nEspecificacoes:\n- Produto novo\n- Qualidade garantida\n- Envio rapido`
+        : `${title}\n\nProducto de alta calidad. Material premium, acabado refinado. Listo para uso diario.\n\nEspecificaciones:\n- Producto nuevo\n- Calidad garantizada\n- Envio rapido`;
+      res.json({ success: true, description: fallback, engine: 'template', aiError: result.error });
+    }
+  } catch (err: any) {
+    res.json({ success: false, message: err?.message || '描述生成失败' });
+  }
+});
+
+// 批量描述生成
+app.post('/api/ml/listing/generate-description/batch', async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    if (rows.length === 0) {
+      return res.status(400).json({ success: false, message: '请提供 rows 数组' });
+    }
+
+    const descriptions = await aiGenerateDescriptionsBatch(
+      rows.map((r: any) => ({
+        title: r.title || r.mlTitle || '',
+        site: r.site || 'MLM',
+        sourceTitle: r.sourceTitle,
+        sourcePriceCNY: r.sourcePriceCNY,
+        competitorDescription: r.competitorDescription,
+        categoryName: r.categoryName,
+        brand: r.brand,
+        trendKeywords: Array.isArray(r.trendKeywords) ? r.trendKeywords : undefined,
+      }))
+    );
+
+    const aiCount = descriptions.filter(Boolean).length;
+    res.json({ success: true, descriptions, engine: 'ai', aiGenerated: aiCount });
+  } catch (err: any) {
+    res.json({ success: false, message: err?.message || '批量描述生成失败' });
+  }
+});
+
+// 批量配图（合规）：1688 货源图 → AI修图/水印 → 上传美客多，返回公网 URL
+// 模式：ai=AI修图(去背景+白底+增强+水印) / watermark=仅水印 / direct=直传
 app.post('/api/ml/listing/prepare-images', async (req, res) => {
   try {
-    const { site, sourceImages, watermark, watermarkText, max } = req.body || {};
+    const { site, sourceImages, mode, watermark, watermarkText, max } = req.body || {};
     if (!Array.isArray(sourceImages) || sourceImages.length === 0) {
       return res.json({ success: false, message: '未提供 sourceImages（请先通过 1688 图搜拿到货源图）' });
     }
+    // 兼容旧参数：watermark:boolean → mode:string
+    const imageMode = mode || (watermark === false ? 'direct' : 'watermark');
     const result = await imagePipeline.prepareListingImages({
       site: site || 'MLM',
       sourceImages,
-      watermark: watermark !== false,
+      mode: imageMode as any,
       watermarkText: watermarkText || 'TuTienda',
       max,
     });
     res.json({ success: result.success, ...result });
   } catch (err: any) {
     res.json({ success: false, message: err?.message || '配图失败' });
+  }
+});
+
+// 检查 AI 修图能力是否可用（rembg 是否已安装）
+app.get('/api/ml/listing/ai-image-status', async (req, res) => {
+  try {
+    const result = await imagePipeline.checkAIAvailable();
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.json({ success: false, available: false, message: err?.message });
   }
 });
 
@@ -1518,7 +2241,7 @@ app.get('/api/ml/filter/config', (req, res) => {
   res.json({ success: true, config: defaultFilterConfig });
 });
 
-// ============ 妙手 ERP 素材包导出 ============
+// ============ 选品利润分析导出（SourcingPage） ============
 app.post('/api/ml/erp/export', async (req, res) => {
   try {
     const rows = Array.isArray(req.body?.rows) && req.body.rows.length > 0
@@ -1527,7 +2250,7 @@ app.post('/api/ml/erp/export', async (req, res) => {
     const result = await writeErpExport(rows, req.body?.options || {});
     res.json({ success: true, ...result });
   } catch (err: any) {
-    res.json({ success: false, message: err?.message || '素材包导出失败' });
+    res.json({ success: false, message: err?.message || '利润分析导出失败' });
   }
 });
 
@@ -1641,16 +2364,34 @@ app.get('/api/ml/debug/test', async (req, res) => {
 
 // ============= 静态文件服务 (Electron 模式) =============
 
-// 在生产模式下服务前端构建产物
-if (process.env.NODE_ENV === 'production' || process.env.ELECTRON_MODE === 'true') {
-  const distPath = process.env.ELECTRON_DIST_PATH || path.join(__dirname, '..', 'dist');
-  if (fs.existsSync(distPath)) {
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
-    console.log(`[Server] Serving static files from ${distPath}`);
-  }
+// 服务前端构建产物（生产 / Electron / 或经 cloudflared 等隧道以域名方式访问时）
+const distPath = process.env.ELECTRON_DIST_PATH || path.join(__dirname, '..', 'dist');
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(distPath, 'index.html'));
+  });
+  console.log(`[Server] Serving static files from ${distPath}`);
+}
+
+// 订单轮询：间隔从 notify-config 读取，默认 30 分钟，配置变更时自动重启定时器
+let orderPollTimer: NodeJS.Timeout | null = null;
+function startOrderPolling() {
+  if (orderPollTimer) clearInterval(orderPollTimer);
+  const intervalMs = notify.getPollIntervalMs();
+  orderPollTimer = setInterval(() => {
+    orders.pollAllStores()
+      .then((report) => {
+        const triggered = report.filter((r) => (r.newOrders || 0) > 0);
+        if (triggered.length) console.log('[Orders] 轮询完成，触发提醒:', JSON.stringify(triggered));
+      })
+      .catch((e) => console.error('[Orders] 轮询出错:', e?.message || e));
+  }, intervalMs);
+  const minutes = Math.round(intervalMs / 60 / 1000);
+  console.log(`[Orders] 每 ${minutes} 分钟订单轮询已启动`);
+}
+function restartOrderPolling() {
+  startOrderPolling();
 }
 
 // 启动服务器（默认 HTTP；localtunnel 会提供公网 HTTPS）
@@ -1674,4 +2415,7 @@ console.log('[Scheduler] 定时调度已启动');
 
 // 启动 token 自动续期（启动预热 + 每 30 分钟保活，依赖 ML_APP_ID/ML_SECRET_KEY）
 initAutoRenew();
+
+// 启动订单轮询（间隔从 notify-config 读取，默认 30 分钟）
+startOrderPolling();
 });
