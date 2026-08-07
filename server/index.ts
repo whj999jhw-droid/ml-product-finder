@@ -1864,8 +1864,18 @@ app.post('/api/ml/listing/precheck', (req, res) => {
 // 创建 Listing（POST /items，需卖家 write token）
 app.post('/api/ml/listing/create', async (req, res) => {
   try {
-    await ensureValidToken();
-    const result = await listing.createListing(req.body || {});
+    const storeId = req.body?.storeId as string | undefined;
+    let tokenOverride: string | undefined;
+    if (storeId) {
+      const store = stores.getStoreRaw(storeId);
+      if (!store) {
+        return res.json({ success: false, message: `未找到店铺 ${storeId}` });
+      }
+      tokenOverride = await stores.ensureStoreToken(store);
+    } else {
+      await ensureValidToken();
+    }
+    const result = await listing.createListing(req.body || {}, tokenOverride);
     res.json({ success: true, ...result });
   } catch (err: any) {
     res.json({ success: false, message: err?.message || '上架失败' });
@@ -1875,7 +1885,6 @@ app.post('/api/ml/listing/create', async (req, res) => {
 // 批量上架（队列 + 429 指数退避重试 + 逐条合规预检）
 app.post('/api/ml/listing/publish-batch', async (req, res) => {
   try {
-    await ensureValidToken();
     const drafts = Array.isArray(req.body?.drafts) ? req.body.drafts : [];
     if (drafts.length === 0) {
       return res.json({ success: false, message: '未提供上架草稿（drafts 数组为空）' });
@@ -1883,9 +1892,26 @@ app.post('/api/ml/listing/publish-batch', async (req, res) => {
     if (drafts.length > 50) {
       return res.json({ success: false, message: '单批最多 50 条，请分批上架' });
     }
+    // 多店铺：若指定 storeId，则用该店铺自己的 write token（自动刷新）上架
+    let token: string | undefined;
+    let storeSite: string | undefined;
+    const storeId = req.body?.storeId as string | undefined;
+    if (storeId) {
+      const store = stores.getStoreRaw(storeId);
+      if (!store) {
+        return res.json({ success: false, message: `未找到店铺 ${storeId}，请在「店铺管理」中添加并授权` });
+      }
+      token = await stores.ensureStoreToken(store);
+      storeSite = store.site;
+    } else {
+      await ensureValidToken();
+    }
     const result = await listing.publishBatch(drafts, {
       concurrency: req.body?.concurrency,
       maxRetries: req.body?.maxRetries,
+      token,
+      storeSite,
+      storeId,
     });
     res.json({ success: true, ...result });
   } catch (err: any) {

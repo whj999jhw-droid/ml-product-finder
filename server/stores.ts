@@ -52,9 +52,9 @@ function save() {
   }
 }
 
-/** 对外列表：掩码 token，避免泄露 */
-export function listStores(): Store[] {
-  return stores.map((s) => ({ ...s, accessToken: '', refreshToken: '' }));
+/** 对外列表：掩码 token，避免泄露；附 authorized 标记便于前端判断是否可上架 */
+export function listStores(): (Store & { authorized: boolean })[] {
+  return stores.map((s) => ({ ...s, accessToken: '', refreshToken: '', authorized: !!s.accessToken }));
 }
 
 /** 内部使用：返回含 token 的原始数组 */

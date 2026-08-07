@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Button,
   Card,
@@ -67,6 +68,7 @@ interface FilterInfo {
 const defaultSettings = { commissionRate: 0.13, payoutRate: 0.03, roiThreshold: 0.2 };
 
 export function SourcingPage() {
+  const navigate = useNavigate();
   const [rows, setRows] = useState<SourcingRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [cnyUsd, setCnyUsd] = useState(0.14);
@@ -105,8 +107,10 @@ export function SourcingPage() {
   // 一键全自动
   const [autoAllLoading, setAutoAllLoading] = useState(false);
   const [autoAllProgress, setAutoAllProgress] = useState<string>('');
-  // ML OAuth 状态
-  const [oauthStatus, setOauthStatus] = useState<{ hasRefreshToken: boolean; hasConfig: boolean } | null>(null);
+  // 多店铺：已添加的店铺列表（含 authorized 标记）
+  const [storesList, setStoresList] = useState<{ id: string; nickname: string; site: string; authorized: boolean; enabled: boolean }[]>([]);
+  // 发布时选定的目标店铺
+  const [selectedStoreId, setSelectedStoreId] = useState<string>('');
   // 一键上架确认
   const [publishOpen, setPublishOpen] = useState(false);
   const [publishing, setPublishing] = useState(false);
@@ -241,9 +245,13 @@ export function SourcingPage() {
     fetch('/api/ml/listing/ai-image-status').then(r => r.json()).then(d => {
       setAiImageAvailable(d.available === true);
     }).catch(() => setAiImageAvailable(false));
-    // 检查 ML OAuth 状态
-    fetch('/api/ml/oauth/config').then(r => r.json()).then(d => {
-      setOauthStatus({ hasRefreshToken: !!d.hasRefreshToken, hasConfig: !!d.hasConfig });
+    // 拉取已添加店铺（多店铺上架用）
+    fetch('/api/ml/stores').then(r => r.json()).then(d => {
+      const list = Array.isArray(d.stores) ? d.stores : [];
+      setStoresList(list);
+      // 默认选中第一个「已授权且启用」的店铺
+      const firstOk = list.find((s: any) => s.authorized && s.enabled);
+      if (firstOk) setSelectedStoreId(firstOk.id);
     }).catch(() => null);
   }, [loadRate, loadLatest, load1688Config]);
 
@@ -714,34 +722,28 @@ export function SourcingPage() {
     }
   };
 
-  // ML OAuth 授权（本项目为 CBT 跨境卖家，使用 global-selling 授权入口）
-  const handleOauthAuthorize = async () => {
-    try {
-      const r = await fetch('/api/ml/oauth/auth-url?pkce=true&site=cbt');
-      const d = await r.json();
-      if (d.url) {
-        window.open(d.url, '_blank');
-        NotificationPlugin.info({
-          title: '授权窗口已打开（CBT 跨境卖家）',
-          content: '请在弹出的 Mercado Libre Global Selling 页面完成登录授权，授权后回调会自动保存 token。如回调失败，可手动复制授权码到「手动交换」',
-        });
-      } else {
-        NotificationPlugin.error({ title: '获取授权链接失败', content: d.error || '请先在设置页配置 App ID 和 Secret Key' });
-      }
-    } catch (err: any) {
-      NotificationPlugin.error({ title: '授权失败', content: err?.message || '未知错误' });
-    }
-  };
+  // 当前选中的目标店铺及站点（多店铺上架用）
+  const selectedStore = storesList.find((s) => s.id === selectedStoreId) || null;
+  const selectedStoreSite = selectedStore?.site || '';
+  const authorizedStores = storesList.filter((s) => s.authorized && s.enabled);
 
   // 一键上架（用「我的标题」+「描述」+「已配图」构建草稿并批量发布，合规预检在前端/后端双重把关）
   const handlePublishConfirm = async () => {
     setPublishing(true);
     setPublishSummary('');
     try {
+      // 多店铺：仅发布到所选店铺站点匹配的商品
+      const siteFilter = selectedStoreSite;
       const drafts = rows
-        .filter((r) => (r.mlTitle || '').trim().length >= 5 && (mlPictures[r.itemId]?.length || 0) > 0)
+        .filter(
+          (r) =>
+            (r.mlTitle || '').trim().length >= 5 &&
+            (mlPictures[r.itemId]?.length || 0) > 0 &&
+            (!siteFilter || r.site === siteFilter)
+        )
         .map((r) => ({
           site: r.site,
+          storeId: selectedStoreId || undefined,
           title: r.mlTitle,
           category_id: r.categoryId || '',
           price: r.priceUSD,
@@ -753,19 +755,25 @@ export function SourcingPage() {
           brand: r.brand && r.brand.toLowerCase() !== 'generic' ? r.brand : 'Generic',
           weight: r.weight || 0.5,
         }));
+      if (!selectedStoreId || !selectedStore) {
+        NotificationPlugin.warning({ title: '未选择目标店铺', content: '请先在「店铺管理」添加并授权店铺，并在发布弹窗中选择目标店铺' });
+        setPublishing(false);
+        return;
+      }
       if (drafts.length === 0) {
-        NotificationPlugin.warning({ title: '无符合条件的商品', content: '需同时具备「我的标题」与「已配图」' });
+        NotificationPlugin.warning({ title: '无符合条件的商品', content: siteFilter ? `需同时具备「我的标题」「已配图」且站点为 ${siteFilter}` : '需同时具备「我的标题」与「已配图」' });
         setPublishing(false);
         return;
       }
       const r = await fetch('/api/ml/listing/publish-batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ drafts, concurrency: 3 }),
+        body: JSON.stringify({ drafts, storeId: selectedStoreId, concurrency: 3 }),
       });
       const d = await r.json();
       if (d.success) {
-        setPublishSummary(`上架完成：成功 ${d.succeeded} / 合规拦截 ${d.blocked} / 失败 ${d.failed}（共 ${d.total}）`);
+        const parts = [`成功 ${d.succeeded}`, `合规拦截 ${d.blocked}`, `站点不符跳过 ${d.skipped || 0}`, `失败 ${d.failed}`];
+        setPublishSummary(`上架到「${selectedStore.nickname}」完成：${parts.join(' / ')}（共 ${d.total}）`);
         NotificationPlugin.success({ title: '批量上架完成', content: `成功 ${d.succeeded} 条` });
       } else {
         NotificationPlugin.error({ title: '上架失败', content: d.message });
@@ -1051,23 +1059,22 @@ export function SourcingPage() {
             </Button>
           </div>
 
-        {/* 店铺授权提示（一键上架需要 write token） */}
-        {oauthStatus && !oauthStatus.hasRefreshToken && (
+        {/* 多店铺授权提示（一键上架需要所选店铺的 write token） */}
+        {authorizedStores.length === 0 ? (
           <div className="p-3 rounded flex items-center justify-between gap-3" style={{ backgroundColor: 'var(--td-bg-color-secondarycontainer)', border: '1px solid #E37318' }}>
             <div className="text-sm">
-              <b style={{ color: '#E37318' }}>⚠️ 尚未授权美客多店铺</b>
+              <b style={{ color: '#E37318' }}>⚠️ 尚未授权任何店铺</b>
               <span className="ml-2" style={{ color: 'var(--td-text-color-secondary)' }}>
-                「一键上架」需卖家 write token。点击右侧按钮，在弹出的美客多页面登录授权即可（授权一次长期有效）。
+                「一键上架」需卖家 write token，请先在「店铺管理」中添加并授权店铺（授权一次长期有效）。
               </span>
             </div>
-            <Button theme="warning" onClick={handleOauthAuthorize}>
-              授权店铺
+            <Button theme="warning" onClick={() => navigate('/stores')}>
+              去店铺管理授权
             </Button>
           </div>
-        )}
-        {oauthStatus && oauthStatus.hasRefreshToken && (
+        ) : (
           <div className="p-2 rounded text-sm" style={{ backgroundColor: 'var(--td-bg-color-secondarycontainer)' }}>
-            ✅ 店铺已授权，可直接一键上架。
+            ✅ 已授权 {authorizedStores.length} 个店铺，上架时选择目标店铺即可一键发布。
           </div>
         )}
         </div>
@@ -1302,24 +1309,47 @@ export function SourcingPage() {
 
         {/* 一键上架确认 */}
         <Dialog
-          header="一键上架确认"
+          header="一键上架确认（多店铺）"
           visible={publishOpen}
           onClose={() => setPublishOpen(false)}
           onConfirm={handlePublishConfirm}
           confirmBtn={{ content: publishing ? '上架中...' : '确认上架', loading: publishing }}
           width={540}
         >
-          <div className="space-y-2 text-sm">
+          <div className="space-y-3 text-sm">
+            {/* 目标店铺选择 */}
+            <div className="flex flex-col gap-1">
+              <span className="text-sm">目标店铺（用自己的 write token 上架）</span>
+              {authorizedStores.length === 0 ? (
+                <div className="text-sm" style={{ color: '#E37318' }}>
+                  暂无已授权店铺，请先到「店铺管理」添加并授权。
+                </div>
+              ) : (
+                <Select
+                  value={selectedStoreId}
+                  onChange={(v) => setSelectedStoreId(v as string)}
+                  options={authorizedStores.map((s) => ({
+                    value: s.id,
+                    label: `${s.nickname}（${s.site}）`,
+                  }))}
+                />
+              )}
+            </div>
             <p>
-              将对<strong>同时具备「我的标题」且「已配图」</strong>的商品一键发布到对应美客多站点；
+              将对<strong>同时具备「我的标题」「已配图」且站点与所选店铺一致</strong>的商品一键发布；
               后端合规预检会拦截品牌侵权/盗用竞品原图等情况。
             </p>
             <p style={{ color: 'var(--td-text-color-secondary)' }}>
               预计上架{' '}
               <b>
-                {rows.filter((r) => (r.mlTitle || '').trim().length >= 5 && (mlPictures[r.itemId]?.length || 0) > 0).length}
+                {rows.filter(
+                  (r) =>
+                    (r.mlTitle || '').trim().length >= 5 &&
+                    (mlPictures[r.itemId]?.length || 0) > 0 &&
+                    (!selectedStoreSite || r.site === selectedStoreSite)
+                ).length}
               </b>{' '}
-              条。
+              条（站点 {selectedStoreSite || '未选店铺'}）。
             </p>
             {publishSummary && (
               <p style={{ color: '#00A859', fontWeight: 600 }}>{publishSummary}</p>

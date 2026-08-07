@@ -8,6 +8,7 @@ import { checkBannedWords } from './bannedWords.js';
 
 export interface ListingDraft {
   site: string; // MLM / MLB / MLC / MCO
+  storeId?: string; // 多店铺：指定用哪个店铺的 write token 上架（不传则回退全局 token）
   title: string;
   category_id: string;
   price: number;
@@ -45,10 +46,11 @@ export function precheckCompliance(draft: Partial<ListingDraft>): PrecheckResult
   };
 }
 
-export async function createListing(draft: ListingDraft): Promise<{ itemId: string; permalink: string }> {
-  const token = getAccessToken();
+export async function createListing(draft: ListingDraft, tokenOverride?: string): Promise<{ itemId: string; permalink: string }> {
+  // 多店铺：优先用传入的店铺 token；否则回退全局 token
+  const token = tokenOverride || getAccessToken();
   if (!token) {
-    throw new Error('未获取到卖家 write token，请先在「美客多商品抓取」页用「授权我的店铺」获取（需含 write scope）');
+    throw new Error('未获取到卖家 write token，请先在「店铺管理」中添加并授权店铺（需含 write scope），或先在设置页完成全局授权');
   }
 
   const siteInfo = ML_SITES[draft.site as keyof typeof ML_SITES];
@@ -108,6 +110,8 @@ export interface BatchPublishItemResult {
   error?: string;
   attempts: number;
   precheckHits?: string[];
+  skipped?: boolean; // 因站点与所选店铺不符被跳过
+  storeId?: string;
 }
 
 export interface BatchPublishResult {
@@ -115,6 +119,7 @@ export interface BatchPublishResult {
   succeeded: number;
   failed: number;
   blocked: number; // 预检拦截数
+  skipped: number; // 站点与所选店铺不符被跳过数
   results: BatchPublishItemResult[];
 }
 
@@ -126,7 +131,14 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  */
 export async function publishBatch(
   drafts: ListingDraft[],
-  opts?: { concurrency?: number; maxRetries?: number; onProgress?: (done: number, total: number, last?: BatchPublishItemResult) => void }
+  opts?: {
+    concurrency?: number;
+    maxRetries?: number;
+    onProgress?: (done: number, total: number, last?: BatchPublishItemResult) => void;
+    token?: string; // 多店铺：该批统一使用的店铺 write token
+    storeSite?: string; // 多店铺：所选店铺站点，草稿站点与之不符则跳过
+    storeId?: string;
+  }
 ): Promise<BatchPublishResult> {
   const concurrency = Math.max(1, Math.min(opts?.concurrency ?? 3, 5));
   const maxRetries = opts?.maxRetries ?? 3;
@@ -147,7 +159,21 @@ export async function publishBatch(
         site: d.site || '',
         success: false,
         attempts: 0,
+        skipped: false,
+        storeId: opts?.storeId,
       };
+
+      // 0) 站点校验：多店铺模式下，草稿站点必须与所选店铺站点一致
+      if (opts?.storeSite && d.site && d.site !== opts.storeSite) {
+        item.skipped = true;
+        item.success = false;
+        item.attempts = 0;
+        item.error = `站点与所选店铺不符（草稿站点 ${d.site}，店铺站点 ${opts.storeSite}），已跳过`;
+        results.push(item);
+        done++;
+        opts?.onProgress?.(done, drafts.length, item);
+        continue;
+      }
 
       // 1) 合规预检（本地，不耗配额）
       const pre = precheckCompliance(d);
@@ -164,7 +190,7 @@ export async function publishBatch(
       for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
         item.attempts = attempt;
         try {
-          const r = await createListing(d);
+          const r = await createListing(d, opts?.token);
           item.success = true;
           item.itemId = r.itemId;
           item.permalink = r.permalink;
@@ -192,11 +218,13 @@ export async function publishBatch(
   results.sort((a, b) => a.index - b.index);
   const succeeded = results.filter((r) => r.success).length;
   const blocked = results.filter((r) => !r.success && r.precheckHits?.length).length;
+  const skipped = results.filter((r) => r.skipped).length;
   return {
     total: drafts.length,
     succeeded,
-    failed: results.length - succeeded - blocked,
+    failed: results.length - succeeded - blocked - skipped,
     blocked,
+    skipped,
     results,
   };
 }
