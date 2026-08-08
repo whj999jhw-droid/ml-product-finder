@@ -22,3 +22,15 @@ render-proxy/
 scripts/
 deployment-guide.html
 cloudflare-worker/
+
+# --- 本地调试碎片 / 临时文件（不入库）---
+.workbuddy/
+_debug_*.mjs
+_debug_*.png
+*_resp*.json
+detail.json
+orders_resp*.json
+resp.txt
+tmp/
+vite.config.ts.timestamp-*.mjs
+
