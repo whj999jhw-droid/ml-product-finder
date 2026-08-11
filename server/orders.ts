@@ -12,6 +12,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ALERTS_FILE = path.join(__dirname, '..', 'data', 'order-alerts.json');
 
+// 订单轮询游标重叠窗口：游标不推进到「已拉取订单的最大时间」，而是推进到「现在 - 该窗口」。
+// 原因：美客多搜索接口具有最终一致性，同一时刻产生的多笔订单可能分散在相邻两次轮询返回；
+// 若按最大 date_created 推进游标，后到的那笔会因 date_created <= 游标被永久漏掉（表现为「同时2单只提醒1单」）。
+// 预留一段重叠窗口可在下轮重新扫到延迟到达的订单，再配合「已提醒订单号去重」避免重复通知。
+const ORDER_CURSOR_SLACK_MS = 2 * 60 * 1000; // 2 分钟
+
 interface AlertLog {
   storeId: string;
   storeName: string;
@@ -177,42 +183,83 @@ export async function getLastRealOrderForTest(): Promise<{ store: Store; order: 
   return null;
 }
 
-/** 拉取某店铺自上次于 check 以来的新订单（已付款） */
+/**
+ * 拉取某店铺自上次于 check 以来的新订单（已付款）。
+ * 加固点：分页拉取（不再受单页 limit=50 截断影响），确保窗口内即使 >50 笔付款订单也不会漏抓；
+ * 并在搜索结果层就按游标过滤，只对新订单拉取详情，控制 API 调用量。
+ */
 export async function fetchNewOrdersForStore(store: Store): Promise<any[]> {
   const isCbt = (store.site || '').toUpperCase() === 'CBT';
-  let orderIds: string[] = [];
-  if (isCbt) {
-    const data = await storeApiGet(store, `/marketplace/orders/search?order.status=paid&sort=date_desc&limit=50&offset=0`);
-    for (const p of data.results || []) for (const c of p?.orders || []) if (c?.id) orderIds.push(String(c.id));
-  } else {
-    const seller = await getStoreSellerInfo(store);
-    if (seller.id) updateStore(store.id, { mlUserId: String(seller.id), mlUserNick: seller.nickname });
-    const data = await storeApiGet(store, `/orders/search?seller=${seller.id}&order.status=paid&sort=date_desc&limit=50`);
-    for (const o of data.results || []) if (o?.id) orderIds.push(String(o.id));
-  }
-
-  const orders = await mapLimit(orderIds, 5, (id) =>
-    isCbt ? storeApiGet(store, `/marketplace/orders/${id}`) : storeApiGet(store, `/orders/${id}`)
-  );
 
   const last = store.lastOrderCheck;
   const now = Date.now();
   const lastTime = last ? new Date(last).getTime() : 0;
-  // 首次运行或超过 7 天未轮询：只更新时间戳，不返回历史订单，避免首次把大量旧订单都当成新订单轰炸
+  // 首次运行或超过 7 天未轮询：只把游标推进到「现在 - 重叠窗口」，不返回历史订单，避免首次把大量旧订单都当成新订单轰炸
   const isColdStart = !lastTime || (now - lastTime > 7 * 24 * 60 * 60 * 1000);
 
-  if (orders.length) {
-    const times = orders.map((o: any) => new Date(o.date_created).getTime());
-    const latest = Math.max(...times);
-    updateStore(store.id, { lastOrderCheck: new Date(latest).toISOString() });
-  }
-
   if (isColdStart) {
-    console.log(`[Orders] ${store.nickname || store.site} 首次轮询或超过7天未检查，已同步最新订单时间，跳过历史订单提醒`);
+    updateStore(store.id, { lastOrderCheck: new Date(now - ORDER_CURSOR_SLACK_MS).toISOString() });
+    console.log(`[Orders] ${store.nickname || store.site} 首次轮询或超过7天未检查，已同步订单游标，跳过历史订单提醒`);
     return [];
   }
 
-  const newOrders = orders.filter((o: any) => new Date(o.date_created).getTime() > lastTime);
+  // 分页拉取「已付款」订单。ML 搜索结果上限约 1000 条，故最多翻 MAX_PAGES 页。
+  // 搜索结果已带 date_created，可直接在搜索层按游标过滤，避免对历史订单逐个拉详情。
+  const MAX_PAGES = 20;
+  const PAGE = 50;
+  let orderIds: string[] = [];
+
+  if (isCbt) {
+    let offset = 0;
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const data = await storeApiGet(store, `/marketplace/orders/search?order.status=paid&sort=date_desc&limit=${PAGE}&offset=${offset}`);
+      const parents = data.results || [];
+      // date_desc 排序：本页最新一笔已早于游标，则窗口已覆盖完毕，提前结束翻页
+      if (parents.length && new Date(parents[0]?.date_created || 0).getTime() <= lastTime) break;
+      for (const p of parents) {
+        if (new Date(p?.date_created || 0).getTime() > lastTime) {
+          for (const c of p?.orders || []) if (c?.id) orderIds.push(String(c.id));
+        }
+      }
+      if (parents.length < PAGE) break;
+      offset += PAGE;
+    }
+  } else {
+    const seller = await getStoreSellerInfo(store);
+    if (seller.id) updateStore(store.id, { mlUserId: String(seller.id), mlUserNick: seller.nickname });
+    let offset = 0;
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const data = await storeApiGet(store, `/orders/search?seller=${seller.id}&order.status=paid&sort=date_desc&limit=${PAGE}&offset=${offset}`);
+      const results = data.results || [];
+      if (results.length && new Date(results[0]?.date_created || 0).getTime() <= lastTime) break;
+      for (const o of results) {
+        if (new Date(o?.date_created || 0).getTime() > lastTime) {
+          if (o?.id) orderIds.push(String(o.id));
+        }
+      }
+      if (results.length < PAGE) break;
+      offset += PAGE;
+    }
+  }
+
+  if (!orderIds.length) {
+    // 窗口内无新订单也要推进游标，保持滑动窗口正确
+    updateStore(store.id, { lastOrderCheck: new Date(now - ORDER_CURSOR_SLACK_MS).toISOString() });
+    return [];
+  }
+
+  // 逐个拉取完整订单详情（含 date_created / 商品等），再按游标精确过滤出新订单
+  const orders = await mapLimit(orderIds, 5, (id) =>
+    isCbt ? storeApiGet(store, `/marketplace/orders/${id}`) : storeApiGet(store, `/orders/${id}`)
+  );
+
+  const newOrders = orders.filter((o: any) => new Date(o?.date_created || 0).getTime() > lastTime);
+
+  // 关键修复：游标推进到「现在 - 重叠窗口」，而不是已拉取订单的最大 date_created。
+  // 这样即使本轮只拉到同一时刻多笔订单中的部分（搜索最终一致性导致），
+  // 延迟到达的其余订单仍会落在下一轮的扫描窗口内被补抓，配合下方「已提醒去重」不会重复通知。
+  updateStore(store.id, { lastOrderCheck: new Date(now - ORDER_CURSOR_SLACK_MS).toISOString() });
+
   return newOrders;
 }
 
@@ -233,11 +280,17 @@ function formatAlertTotal(o: any): string | undefined {
 export async function pollAllStores(): Promise<Array<{ storeId: string; store: string; newOrders?: number; error?: string }>> {
   const stores = getAllStores();
   const report: Array<{ storeId: string; store: string; newOrders?: number; error?: string }> = [];
+  // 已提醒订单号集合（来自历史提醒记录），用于重叠窗口重复扫描时去重，避免同一笔订单重复通知
+  const notifiedIds = new Set(getAlertLog().map((a) => a.orderId));
   for (const s of stores) {
     if (!s.enabled) continue;
     try {
       const newOrders = await fetchNewOrdersForStore(s);
       for (const o of newOrders) {
+        // 该订单此前已提醒过（如上一轮重叠窗口已抓到），跳过，避免重复通知
+        const orderId = String(o.id);
+        if (notifiedIds.has(orderId)) continue;
+        notifiedIds.add(orderId);
         // 补充商品图片，让通知内容包含商品图
         try {
           o.order_items = await enrichItemsWithImages(s, o.order_items || []);

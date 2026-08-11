@@ -1,0 +1,80 @@
+name: Grab Oracle A1
+
+# 触发方式：
+#   1) 手动：仓库 Actions 页 → Grab Oracle A1 → Run workflow
+#   2) 定时：每 15 分钟自动跑一次（GitHub 免费版可能延迟 <=15 分钟）
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/15 * * * *'
+
+# 并发锁：保证同一时间只跑一个，避免重复建实例
+concurrency:
+  group: grab-oracle
+  cancel-in-progress: false
+
+jobs:
+  grab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # 单次最多跑约 6 小时，没抢到会自动结束，下次 cron 再来
+    env:
+      COMP: ${{ secrets.OCI_COMPARTMENT }}
+      SUB:  ${{ secrets.OCI_SUBNET }}
+      IMG:  ${{ secrets.OCI_IMAGE }}
+      SSH:  ${{ secrets.OCI_SSH_PUB }}
+    steps:
+      - name: 安装 OCI CLI 并写入凭证
+        run: |
+          curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh | bash -s -- --accept-all-defaults
+          mkdir -p ~/.oci
+          echo "${{ secrets.OCI_CONFIG }}" > ~/.oci/config
+          echo "${{ secrets.OCI_KEY }}" > ~/.oci/key.pem
+          chmod 600 ~/.oci/key.pem
+          ~/bin/oci --version
+
+      - name: 抢实例（先查重，再轮换 AD 重试）
+        run: |
+          # 已存在同名运行实例就跳过，防止重复创建
+          EXIST=$(~/bin/oci compute instance list --compartment-id "$COMP" \
+            --lifecycle-state RUNNING --display-name ml-product-finder \
+            --query 'data[*].id' --raw-output 2>/dev/null)
+          if [ -n "$EXIST" ] && [ "$EXIST" != "[]" ]; then
+            echo "✅ 实例已存在，跳过：$EXIST"
+            exit 0
+          fi
+
+          # 列出本区域全部可用性域（AD-1 / AD-2 / AD-3 ...）
+          ADS=$(~/bin/oci iam availability-domain list --compartment-id "$COMP" \
+            --query 'data[].name' --raw-output | tr -d '[]"' | tr ',' ' ')
+          echo "可用 AD: $ADS"
+
+          for i in $(seq 1 800); do
+            for AD in $ADS; do
+              echo "[$(date +%H:%M:%S)] 第 $i 轮 尝试 $AD"
+              OUT=$(~/bin/oci compute instance launch \
+                --availability-domain "$AD" \
+                --shape VM.Standard.A1.Flex \
+                --shape-config '{"ocpus":2,"memoryInGBs":12}' \
+                --image-id "$IMG" \
+                --subnet-id "$SUB" \
+                --assign-public-ip true \
+                --display-name ml-product-finder \
+                --ssh-authorized-keys-file <(echo "$SSH") \
+                --wait-for-state RUNNING 2>&1)
+              if [ $? -eq 0 ]; then
+                echo "✅ 成功创建于 $AD"
+                echo "$OUT"
+                exit 0
+              fi
+              # 仅「容量不足」才继续；其它错误（配置/权限/配额）直接停
+              if echo "$OUT" | grep -qi "capacity\|limit\|not available"; then
+                echo "   ⚠️ 容量不足，换 AD / 重试"
+              else
+                echo "   ❌ 非容量错误，停止："
+                echo "$OUT"
+                exit 2
+              fi
+            done
+            sleep 25
+          done
+          echo "本轮未抢到"; exit 1
