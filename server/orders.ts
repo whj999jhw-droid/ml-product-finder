@@ -205,7 +205,10 @@ export async function fetchNewOrdersForStore(store: Store): Promise<any[]> {
 
   // 分页拉取「已付款」订单。ML 搜索结果上限约 1000 条，故最多翻 MAX_PAGES 页。
   // 搜索结果已带 date_created，可直接在搜索层按游标过滤，避免对历史订单逐个拉详情。
+  // 注意：CBT 的 /marketplace/orders/search 返回的「父订单」没有 date_created 字段，
+  // 不能在搜索层做游标过滤，只能收集全部子订单 id 后由下方子订单详情过滤。
   const MAX_PAGES = 20;
+  const MAX_CHILD_IDS = 200; // CBT 收集子订单 id 的安全阀，防止一次轮询拉过多详情
   const PAGE = 50;
   let orderIds: string[] = [];
 
@@ -214,14 +217,12 @@ export async function fetchNewOrdersForStore(store: Store): Promise<any[]> {
     for (let page = 0; page < MAX_PAGES; page++) {
       const data = await storeApiGet(store, `/marketplace/orders/search?order.status=paid&sort=date_desc&limit=${PAGE}&offset=${offset}`);
       const parents = data.results || [];
-      // date_desc 排序：本页最新一笔已早于游标，则窗口已覆盖完毕，提前结束翻页
-      if (parents.length && new Date(parents[0]?.date_created || 0).getTime() <= lastTime) break;
+      // CBT 父订单没有 date_created，无法在搜索层按游标过滤，统一收集子订单 id，
+      // 交给下方「逐个拉详情后按子订单 date_created > lastTime」精确过滤。
       for (const p of parents) {
-        if (new Date(p?.date_created || 0).getTime() > lastTime) {
-          for (const c of p?.orders || []) if (c?.id) orderIds.push(String(c.id));
-        }
+        for (const c of p?.orders || []) if (c?.id) orderIds.push(String(c.id));
       }
-      if (parents.length < PAGE) break;
+      if (orderIds.length >= MAX_CHILD_IDS || parents.length < PAGE) break;
       offset += PAGE;
     }
   } else {
