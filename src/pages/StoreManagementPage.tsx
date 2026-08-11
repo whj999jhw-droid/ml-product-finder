@@ -13,6 +13,7 @@ import {
   Space,
 } from 'tdesign-react';
 import { ShopIcon, NotificationIcon, RefreshIcon, DeleteIcon, EditIcon } from 'tdesign-icons-react';
+import { confirmDialog } from '../utils/dialog';
 
 interface StoreRow {
   id: string;
@@ -242,6 +243,12 @@ export function StoreManagementPage() {
   const handleToggleTunnel = async () => {
     try {
       if (cb.tunnelRunning) {
+        const confirmed = await confirmDialog({
+          header: '关闭公网隧道',
+          body: '确定关闭公网隧道吗？关闭后 OAuth 回调将使用固定/本地地址，远程设备可能无法完成授权回调。',
+          confirmText: '关闭',
+        });
+        if (!confirmed) return;
         await fetch('/api/ml/oauth/tunnel', { method: 'DELETE' });
         MessagePlugin.info('隧道已关闭');
       } else {

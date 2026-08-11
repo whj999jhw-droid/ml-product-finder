@@ -1,5 +1,6 @@
 import { Button, Tooltip } from 'tdesign-react';
 import { AddIcon, DeleteIcon, SettingIcon, NotificationIcon } from 'tdesign-icons-react';
+import { confirmDialog } from '../utils/dialog';
 import { Bot, ShoppingBag, Flame } from 'lucide-react';
 import { APP_CONFIG } from '../config';
 import { Session, Agent } from '../types';
@@ -204,7 +205,13 @@ export function Sidebar({
                   icon={<DeleteIcon />}
                   onClick={(e) => {
                     e.stopPropagation();
-                    onDeleteSession(session.id);
+                    confirmDialog({
+                      header: '删除会话',
+                      body: `确定删除会话「${session.title}」吗？该会话的聊天记录将被清除，且不可恢复。`,
+                      confirmText: '删除',
+                    }).then((confirmed) => {
+                      if (confirmed) onDeleteSession(session.id);
+                    });
                   }}
                 />
               </Tooltip>

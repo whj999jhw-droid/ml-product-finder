@@ -20,6 +20,7 @@ import {
   MobileIcon,
   RefreshIcon,
 } from 'tdesign-icons-react';
+import { confirmDialog } from '../utils/dialog';
 
 interface NotifyConfig {
   orderAlertsEnabled: boolean;
@@ -253,6 +254,12 @@ export function NotificationSettingsPage() {
   };
 
   const deleteAlert = async (orderId: string) => {
+    const confirmed = await confirmDialog({
+      header: '删除提醒记录',
+      body: `确定删除订单「${orderId}」的提醒记录吗？该操作不可恢复。`,
+      confirmText: '删除',
+    });
+    if (!confirmed) return;
     try {
       const r = await fetchJson(`/api/ml/orders/alerts/${encodeURIComponent(orderId)}`, { method: 'DELETE' }, 15000);
       if (r?.success) {

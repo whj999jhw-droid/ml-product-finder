@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Button, Card, Tag, Progress, Table, NotificationPlugin, Radio, Switch, Checkbox, Input, InputGroup } from 'tdesign-react';
+import { confirmDialog } from '../utils/dialog';
 import {
   DownloadIcon,
   RefreshIcon,
@@ -323,6 +324,12 @@ export function ProductFinderPage() {
 
   // 关闭公网隧道
   const handleStopTunnel = useCallback(async () => {
+    const confirmed = await confirmDialog({
+      header: '关闭公网隧道',
+      body: '确定关闭公网隧道吗？关闭后 OAuth 回调将使用固定/本地地址，远程设备可能无法完成授权回调。',
+      confirmText: '关闭',
+    });
+    if (!confirmed) return;
     try {
       await fetch('/api/ml/oauth/tunnel', { method: 'DELETE' });
       setTunnelInfo({ running: false, url: '', callbackUrl: '' });
@@ -571,6 +578,12 @@ export function ProductFinderPage() {
 
   // 清除 checkpoint（全新开始）
   const clearCheckpoint = useCallback(async () => {
+    const confirmed = await confirmDialog({
+      header: '清除续传进度',
+      body: '确定清除已有的抓取进度（检查点）吗？清除后将从头开始全新抓取，已抓取的商品不会丢失，但无法再续传。',
+      confirmText: '清除',
+    });
+    if (!confirmed) return;
     try {
       await fetch('/api/ml/checkpoint', { method: 'DELETE' });
       setCheckpoint(null);
@@ -731,6 +744,12 @@ export function ProductFinderPage() {
 
   // 删除已导出的文件
   const handleDeleteFile = useCallback(async (fileName: string) => {
+    const confirmed = await confirmDialog({
+      header: '删除导出文件',
+      body: `确定删除「${fileName}」吗？该操作不可恢复。`,
+      confirmText: '删除',
+    });
+    if (!confirmed) return;
     try {
       const res = await fetch(`/api/ml/files/${encodeURIComponent(fileName)}`, {
         method: 'DELETE',
