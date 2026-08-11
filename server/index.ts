@@ -1171,7 +1171,7 @@ app.post('/api/ml/sms/test', async (req, res) => {
       // 仅拼装文案，再用 sendTestSmsWithConfig 发送一次。
       // 注意：不要调用 notifyNewOrder——它会按 smsEnabled 配置「实际推送」一次，
       // 再叠加下面的 sendTestSmsWithConfig 就会向钉钉发两条相同内容。
-      const content = notify.buildOrderNotify(last.store, last.order);
+      const content = await notify.buildOrderNotify(last.store, last.order);
       const cfg = config && typeof config === 'object' ? config : undefined;
       const r = await notify.sendTestSmsWithConfig(content.smsText, cfg);
       return res.json({ ...r, preview: { smsText: content.smsText, html: content.html, text: content.text } });
@@ -1250,19 +1250,6 @@ app.get('/api/ml/oauth/tunnel', (req, res) => {
     fixedRedirect: !!process.env.ML_REDIRECT_URI,
     redirectUri: getEffectiveRedirectUri(),
   });
-});
-
-// ===================== 订单商品图片「查看全部」网页 =====================
-// 钉钉消息只放主图（保持简短），点击链接在此网页查看该订单所有商品图
-// （图片为美客多公网 https 图，浏览器直接加载，无需本服务代理下载）
-app.get('/api/ml/order-images/:orderId', (req, res) => {
-  const html = notify.getOrderImagesHtml(req.params.orderId);
-  if (!html) {
-    res.status(404).send('<p style="font-family:sans-serif;padding:16px;">未找到该订单的图片（可能服务已重启且缓存过期，请等待下次新订单或重新发送测试）。</p>');
-    return;
-  }
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(html);
 });
 
 // 启动公网隧道（手动覆盖：将当前生效回调切到临时隧道地址）

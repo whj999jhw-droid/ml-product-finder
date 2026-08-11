@@ -8,8 +8,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import nodemailer from 'nodemailer';
 import { getEmailConfig } from './email.js';
-import { getTunnelInfo } from './tunnel.js';
-import { getEffectiveRedirectUri } from './mercadolibre.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -284,13 +282,13 @@ export interface NotifyContent {
 }
 
 /** 仅拼装订单通知文案（不发送），供真实推送与测试预览共用 */
-export function buildOrderNotify(store: { nickname?: string; site: string }, order: any): NotifyContent {
+export async function buildOrderNotify(store: { nickname?: string; site: string }, order: any): Promise<NotifyContent> {
   const storeName = store.nickname || store.site;
   const totalInfo = formatOrderTotal(order);
   const buyer = order.buyer?.nickname || order.buyer?.id || '';
-  // 钉钉消息：每商品只放 1 张主图（保持简短），全部图片通过下方「查看全部」链接在网页查看
-  const itemsSms = formatOrderItems(order, 1);
-  const itemsHtml = formatOrderItems(order, 8); // 邮件无长度限制，仍展示最多 8 张
+  // 钉钉消息：每商品展示主图 + 其余图，每商品最多 8 张（与邮件对齐），按各商品实际图片数量展示
+  const itemsSms = formatOrderItems(order, 8);
+  const itemsHtml = formatOrderItems(order, 8);
 
   // 邮件正文（纯文本，不含图片）
   const itemLines = itemsSms.map((it, idx) => `${idx + 1}. ${it.title}${it.quantity ? ` x${it.quantity}` : ''}${it.price ? ` (${it.price})` : ''}`);
@@ -304,24 +302,21 @@ export function buildOrderNotify(store: { nickname?: string; site: string }, ord
     itemsSms.length ? `商品：\n${itemLines.join('\n')}` : '',
   ].filter(Boolean).join('\n');
 
-  // Webhook/短信正文（markdown）：每商品 1 张主图，末尾附「查看全部图片」链接，避免消息过长
+  // Webhook/短信正文（markdown）：每商品展示主图 + 其余图，每商品最多 8 张；
+  // 订单级总图片封顶 SMS_MAX_IMAGES(12)，避免钉钉 markdown 图片过多不渲染
+  const SMS_MAX_IMAGES = 12;
+  let smsImgCount = 0;
   const itemTexts = itemsSms.map((it, idx) => {
     const line = `${idx + 1}. ${it.title}${it.quantity ? ` x${it.quantity}` : ''}${it.price ? ` (${it.price})` : ''}`;
-    const imgs = it.images.length ? '\n' + it.images.map((u) => `![商品图](${u})`).join('\n') : '';
+    const remaining = SMS_MAX_IMAGES - smsImgCount;
+    const take = remaining > 0 ? it.images.slice(0, remaining) : [];
+    smsImgCount += take.length;
+    const imgs = take.length ? '\n' + take.map((u) => `![商品图](${u})`).join('\n') : '';
     return line + imgs;
   });
-  // 记录全量图片到文件缓存（供「查看全部」网页展示），并统计总张数
-  const totalImgs = (order.order_items || order.items || []).reduce(
-    (sum: number, it: any) => sum + extractItemImages(it, 30).length, 0,
-  );
-  recordOrderImages(String(order.id), storeName, order);
-  const imagesLink = totalImgs > 0
-    ? `\n\n[📷 查看全部 ${totalImgs} 张商品图](${getPublicBase()}/api/ml/order-images/${encodeURIComponent(String(order.id))})`
-    : '';
   const smsText = [
     `新订单 ${order.id} | 店铺:${storeName} | 金额:${totalInfo.text || '未知'} | 买家:${buyer || '未知'}`,
     itemsSms.length ? `商品：\n${itemTexts.join('\n')}` : '',
-    imagesLink,
   ].filter(Boolean).join('\n');
 
   // 邮件 HTML 正文（每商品展示主图 + 其余图，最多 8 张，可横向排列）
@@ -350,7 +345,7 @@ export function buildOrderNotify(store: { nickname?: string; site: string }, ord
 
 /** 拼装并实际发送新订单通知（邮件 + 短信/Webhook），供真实订单轮询调用 */
 export async function notifyNewOrder(store: { nickname?: string; site: string }, order: any): Promise<NotifyResult> {
-  const content = buildOrderNotify(store, order);
+  const content = await buildOrderNotify(store, order);
   const results: Array<{ channel: string; success: boolean; message: string }> = [];
   if (notifyConfig.orderAlertsEnabled && notifyConfig.emailEnabled) {
     results.push({ channel: 'email', ...(await sendEmailAlert(`[ML] 新订单 ${order.id} - ${store.nickname || store.site}`, content.text, content.html)) });
@@ -359,69 +354,4 @@ export async function notifyNewOrder(store: { nickname?: string; site: string },
     results.push({ channel: 'sms', ...(await sendSmsAlert(content.smsText)) });
   }
   return { ...content, results };
-}
-
-/**
- * 订单商品图片「查看全部」网页：钉钉消息只放主图（简短），点击链接在浏览器看该订单所有商品图。
- * 图片数据持久化到 data/order-images/<orderId>.json，重启不丢。
- */
-const ORDER_IMAGES_DIR = path.join(__dirname, '..', 'data', 'order-images');
-
-/** 获取对外可访问的根地址：优先公网隧道，其次固定回调域名，最后回退 localhost */
-function getPublicBase(): string {
-  const tunnel = getTunnelInfo();
-  if (tunnel?.url) return tunnel.url.replace(/\/$/, '');
-  const eff = getEffectiveRedirectUri();
-  const root = (eff || '').replace(/\/api\/ml\/oauth\/store-callback\/?$/, '').replace(/\/api\/.*$/, '');
-  if (root && /^https?:\/\//.test(root)) return root.replace(/\/$/, '');
-  return 'http://localhost:3000';
-}
-
-/** 记录订单全部商品图片到文件缓存（供网页展示） */
-export function recordOrderImages(orderId: string, storeName: string, order: any): void {
-  try {
-    if (!fs.existsSync(ORDER_IMAGES_DIR)) fs.mkdirSync(ORDER_IMAGES_DIR, { recursive: true });
-    const items = (order.order_items || order.items || []).map((it: any) => {
-      const item = it.item || it;
-      return { title: item?.title || item?.name || '未知商品', images: extractItemImages(it, 30) };
-    }).filter((i: any) => i.images.length > 0);
-    const payload = { orderId: String(orderId), storeName, created: order.date_created || '', items };
-    fs.writeFileSync(path.join(ORDER_IMAGES_DIR, `${String(orderId)}.json`), JSON.stringify(payload));
-  } catch (e) {
-    console.error('[Notify] 记录订单图片失败:', (e as any)?.message || e);
-  }
-}
-
-/** 读取订单图片缓存，生成包含所有商品全部图片的 HTML 页面；无数据返回 null */
-export function getOrderImagesHtml(orderId: string): string | null {
-  try {
-    const fp = path.join(ORDER_IMAGES_DIR, `${String(orderId)}.json`);
-    if (!fs.existsSync(fp)) return null;
-    const data = JSON.parse(fs.readFileSync(fp, 'utf-8'));
-    const total = (data.items || []).reduce((s: number, i: any) => s + (i.images?.length || 0), 0);
-    const blocks = (data.items || []).map((it: any, idx: number) => `
-      <div class="item">
-        <h3>${idx + 1}. ${escapeHtml(it.title)} <span class="cnt">(${(it.images || []).length} 张)</span></h3>
-        <div class="imgs">${(it.images || []).map((u: string) => `<a href="${escapeHtml(u)}" target="_blank" rel="noopener"><img src="${escapeHtml(u)}" loading="lazy" alt="商品图"/></a>`).join('')}</div>
-      </div>`).join('');
-    return `<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>订单商品图 - ${escapeHtml(String(orderId))}</title>
-<style>
-  body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:16px;background:#f5f5f5;color:#222;}
-  h2{margin:0 0 4px;font-size:18px;} .meta{color:#888;font-size:13px;margin-bottom:16px;}
-  .item{background:#fff;border-radius:8px;padding:12px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.08);}
-  .item h3{margin:0 0 8px;font-size:15px;} .cnt{color:#999;font-weight:normal;font-size:13px;}
-  .imgs{display:flex;flex-wrap:wrap;gap:8px;}
-  .imgs img{width:120px;height:120px;object-fit:cover;border-radius:6px;border:1px solid #eee;cursor:pointer;}
-</style></head>
-<body>
-  <h2>订单 ${escapeHtml(String(orderId))} 商品图</h2>
-  <div class="meta">店铺：${escapeHtml(data.storeName || '')} ｜ 共 ${total} 张 ｜ 下单时间：${escapeHtml(data.created || '')}</div>
-  ${blocks || '<p>无图片</p>'}
-</body></html>`;
-  } catch (e) {
-    console.error('[Notify] 生成订单图片页失败:', (e as any)?.message || e);
-    return null;
-  }
 }
