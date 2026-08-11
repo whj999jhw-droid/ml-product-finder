@@ -75,8 +75,13 @@ if [ -z "$ML_SECRET_KEY" ]; then
 fi
 read -p "  域名（可选，留空则只用 IP 访问）: " DOMAIN
 
-if [ -z "$GIT_REPO" ] || [ -z "$ML_APP_ID" ] || [ -z "$ML_SECRET_KEY" ]; then
-  err "GitHub 仓库、ML_APP_ID、ML_SECRET_KEY 都必须填写"
+if [ -z "$ML_APP_ID" ] || [ -z "$ML_SECRET_KEY" ]; then
+  err "ML_APP_ID、ML_SECRET_KEY 都必须填写"
+fi
+
+# 没有填仓库地址时，必须已经用 WinSCP 等方式把代码放到 $APP_DIR，否则无法继续
+if [ -z "$GIT_REPO" ] && [ ! -d "$APP_DIR" ]; then
+  err "没有填 GitHub 仓库，也没检测到 $APP_DIR 已有代码。请先上传代码或填写仓库地址。"
 fi
 
 # 保存配置（供续跑复用）
@@ -115,6 +120,14 @@ else
   echo ""
   log "更新系统包..."
   sudo apt update -qq && sudo apt upgrade -y -qq
+
+  # 编译工具链：better-sqlite3 等原生模块万一没有预编译包时需要现场编译
+  if ! command -v make &> /dev/null || ! command -v g++ &> /dev/null; then
+    log "安装编译工具链 (build-essential, python3)..."
+    sudo apt install -y build-essential python3
+  else
+    log "编译工具链已就绪"
+  fi
 
   if ! command -v node &> /dev/null; then
     log "安装 Node.js 22..."
@@ -161,15 +174,15 @@ else
     warn "目录 $APP_DIR 已存在，执行 git pull 更新..."
     git -C "$APP_DIR" pull || warn "git pull 失败（可能本地有改动），继续用现有代码"
   elif [ -d "$APP_DIR" ]; then
-    warn "$APP_DIR 存在但不是 git 仓库，删除后重新克隆..."
-    rm -rf "$APP_DIR"
-    git clone "$GIT_REPO" "$APP_DIR"
+    warn "$APP_DIR 已存在但不是 git 仓库（可能是你用 WinSCP 手动上传的）。保留现有代码，跳过 git clone。"
   else
     log "克隆仓库..."; git clone "$GIT_REPO" "$APP_DIR"
   fi
 
   cd "$APP_DIR"
   log "安装依赖 (npm install)..."
+  # 服务器上用不到 Electron 桌面端，跳过它几百 MB 的二进制下载，避免卡死/失败
+  export ELECTRON_SKIP_BINARY_DOWNLOAD=1
   npm install --production=false
 
   log "构建前端 (vite build)..."
@@ -196,15 +209,25 @@ else
     warn "$APP_DIR/.env 已存在，保留不覆盖（如需重设请删除该文件后重跑）"
   else
     SESSION_SECRET=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+    # 自动算出店铺授权回调地址，避免后面手动改 .env
+    PUBLIC_IP=$(curl -s ifconfig.me 2>/dev/null || echo "")
+    if [ -n "$DOMAIN" ]; then
+      REDIRECT_URI="https://${DOMAIN}/api/ml/oauth/store-callback"
+    elif [ -n "$PUBLIC_IP" ]; then
+      REDIRECT_URI="http://${PUBLIC_IP}/api/ml/oauth/store-callback"
+    else
+      REDIRECT_URI=""
+    fi
     cat > "$APP_DIR/.env" << ENVEOF
 NODE_ENV=production
 PORT=3000
 ML_APP_ID=${ML_APP_ID}
 ML_SECRET_KEY=${ML_SECRET_KEY}
+ML_REDIRECT_URI=${REDIRECT_URI}
 SESSION_SECRET=${SESSION_SECRET}
 CODEBUDDY_INTERNET_ENVIRONMENT=external
 ENVEOF
-    log ".env 已创建"
+    log ".env 已创建（回调地址已自动设为 ${REDIRECT_URI:-待手动配置}）"
   fi
   mark_done 4
   log "步骤 4 完成"
