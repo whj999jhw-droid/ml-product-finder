@@ -66,6 +66,9 @@ interface AlertItem {
 
 const DEFAULT_NOTIFY: NotifyConfig = { orderAlertsEnabled: false, emailEnabled: true, smsEnabled: false, pollIntervalMinutes: 30 };
 
+const sortAlertsDesc = (list: AlertItem[]) =>
+  [...list].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+
 export function NotificationSettingsPage() {
   const [notifyCfg, setNotifyCfg] = useState<NotifyConfig>(DEFAULT_NOTIFY);
   const [smsCfg, setSmsCfg] = useState<SmsConfig>({ provider: 'none' });
@@ -77,6 +80,7 @@ export function NotificationSettingsPage() {
   const [testingEmail, setTestingEmail] = useState(false);
   const [testingSms, setTestingSms] = useState(false);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
+  const [pageInfo, setPageInfo] = useState({ current: 1, pageSize: 20 });
   const [emailOk, setEmailOk] = useState<boolean | null>(null);
   const [detailItem, setDetailItem] = useState<AlertItem | null>(null);
   const [testWithLastOrder, setTestWithLastOrder] = useState(false);
@@ -129,7 +133,7 @@ export function NotificationSettingsPage() {
       if (e && typeof e === 'object' && (e.host !== undefined || e.user !== undefined || e.to !== undefined)) {
         setEmailCfg({ enabled: !!e.enabled, host: e.host || '', port: Number(e.port) || 465, secure: !!e.secure, user: e.user || '', pass: e.pass ? '******' : '', from: e.from || '', to: e.to || '' });
       }
-      if (a?.success) setAlerts(a.alerts || []);
+      if (a?.success) setAlerts(sortAlertsDesc(a.alerts || []));
 
       if (errors.length) {
         MessagePlugin.warning(`加载 ${errors.join('、')} 失败，请刷新重试或检查后端是否正常运行`);
@@ -148,6 +152,20 @@ export function NotificationSettingsPage() {
       inflightRef.current = [];
     };
   }, [loadAll]);
+
+  // 数据变化时（如删除记录），避免当前页码超出总页数导致空白
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(alerts.length / pageInfo.pageSize));
+    if (pageInfo.current > maxPage) {
+      setPageInfo((p) => ({ ...p, current: maxPage }));
+    }
+  }, [alerts.length, pageInfo.current, pageInfo.pageSize]);
+
+  // 自行按当前页切片（配合 disableDataPage，分页完全由本组件控制，避免 tdesign 内部重置导致翻页失灵）
+  const pagedAlerts = alerts.slice(
+    (pageInfo.current - 1) * pageInfo.pageSize,
+    pageInfo.current * pageInfo.pageSize,
+  );
 
   const saveAll = async () => {
     setSaving(true);
@@ -217,12 +235,12 @@ export function NotificationSettingsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ alert }),
       }, 15000);
-      // 重新拉取列表，保证顺序与后端一致
+      // 重新拉取列表，并按时间倒序排列
       const a = await loadWithRetry('/api/ml/orders/alerts', {}, 10000).catch(() => null);
-      if (a?.success) setAlerts(a.alerts || []);
+      if (a?.success) setAlerts(sortAlertsDesc(a.alerts || []));
     } catch {
-      // 写入失败不影响测试结果显示：直接挂到内存列表
-      setAlerts((prev) => [alert, ...prev]);
+      // 写入失败不影响测试结果显示：直接挂到内存列表，仍保持倒序
+      setAlerts((prev) => sortAlertsDesc([alert, ...prev]));
     }
   }, [fetchJson, loadWithRetry]);
 
@@ -509,11 +527,18 @@ export function NotificationSettingsPage() {
 
       <Card title="最近提醒记录" bordered>
         <Table
-          data={alerts}
+          data={pagedAlerts}
           columns={alertColumns}
           rowKey="orderId"
           size="small"
-          pagination={{ pageSize: 20, total: alerts.length }}
+          disableDataPage
+          pagination={{
+            ...pageInfo,
+            total: alerts.length,
+            pageSizeOptions: [5, 10, 20, 50],
+            showJumper: true,
+          }}
+          onPageChange={(info) => setPageInfo({ current: info.current, pageSize: info.pageSize })}
           empty="暂无提醒记录"
           loading={loading}
         />
