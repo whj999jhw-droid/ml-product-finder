@@ -44,7 +44,7 @@
    git remote add origin https://github.com/你的用户名/ml-product-finder.git
    git add -A
    git commit -m "部署版本"
-   git push -u origin main
+   git push -u origin master
    ```
    > 如果提示密码登录失败，GitHub 命令行要用 **Personal Access Token**：网页 → 头像 → **Settings** → 最底下 **Developer settings** → **Personal access tokens** → **Tokens (classic)** → **Generate new token (classic)**，勾 `repo`，生成后当密码粘贴（屏幕不显示，正常）。
 
@@ -131,14 +131,14 @@
 sudo apt update -qq && sudo apt install -y curl git
 
 # 2) 下载一键部署脚本
-curl -fsSL -o ~/deploy-tencent.sh https://raw.githubusercontent.com/你的用户名/ml-product-finder/main/deploy-tencent.sh
+curl -fsSL -o ~/deploy-tencent.sh https://raw.githubusercontent.com/你的用户名/ml-product-finder/master/deploy-tencent.sh
 chmod +x ~/deploy-tencent.sh
 
 # 3) 运行部署
 ~/deploy-tencent.sh
 ```
 
-> 如果你的仓库默认分支不是 `main`（比如是 `master`），把第 2 步地址里的 `main` 改成 `master`。
+> 本仓库默认分支是 `master`。如果你的仓库默认分支不是 `master`（比如是 `main`），把第 2 步地址里的 `master` 改成你的实际分支名。
 >
 > **不走 GitHub 的情况（纯 WinSCP 上传）**：因为你没把仓库推到 GitHub，上面第 2 步的 `curl` 下载脚本会失败。替代做法——直接用 **WinSCP 把 `deploy-tencent.sh` 也拖到服务器的 `~/` 目录**（和代码一起传），然后跳过第 2 步，直接 `chmod +x ~/deploy-tencent.sh && ~/deploy-tencent.sh` 即可。
 

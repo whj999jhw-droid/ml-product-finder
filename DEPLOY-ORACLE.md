@@ -83,11 +83,11 @@ git add -A
 git commit -m "首次部署版本"
 
 # 5. 推送到 GitHub
-git push -u origin main
+git push -u origin master
 ```
 
 > **关于第 5 步的报错**：
-> - 如果提示 `main` 分支不存在，先试 `git branch -M main` 再 `git push -u origin main`。
+> - 如果提示 `master` 分支不存在，先试 `git branch -M master` 再 `git push -u origin master`。
 > - 如果弹出**登录框**：GitHub 现在**不能用账号密码登录命令行**，要用 **Personal Access Token（个人访问令牌）**。做法：去 GitHub 网页 → 右上角头像 → **Settings** → 左侧最底下 **Developer settings** → **Personal access tokens** → **Tokens (classic)** → **Generate new token (classic)**。勾选 `repo` 权限，过期选「No expiration」或长一点，点 Generate。把生成的**那一长串令牌复制下来**，回到命令行粘贴当密码用（粘贴时屏幕不显示内容，正常，输完回车）。
 > - 如果提示 `remote already exists`，说明之前关联过，跳过第 2 步直接 push 即可。
 
@@ -181,14 +181,14 @@ Oracle 默认把所有端口都关着，必须手动放行，否则外面访问�
 sudo apt update -qq && sudo apt install -y curl git
 
 # 2) 下载一键部署脚本
-curl -fsSL -o ~/deploy-oracle.sh https://raw.githubusercontent.com/你的用户名/ml-product-finder/main/deploy-oracle.sh
+curl -fsSL -o ~/deploy-oracle.sh https://raw.githubusercontent.com/你的用户名/ml-product-finder/master/deploy-oracle.sh
 chmod +x ~/deploy-oracle.sh
 
 # 3) 运行部署
 ~/deploy-oracle.sh
 ```
 
-> 如果你的仓库默认分支不是 `main`（比如是 `master`），把第 2 步地址里的 `main` 改成 `master`。
+> 本仓库默认分支是 `master`。如果你的仓库默认分支不是 `master`（比如是 `main`），把第 2 步地址里的 `master` 改成你的实际分支名。
 > 也可以不下载，直接用 `nano ~/deploy-oracle.sh` 把脚本内容粘进去——但对小白来说上面 3 行最简单。
 
 ### 脚本会问你几个问题（照着填）
@@ -228,7 +228,7 @@ chmod +x ~/deploy-oracle.sh
    > 如果嫌麻烦，全选一起拖也行，就是慢一点。
 6. 上传完，回到服务器命令行，直接运行（**仓库地址那一步留空回车**即可，因为代码已经在服务器上了）：
    ```bash
-   curl -fsSL -o ~/deploy-oracle.sh https://raw.githubusercontent.com/你的用户名/ml-product-finder/main/deploy-oracle.sh
+   curl -fsSL -o ~/deploy-oracle.sh https://raw.githubusercontent.com/你的用户名/ml-product-finder/master/deploy-oracle.sh
    chmod +x ~/deploy-oracle.sh
    ~/deploy-oracle.sh
    ```
