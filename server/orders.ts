@@ -444,7 +444,12 @@ async function enrichItemsWithImages(store: Store, orderItems: any[]): Promise<a
       const thumbnail = detail.thumbnail || images[0] || null;
       return {
         ...it,
-        item: { ...it.item, thumbnail, pictures: detail.pictures || [] },
+        item: {
+          ...it.item,
+          thumbnail,
+          pictures: detail.pictures || [],
+          seller_sku: it.item?.seller_sku || detail.seller_sku || detail.seller_custom_field || '',
+        },
         itemImages: images,
         itemThumbnail: thumbnail,
       };

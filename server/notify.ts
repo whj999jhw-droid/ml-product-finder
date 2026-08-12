@@ -8,6 +8,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import nodemailer from 'nodemailer';
 import { getEmailConfig } from './email.js';
+import { ML_SITES, type MLSiteCode } from './mercadolibre.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -236,6 +237,54 @@ function isHttps(u: any): boolean {
   return typeof u === 'string' && u.startsWith('https');
 }
 
+/** 站点代码 → 国家名 */
+function formatCountry(site: string): string {
+  return ML_SITES[(site || '').toUpperCase() as MLSiteCode]?.name || site || '未知';
+}
+
+/** ML 订单状态 → 中文 */
+function formatOrderStatus(status?: string): string {
+  const map: Record<string, string> = {
+    paid: '已付款',
+    confirmed: '已确认',
+    handling: '处理中',
+    ready_to_ship: '待发货',
+    shipped: '已发货',
+    delivered: '已送达',
+    cancelled: '已取消',
+    invalid: '无效',
+  };
+  return map[String(status || '').toLowerCase()] || status || '未知';
+}
+
+/** 收货地址拼接 */
+function formatAddress(order: any): string {
+  const addr = order.shipping?.receiver_address;
+  if (!addr) return '';
+  const parts = [
+    addr.receiver_name,
+    addr.address_line,
+    addr.city?.name,
+    addr.state?.name,
+    addr.country?.name,
+    addr.zip_code,
+    addr.receiver_phone,
+  ].filter(Boolean);
+  return parts.join(' ');
+}
+
+/** 物流方式 + 状态 */
+function formatShipping(order: any): string {
+  const s = order.shipping;
+  if (!s) return '';
+  const parts: string[] = [];
+  if (s.option?.name) parts.push(s.option.name);
+  else if (s.method) parts.push(s.method);
+  if (s.status) parts.push(formatOrderStatus(s.status));
+  if (s.tracking_number) parts.push(`运单:${s.tracking_number}`);
+  return parts.join(' | ');
+}
+
 /**
  * 提取某订单项的全部商品图片：主图优先、去重、保证 https（钉钉 markdown 只渲染 https 图）。
  * 主图优先用 itemThumbnail（enrich 显式设置的主图）；不同商品图片数量不同，按实际数量返回，最多 max 张。
@@ -260,16 +309,19 @@ function extractItemImages(item: any, max = 9): string[] {
   return out.slice(0, max);
 }
 
-function formatOrderItems(order: any, maxImages = 3): { title?: string; quantity?: number; price?: string; images: string[] }[] {
+function formatOrderItems(order: any, maxImages = 3): { title?: string; quantity?: number; price?: string; sku?: string; itemId?: string; images: string[] }[] {
   const items = order.order_items || order.items || [];
   return items.map((it: any) => {
     const item = it.item || it;
     const price = it.unit_price || item?.price;
     const priceText = price && typeof price === 'object' ? `${price.currency_id || ''} ${price.amount ?? ''}`.trim() : '';
+    const sku = item?.seller_sku || item?.seller_custom_field || '';
     return {
       title: item?.title || item?.name || '未知商品',
       quantity: it.quantity || 1,
       price: priceText,
+      sku,
+      itemId: item?.id || '',
       images: extractItemImages(it, maxImages),
     };
   });
@@ -284,20 +336,35 @@ export interface NotifyContent {
 /** 仅拼装订单通知文案（不发送），供真实推送与测试预览共用 */
 export async function buildOrderNotify(store: { nickname?: string; site: string }, order: any): Promise<NotifyContent> {
   const storeName = store.nickname || store.site;
+  const country = formatCountry(store.site);
   const totalInfo = formatOrderTotal(order);
   const buyer = order.buyer?.nickname || order.buyer?.id || '';
+  const status = formatOrderStatus(order.status);
+  const address = formatAddress(order);
+  const shipping = formatShipping(order);
   // 钉钉消息：每商品展示主图 + 其余图，每商品最多 8 张（与邮件对齐），按各商品实际图片数量展示
   const itemsSms = formatOrderItems(order, 8);
   const itemsHtml = formatOrderItems(order, 8);
 
   // 邮件正文（纯文本，不含图片）
-  const itemLines = itemsSms.map((it, idx) => `${idx + 1}. ${it.title}${it.quantity ? ` x${it.quantity}` : ''}${it.price ? ` (${it.price})` : ''}`);
+  const itemLines = itemsSms.map((it, idx) => {
+    const parts = [`${idx + 1}. ${it.title}`];
+    if (it.itemId) parts.push(`ID:${it.itemId}`);
+    if (it.sku) parts.push(`SKU:${it.sku}`);
+    parts.push(`x${it.quantity || 1}`);
+    if (it.price) parts.push(`(${it.price})`);
+    return parts.join(' ');
+  });
   const text = [
     `【美客多新订单】`,
+    `国家：${country}`,
     `店铺：${storeName}`,
     `订单号：${order.id}`,
+    `状态：${status}`,
     `金额：${totalInfo.text || '未知'}`,
     `买家：${buyer || '未知'}`,
+    address ? `收货地址：${address}` : '',
+    shipping ? `物流：${shipping}` : '',
     `下单时间：${order.date_created || ''}`,
     itemsSms.length ? `商品：\n${itemLines.join('\n')}` : '',
   ].filter(Boolean).join('\n');
@@ -307,7 +374,8 @@ export async function buildOrderNotify(store: { nickname?: string; site: string 
   const SMS_MAX_IMAGES = 12;
   let smsImgCount = 0;
   const itemTexts = itemsSms.map((it, idx) => {
-    const line = `${idx + 1}. ${it.title}${it.quantity ? ` x${it.quantity}` : ''}${it.price ? ` (${it.price})` : ''}`;
+    const meta = [it.itemId ? `ID:${it.itemId}` : '', it.sku ? `SKU:${it.sku}` : ''].filter(Boolean).join(' ');
+    const line = `${idx + 1}. ${it.title}${meta ? ` (${meta})` : ''}${it.quantity ? ` x${it.quantity}` : ''}${it.price ? ` (${it.price})` : ''}`;
     const remaining = SMS_MAX_IMAGES - smsImgCount;
     const take = remaining > 0 ? it.images.slice(0, remaining) : [];
     smsImgCount += take.length;
@@ -315,26 +383,34 @@ export async function buildOrderNotify(store: { nickname?: string; site: string 
     return line + imgs;
   });
   const smsText = [
-    `新订单 ${order.id} | 店铺:${storeName} | 金额:${totalInfo.text || '未知'} | 买家:${buyer || '未知'}`,
+    `新订单 ${order.id} | 国家:${country} | 店铺:${storeName} | 状态:${status} | 金额:${totalInfo.text || '未知'} | 买家:${buyer || '未知'}`,
+    shipping ? `物流：${shipping}` : '',
+    address ? `地址：${address}` : '',
     itemsSms.length ? `商品：\n${itemTexts.join('\n')}` : '',
   ].filter(Boolean).join('\n');
 
   // 邮件 HTML 正文（每商品展示主图 + 其余图，最多 8 张，可横向排列）
   const itemHtml = itemsHtml.map((it, idx) => {
+    const meta = [it.itemId ? `ID: ${escapeHtml(it.itemId)}` : '', it.sku ? `SKU: ${escapeHtml(it.sku)}` : ''].filter(Boolean).join(' | ');
+    const metaHtml = meta ? `<div style="font-size:12px;color:#666;margin-top:2px;">${meta}</div>` : '';
     const imgs = it.images.length
       ? '<div style="margin-top:6px;">' + it.images.map((u) =>
           `<img src="${escapeHtml(u)}" style="width:90px;height:90px;object-fit:cover;margin-right:6px;border:1px solid #eee;border-radius:4px;" />`,
         ).join('') + '</div>'
       : '';
-    return `<div style="margin-bottom:12px;">${idx + 1}. ${escapeHtml(it.title)}${it.quantity ? ` x${it.quantity}` : ''}${it.price ? ` (${escapeHtml(it.price)})` : ''}${imgs}</div>`;
+    return `<div style="margin-bottom:12px;">${idx + 1}. ${escapeHtml(it.title)}${it.quantity ? ` x${it.quantity}` : ''}${it.price ? ` (${escapeHtml(it.price)})` : ''}${metaHtml}${imgs}</div>`;
   }).join('');
   const html = [
     `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.7;">`,
     `<h3 style="margin:0 0 8px;">【美客多新订单】</h3>`,
+    `<p style="margin:0 0 4px;">国家：${escapeHtml(country)}</p>`,
     `<p style="margin:0 0 4px;">店铺：${escapeHtml(storeName)}</p>`,
     `<p style="margin:0 0 4px;">订单号：${escapeHtml(String(order.id))}</p>`,
+    `<p style="margin:0 0 4px;">状态：${escapeHtml(status)}</p>`,
     `<p style="margin:0 0 4px;">金额：${escapeHtml(totalInfo.text || '未知')}</p>`,
     `<p style="margin:0 0 4px;">买家：${escapeHtml(buyer || '未知')}</p>`,
+    address ? `<p style="margin:0 0 4px;">收货地址：${escapeHtml(address)}</p>` : '',
+    shipping ? `<p style="margin:0 0 12px;">物流：${escapeHtml(shipping)}</p>` : '<p style="margin:0 0 12px;"></p>',
     `<p style="margin:0 0 12px;">下单时间：${escapeHtml(order.date_created || '')}</p>`,
     itemsHtml.length ? `<h4 style="margin:0 0 8px;">商品：</h4>${itemHtml}` : '',
     `</div>`,
