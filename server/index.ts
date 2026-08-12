@@ -1652,10 +1652,98 @@ app.delete('/api/ml/checkpoint', (_req, res) => {
 
 // ============= 原有抓取端点（全新抓取 or 断点续传）============
 
-// 抓取商品数据 (SSE 流式进度)
+// 抓取端点（异步任务 + 轮询，前端不再依赖 SSE 长连接，切换标签页不影响抓取）
 // 运行一次抓取任务（前端 /api/ml/fetch、外部 /api/ml/trigger、定时调度共用）
 let lastRunSites: MLSiteCode[] = ['MLM', 'MLB'];
 let lastRunOptions: FetchOptions = {};
+
+// 全局抓取任务状态（单进程内存，供前端轮询）
+interface FetchJobState {
+  jobId: string;
+  status: 'running' | 'done' | 'error';
+  phase: string;
+  current: number;
+  total: number;
+  message: string;
+  site?: string;
+  category?: string;
+  totalProducts: number;          // 已抓取商品总数（权威计数）
+  siteStats: Record<string, number>;
+  recentProducts: any[];          // 最近一批商品（最多 50 个，供前端实时表格展示）
+  globalCurrent: number;          // 跨站点全局分类进度
+  globalTotal: number;
+  result?: { fileName: string; filePath: string; totalCount: number; siteStats: Record<string, number>; zipName?: string; zipPath?: string };
+  error?: string;
+  isResume: boolean;
+  startedAt: string;
+  updatedAt: string;
+}
+let currentFetchJob: FetchJobState | null = null;
+
+// 启动一个异步抓取任务（不阻塞响应）；若已有运行中的任务则直接复用其 jobId
+function startFetchJob(sites: MLSiteCode[], options: FetchOptions, resumeCp: FetchCheckpoint | null): string {
+  const base = resumeCp?.collectedProducts?.length || 0;
+  const jobId = String(Date.now());
+  currentFetchJob = {
+    jobId, status: 'running', phase: 'start', current: 0, total: 0,
+    message: resumeCp ? '正在从断点恢复...' : '正在初始化（校验 Token / 准备抓取）...',
+    totalProducts: base, siteStats: resumeCp?.siteStats || {},
+    recentProducts: [], globalCurrent: base, globalTotal: base,
+    isResume: !!resumeCp, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+  };
+  // 跨站点全局进度累积（与前端原逻辑一致）
+  let gBase = base;
+  let currentSiteTotal = 0;
+  const sendProgress = (p: any) => {
+    const j = currentFetchJob;
+    if (!j || j.jobId !== jobId) return;
+    j.phase = p.phase ?? j.phase;
+    j.current = p.current ?? j.current;
+    j.total = p.total ?? j.total;
+    j.message = p.message ?? j.message;
+    if (p.site) j.site = p.site;
+    if (p.category) j.category = p.category;
+    if (p.phase === 'product_batch' && Array.isArray(p.products)) {
+      j.totalProducts += p.products.length;
+      j.recentProducts = p.products.slice(-50);
+    }
+    const ph = p.phase;
+    if (ph === 'site_start') { currentSiteTotal = 0; j.globalCurrent = gBase; j.globalTotal = gBase || 1; }
+    else if (ph === 'categories_done') { currentSiteTotal = p.total || 0; j.globalTotal = gBase + currentSiteTotal; }
+    else if (ph === 'fetching') { j.globalCurrent = gBase + (p.current || 0); }
+    else if (ph === 'site_done') { gBase += currentSiteTotal; currentSiteTotal = 0; j.globalCurrent = gBase; j.globalTotal = gBase; }
+    else if (ph === 'exporting' || ph === 'done') { j.globalCurrent = gBase || 1; j.globalTotal = gBase || 1; }
+    j.updatedAt = new Date().toISOString();
+  };
+  (async () => {
+    try {
+      await ensureValidToken();
+      const result = await runExportJob(sites, options, sendProgress, resumeCp);
+      const j = currentFetchJob;
+      if (!j || j.jobId !== jobId) return; // 已被新任务覆盖
+      j.status = 'done';
+      j.phase = 'complete';
+      j.message = '抓取完成!';
+      j.globalCurrent = j.globalTotal = j.globalTotal || 1;
+      j.result = {
+        fileName: result.fileName, filePath: result.filePath, totalCount: result.totalCount,
+        siteStats: result.siteStats, zipName: result.zipName, zipPath: result.zipPath,
+      };
+      j.updatedAt = new Date().toISOString();
+    } catch (error: any) {
+      console.error('[ML Fetch] Error:', error);
+      const j = currentFetchJob;
+      if (j && j.jobId === jobId) {
+        j.status = 'error';
+        j.phase = 'error';
+        j.error = error?.message || '抓取失败';
+        j.message = error?.message || '抓取失败';
+        j.updatedAt = new Date().toISOString();
+      }
+    }
+  })();
+  return jobId;
+}
 async function runExportJob(sites: MLSiteCode[], options: FetchOptions, onProgress?: (p: any) => void, resumeCp?: FetchCheckpoint | null) {
   lastRunSites = sites;
   lastRunOptions = options;
@@ -1676,6 +1764,11 @@ async function runExportJob(sites: MLSiteCode[], options: FetchOptions, onProgre
 app.post('/api/ml/fetch', async (req, res) => {
   const { sites = ['MLM', 'MLB'], options = {}, resume = false } = req.body;
 
+  // 已有运行中的任务：直接复用，避免重复抓取
+  if (currentFetchJob && currentFetchJob.status === 'running') {
+    return res.json({ success: true, jobId: currentFetchJob.jobId, status: 'running', resumed: false, message: '已有抓取任务进行中' });
+  }
+
   // 断点续传：加载 checkpoint 并恢复
   let resumeCp: FetchCheckpoint | null = null;
   if (resume) {
@@ -1691,46 +1784,25 @@ app.post('/api/ml/fetch', async (req, res) => {
     console.log('[ML Fetch] 全新抓取，已清除旧 checkpoint');
   }
 
-  console.log(`[ML Fetch] 开始抓取, 站点: ${sites.join(', ')}, 选项: ${JSON.stringify(options)}${resumeCp ? ', 模式: 断点续传' : ''}`);
+  const jobId = startFetchJob(sites as MLSiteCode[], options as FetchOptions, resumeCp);
+  console.log(`[ML Fetch] 已启动异步任务 jobId=${jobId}, 站点: ${(sites as string[]).join(', ')}, 选项: ${JSON.stringify(options)}${resumeCp ? ', 模式: 断点续传' : ''}`);
 
-  // 设置 SSE
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // 禁用反向代理缓冲（Nginx / Vite 代理），保证进度实时推流
-  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+  // 立即返回 jobId，前端通过轮询获取进度（切换标签页不影响后端任务）
+  res.json({ success: true, jobId, status: 'running', resumed: !!resumeCp });
+});
 
-  // 进度回调：把后端每个阶段实时写到 SSE 流
-  const sendProgress = (p: any) => {
-    try {
-      res.write(`data: ${JSON.stringify(p)}\n\n`);
-      const anyRes = res as any;
-      if (typeof anyRes.flush === 'function') anyRes.flush();
-    } catch { /* 连接已断开，忽略 */ }
-  };
+// 当前活跃任务（前端轮询用，切换到别的标签页后再切回也能恢复进度显示）
+app.get('/api/ml/fetch/active', (req, res) => {
+  res.json({ success: true, job: currentFetchJob });
+});
 
-  try {
-    sendProgress({ phase: 'start', current: 0, total: 0, message: resumeCp ? '正在从断点恢复...' : '正在初始化（校验 Token / 准备抓取）...' });
-    await ensureValidToken();
-    const result = await runExportJob(sites as MLSiteCode[], options as FetchOptions, sendProgress, resumeCp);
-
-    res.write(`data: ${JSON.stringify({
-      phase: 'complete',
-      message: '抓取完成!',
-      filePath: result.fileName,
-      totalCount: result.totalCount,
-      siteStats: result.siteStats,
-    })}\n\n`);
-
-    res.end();
-  } catch (error: any) {
-    console.error('[ML Fetch] Error:', error);
-    res.write(`data: ${JSON.stringify({
-      phase: 'error',
-      message: error?.message || '抓取失败',
-    })}\n\n`);
-    res.end();
+// 按 jobId 查询任务状态
+app.get('/api/ml/fetch/:jobId', (req, res) => {
+  const jobId = req.params.jobId;
+  if (currentFetchJob && currentFetchJob.jobId === jobId) {
+    return res.json({ success: true, job: currentFetchJob });
   }
+  res.json({ success: false, job: null, message: '任务不存在或已结束' });
 });
 
 // 外部触发（供 cron-job.org 等唤醒免费版 Render 并触发抓取）

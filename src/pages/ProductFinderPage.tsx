@@ -58,6 +58,9 @@ export function ProductFinderPage() {
   const globalBaseRef = useRef(0); // 已完成站点的分类总数累计
   const currentSiteTotalRef = useRef(0); // 当前站点的分类总数
   const fetchStartTimeRef = useRef(0); // 本次抓取开始时间戳（用于估算剩余时间）
+  const [jobId, setJobId] = useState<string | null>(null); // 后端异步抓取任务 ID（轮询用）
+  const [fetchedCount, setFetchedCount] = useState(0); // 后端已抓取商品总数（权威计数）
+  const fetchPollRef = useRef<ReturnType<typeof setInterval> | null>(null); // 抓取进度轮询定时器
   const [files, setFiles] = useState<ExportedFile[]>([]);
   const [selectedSites, setSelectedSites] = useState<string[]>(['MLM', 'MLB', 'MLC', 'MCO']);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -591,7 +594,69 @@ export function ProductFinderPage() {
     } catch { /* 忽略 */ }
   }, []);
 
-  // 开始抓取（根据代理配置选择模式）
+  // 把后端任务状态映射到前端 state（轮询时调用）
+  const applyJob = useCallback((job: any) => {
+    setProgress({ phase: job.phase, current: job.current, total: job.total, message: job.message, site: job.site, category: job.category });
+    setGlobalProgress({ current: job.globalCurrent || 0, total: job.globalTotal || 0 });
+    setFetchedCount(job.totalProducts || 0);
+    if (Array.isArray(job.recentProducts) && job.recentProducts.length) {
+      setProducts((prev) => {
+        const existing = new Set(prev.map((p: ProductItem) => p.itemId));
+        const merged: ProductItem[] = [...prev];
+        for (const p of job.recentProducts) {
+          if (!existing.has(p.itemId)) { merged.push(p); existing.add(p.itemId); }
+        }
+        return merged;
+      });
+    }
+    if (job.status === 'done' && job.result) {
+      setResult({ phase: 'complete', message: '抓取完成!', filePath: job.result.filePath, totalCount: job.result.totalCount, siteStats: job.result.siteStats });
+    } else if (job.status === 'error') {
+      setResult({ phase: 'error', message: job.error || job.message || '抓取失败' });
+    }
+    // 日志：仅在阶段消息变化时追加，避免刷屏
+    setProgressLog((prev) => {
+      const last = prev[prev.length - 1];
+      if (last === job.message) return prev;
+      return [...prev, job.message];
+    });
+  }, []);
+
+  // 停止进度轮询（不中断后端任务）
+  const stopPolling = useCallback(() => {
+    if (fetchPollRef.current) {
+      clearInterval(fetchPollRef.current);
+      fetchPollRef.current = null;
+    }
+  }, []);
+
+  // 启动进度轮询：每 1.5s 拉取一次后端任务状态
+  const startPolling = useCallback(() => {
+    stopPolling();
+    fetchPollRef.current = setInterval(async () => {
+      try {
+        const r = await fetch('/api/ml/fetch/active');
+        const d = await r.json();
+        const job = d.job;
+        if (!job) { // 任务已结束且被清理
+          stopPolling();
+          setIsFetching(false);
+          return;
+        }
+        applyJob(job);
+        if (job.status === 'done' || job.status === 'error') {
+          stopPolling();
+          setIsFetching(false);
+          if (job.status === 'done') {
+            fetchFiles();
+            setCheckpoint(null);
+          }
+        }
+      } catch { /* 网络抖动忽略，下次继续 */ }
+    }, 1500);
+  }, [applyJob, stopPolling, fetchFiles]);
+
+  // 开始抓取（改为后端异步任务 + 前端轮询，切换标签页不影响后端执行）
   const handleFetchViaBrowser = useCallback(async (resumeMode = false) => {
     if (selectedSites.length === 0) {
       NotificationPlugin.warning({ title: '请至少选择一个站点', content: '' });
@@ -603,120 +668,64 @@ export function ProductFinderPage() {
       return;
     }
 
-    setIsFetching(true);
     setProgress(null);
     setProgressLog([]);
     setResult(null);
-    if (!resumeMode) {
-      setProducts([]); // 全新抓取才清空，续传保留已有
-    }
+    setProducts([]);
+    setFetchedCount(0);
     setGlobalProgress({ current: 0, total: 0 });
     globalBaseRef.current = 0;
     currentSiteTotalRef.current = 0;
     fetchStartTimeRef.current = Date.now();
     setShowResumeBanner(false);
+    setIsFetching(true);
 
-    const addLog = (msg: string) => {
-      setProgressLog((prev) => [...prev, msg]);
-    };
-
-    // ===== 后端直连抓取（highlights → products 链路，免 VPN）=====
-    {
-      addLog(`☁️ 后端直连模式：通过后端调用 ML API（免 VPN）...`);
-      if (resumeMode) addLog('📌 断点续传模式：从上次中断处继续');
-      try {
-        const response = await fetch('/api/ml/fetch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sites: selectedSites,
-            options: {
-              priceLimitUsd,
-              excludeFull,
-              excludeDomestic,
-              onlyNew,
-              includeSubcategories,
-              miaoshouPackage,
-            },
-            resume: resumeMode,
-          }),
-        });
-
-        const reader = response.body?.getReader();
-        const decoder = new TextDecoder();
-
-        if (!reader) {
-          throw new Error('无法读取响应流');
-        }
-
-        let buffer = '';
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
-                const data: any = JSON.parse(line.slice(6));
-                if (data.phase === 'complete') {
-                  setResult(data as FetchResult);
-                  addLog(`✅ ${data.message}`);
-                  setGlobalProgress({ current: 1, total: 1 });
-                  fetchFiles();
-                  setCheckpoint(null); // 完成后清除前端 checkpoint 状态
-                } else if (data.phase === 'product_batch' && data.products) {
-                  // 实时商品数据：累积到商品列表
-                  setProducts((prev) => {
-                    const existing = new Set(prev.map((p) => p.itemId));
-                    const newProducts = data.products!.filter((p: ProductItem) => !existing.has(p.itemId));
-                    return [...prev, ...newProducts];
-                  });
-                } else if (data.phase === 'error') {
-                  setResult(data as FetchResult);
-                  addLog(`❌ ${data.message}`);
-                } else {
-                  setProgress(data as FetchProgress);
-                  // 「正在获取 X (i/total)」已在状态行/进度条显示，不重复进日志；
-                  // 仅在「筛选出 N 个」等结果型阶段记一条，实现日志合并、避免刷屏
-                  if (data.phase !== 'fetching') addLog(data.message);
-                  // 累计全局进度（跨站点）
-                  const ph = data.phase;
-                  if (ph === 'site_start') {
-                    currentSiteTotalRef.current = 0;
-                    setGlobalProgress({ current: globalBaseRef.current, total: globalBaseRef.current || 1 });
-                  } else if (ph === 'categories_done') {
-                    currentSiteTotalRef.current = data.total || 0;
-                    setGlobalProgress({ current: globalBaseRef.current, total: globalBaseRef.current + currentSiteTotalRef.current });
-                  } else if (ph === 'fetching') {
-                    setGlobalProgress({
-                      current: globalBaseRef.current + data.current,
-                      total: globalBaseRef.current + (currentSiteTotalRef.current || data.total || 1),
-                    });
-                  } else if (ph === 'site_done') {
-                    globalBaseRef.current += currentSiteTotalRef.current;
-                    currentSiteTotalRef.current = 0;
-                    setGlobalProgress({ current: globalBaseRef.current, total: globalBaseRef.current });
-                  } else if (ph === 'exporting' || ph === 'done') {
-                    const t = globalBaseRef.current || 1;
-                    setGlobalProgress({ current: t, total: t });
-                  }
-                }
-              } catch { /* ignore parse errors */ }
-            }
-          }
-        }
-      } catch (err: any) {
-        NotificationPlugin.error({ title: '抓取失败', content: err?.message || '未知错误' });
-        addLog(`❌ 错误: ${err?.message || '未知错误'}`);
-      } finally {
-        setIsFetching(false);
-      }
-      return;
+    try {
+      const res = await fetch('/api/ml/fetch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sites: selectedSites,
+          options: {
+            priceLimitUsd,
+            excludeFull,
+            excludeDomestic,
+            onlyNew,
+            includeSubcategories,
+            miaoshouPackage,
+          },
+          resume: resumeMode,
+        }),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || '启动抓取失败');
+      setJobId(data.jobId);
+      startPolling();
+    } catch (err: any) {
+      NotificationPlugin.error({ title: '启动抓取失败', content: err?.message || '' });
+      setIsFetching(false);
     }
+  }, [selectedSites, tokenStatus.hasToken, priceLimitUsd, excludeFull, excludeDomestic, onlyNew, includeSubcategories, miaoshouPackage, startPolling]);
 
-  }, [selectedSites, tokenStatus.hasToken, fetchFiles]);
+  // 进入页面时若后端有正在运行的抓取任务，自动恢复进度显示（切换标签页/刷新页面后也能续显，且不影响后端执行）
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch('/api/ml/fetch/active');
+        const d = await r.json();
+        if (d.job && d.job.status === 'running') {
+          setJobId(d.job.jobId);
+          setIsFetching(true);
+          applyJob(d.job);
+          startPolling();
+        }
+      } catch { /* 忽略 */ }
+    })();
+    return () => {
+      // 离开页面只停前端轮询，不取消后端抓取任务
+      if (fetchPollRef.current) { clearInterval(fetchPollRef.current); fetchPollRef.current = null; }
+    };
+  }, [applyJob, startPolling]);
 
   // 下载文件
   const handleDownload = useCallback((fileName: string) => {
@@ -1496,6 +1505,9 @@ export function ProductFinderPage() {
             {progress && (
               <div className="mb-3 text-sm" style={{ color: 'var(--td-text-color-primary)' }}>
                 ⏳ {progress.message}
+                {fetchedCount > 0 && (
+                  <span style={{ color: 'var(--td-text-color-secondary)' }}> · 已抓取 {fetchedCount} 个商品</span>
+                )}
               </div>
             )}
 
