@@ -130,8 +130,10 @@ export async function sendXlsxResult(filePath: string, subject: string, body: st
   }
 }
 
-/** 测试邮件（纯文本，无附件） */
-export async function sendTestEmail(): Promise<{ success: boolean; message: string }> {
+/** 测试邮件（纯文本，无附件）。
+ * 可选 content 用于「用最近订单测试」时发送真实订单通知样例（text + html）。
+ */
+export async function sendTestEmail(content?: { subject?: string; text?: string; html?: string }): Promise<{ success: boolean; message: string }> {
   const smtp = resolveSmtp();
   const to = resolveRecipient();
   if (!to || !smtp.host || !smtp.user) {
@@ -148,11 +150,13 @@ export async function sendTestEmail(): Promise<{ success: boolean; message: stri
     await transporter.sendMail({
       from: fromAddr,
       to,
-      subject: 'ML Product Finder - 邮件测试',
-      text: '这是一封测试邮件，说明你的 SMTP 配置可用。',
+      subject: content?.subject || 'ML Product Finder - 邮件测试',
+      text: content?.text || '这是一封测试邮件，说明你的 SMTP 配置可用。',
+      ...(content?.html ? { html: content.html } : {}),
     });
     return { success: true, message: `测试邮件已发送至 ${to}` };
   } catch (err: any) {
+    console.error('[Email] sendTestEmail failed:', err);
     return { success: false, message: err?.message || '发送失败' };
   }
 }

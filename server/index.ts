@@ -2391,8 +2391,21 @@ app.post('/api/ml/email', (req, res) => {
   res.json({ success: true, config: { ...cfg, pass: cfg.pass ? '******' : '' } });
 });
 app.post('/api/ml/email/test', async (req, res) => {
-  const r = await sendTestEmail();
-  res.json(r);
+  const { useLastOrder } = req.body || {};
+  try {
+    if (useLastOrder) {
+      const last = await orders.getLastRealOrderForTest();
+      if (!last) return res.json({ success: false, message: '未找到任何已付款订单用于测试，请先确保店铺有订单' });
+      // 复用与真实推送相同的拼装逻辑，确保测试邮件 = 真实订单通知（与短信测试一致）
+      const content = await notify.buildOrderNotify(last.store, last.order);
+      const r = await sendTestEmail({ subject: `【测试】美客多新订单 ${last.order.id}`, text: content.text, html: content.html });
+      return res.json({ ...r, preview: { text: content.text, html: content.html, smsText: content.smsText } });
+    }
+    const r = await sendTestEmail();
+    res.json(r);
+  } catch (e: any) {
+    res.json({ success: false, message: e?.message || String(e) });
+  }
 });
 
 // 将历史导出文件作为附件重新发送邮件

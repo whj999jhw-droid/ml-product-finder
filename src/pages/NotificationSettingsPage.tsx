@@ -84,7 +84,9 @@ export function NotificationSettingsPage() {
   const [emailOk, setEmailOk] = useState<boolean | null>(null);
   const [detailItem, setDetailItem] = useState<AlertItem | null>(null);
   const [testWithLastOrder, setTestWithLastOrder] = useState(false);
+  const [testWithLastOrderEmail, setTestWithLastOrderEmail] = useState(false);
   const [smsPreview, setSmsPreview] = useState('');
+  const [emailPreview, setEmailPreview] = useState('');
   const [previewVisible, setPreviewVisible] = useState(false);
   const inflightRef = useRef<AbortController[]>([]);
 
@@ -203,11 +205,19 @@ export function NotificationSettingsPage() {
     setTestingEmail(true);
     setEmailOk(null);
     try {
-      const r = await fetchJson('/api/ml/email/test', { method: 'POST' }, 30000);
+      const r = await fetchJson('/api/ml/email/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ useLastOrder: testWithLastOrderEmail }),
+      }, 30000);
       setEmailOk(r.success);
       if (r.success) MessagePlugin.success(r.message);
       else MessagePlugin.warning(r.message || '测试失败');
-      await appendTestAlert({ channel: 'email', content: '', message: r.message || (r.success ? '测试邮件已发送' : '测试失败'), success: !!r.success });
+      if (r.success && r.preview?.text) {
+        setEmailPreview(r.preview.text);
+        setPreviewVisible(true);
+      }
+      await appendTestAlert({ channel: 'email', content: r.preview?.text || '', message: r.message || (r.success ? '测试邮件已发送' : '测试失败'), success: !!r.success });
     } catch (err: any) {
       setEmailOk(false);
       MessagePlugin.error(err?.message || '测试失败');
@@ -418,6 +428,10 @@ export function NotificationSettingsPage() {
             <span>使用 SSL/TLS（端口 465 时开启；587 时关闭用 STARTTLS）</span>
           </div>
           <Button variant="outline" icon={<RefreshIcon />} onClick={testEmail} loading={testingEmail}>发送测试邮件</Button>
+          <div className="flex items-center gap-2">
+            <Switch value={testWithLastOrderEmail} onChange={(v: boolean) => setTestWithLastOrderEmail(v)} size="small" />
+            <span className="text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>用最近一条真实订单测试（与短信预览一致，发送真实订单通知样例）</span>
+          </div>
           <Collapse style={{ width: '100%' }}>
             <Collapse.Panel value="emailHelp" header="免费 SMTP 推荐与授权码/专用密码获取（点击展开）">
               <div className="text-xs" style={{ color: 'var(--td-text-color-placeholder)', whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>
@@ -593,15 +607,15 @@ export function NotificationSettingsPage() {
       <Dialog
         visible={previewVisible}
         onClose={() => setPreviewVisible(false)}
-        header="短信/推送内容预览"
+        header="通知内容预览"
         footer={false}
         width={680}
       >
         <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 13, lineHeight: 1.7 }}>
-          {smsPreview}
+          {emailPreview || smsPreview}
         </div>
         <div className="text-xs mt-3" style={{ color: 'var(--td-text-color-placeholder)' }}>
-          上面是实际发送的内容（钉钉/企微会以 markdown 渲染，图片会显示为图片；通用/短信为纯文本）。
+          上面是实际发送的内容（邮件为纯文本/HTML；钉钉/企微会以 markdown 渲染，图片会显示为图片；通用/短信为纯文本）。
         </div>
       </Dialog>
     </div>
