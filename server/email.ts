@@ -81,6 +81,21 @@ function resolveSmtp(): { host: string; port: number; secure: boolean; user: str
   };
 }
 
+/** 构造合法的 SMTP From 地址：
+ *  - 若用户填的是邮箱，直接用它；
+ *  - 若填的是显示名（如"美客多"），则拼成 "显示名" <登录账号>；
+ *  - 留空则直接用登录账号。
+ *  避免 QQ/163 等严格服务器因 From 不带 @ 报 502 Invalid parameters。
+ */
+function resolveFrom(smtp: { from: string; user: string }): string {
+  const raw = smtp.from?.trim();
+  if (!raw || raw === smtp.user) return smtp.user;
+  // 已包含 @ 视为完整邮箱地址
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) return raw;
+  // 否则视为显示名，拼到登录账号上
+  return `"${raw}" <${smtp.user}>`;
+}
+
 /** 实际收件人：UI 填写优先，其次环境变量 ML_EMAIL_TO 兜底 */
 function resolveRecipient(): string {
   return emailConfig.to || process.env.ML_EMAIL_TO || '';
@@ -100,8 +115,9 @@ export async function sendXlsxResult(filePath: string, subject: string, body: st
       secure: smtp.secure,
       auth: { user: smtp.user, pass: smtp.pass },
     });
+    const fromAddr = resolveFrom(smtp);
     await transporter.sendMail({
-      from: smtp.from || smtp.user,
+      from: fromAddr,
       to,
       subject,
       text: body,
@@ -109,6 +125,7 @@ export async function sendXlsxResult(filePath: string, subject: string, body: st
     });
     return { success: true, message: `邮件已发送至 ${to}（含 xlsx 附件）` };
   } catch (err: any) {
+    console.error('[Email] sendXlsxResult failed:', err);
     return { success: false, message: err?.message || '发送失败' };
   }
 }
@@ -127,8 +144,9 @@ export async function sendTestEmail(): Promise<{ success: boolean; message: stri
       secure: smtp.secure,
       auth: { user: smtp.user, pass: smtp.pass },
     });
+    const fromAddr = resolveFrom(smtp);
     await transporter.sendMail({
-      from: smtp.from || smtp.user,
+      from: fromAddr,
       to,
       subject: 'ML Product Finder - 邮件测试',
       text: '这是一封测试邮件，说明你的 SMTP 配置可用。',
