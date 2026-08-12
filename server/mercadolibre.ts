@@ -1898,7 +1898,7 @@ async function fetchSiteProducts(
   options: FetchOptions = {},
   onProgress?: ProgressCallback,
   startFromCategoryIndex = 0,
-  onCheckpoint?: (siteCode: MLSiteCode, completedIndex: number, total: number) => void
+  onCheckpoint?: (siteCode: MLSiteCode, completedIndex: number, total: number, siteProducts?: MLProduct[]) => void
 ): Promise<MLProduct[]> {
   const site = ML_SITES[siteCode];
   const allProducts: MLProduct[] = [];
@@ -1983,8 +1983,8 @@ async function fetchSiteProducts(
       console.error(`[ML] 获取分类商品失败 ${cat.id}:`, err);
     }
 
-    // 每完成一个分类，保存 checkpoint
-    onCheckpoint?.(siteCode, i, categories.length);
+    // 每完成一个分类，保存 checkpoint（传入站点内已累积商品，供断点续传）
+    onCheckpoint?.(siteCode, i, categories.length, allProducts);
 
     // 请求间隔，避免被限速（代理模式下需要更长间隔）
     const delayMs = getProxyAgent() ? 2000 : 200;
@@ -2057,7 +2057,7 @@ export async function fetchAllProductsAndExport(
       onProgress,
       resumeCategoryIndex,
       // checkpoint 回调：每完成一个分类保存一次
-      (completedSiteCode, completedIdx, totalCats) => {
+      (completedSiteCode, completedIdx, totalCats, siteProducts = []) => {
         const cpNow: FetchCheckpoint = {
           jobId: cp?.jobId || String(Date.now()),
           startedAt: cp?.startedAt || new Date().toISOString(),
@@ -2067,7 +2067,7 @@ export async function fetchAllProductsAndExport(
           currentSite: completedSiteCode,
           completedCategoryIndex: completedIdx,
           totalCategories: totalCats,
-          collectedProducts: [...allProducts, ...products],
+          collectedProducts: [...allProducts, ...siteProducts],
           siteStats: { ...siteStats },
           exchangeRates: {},
         };
