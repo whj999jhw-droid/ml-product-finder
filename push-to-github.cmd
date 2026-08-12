@@ -25,8 +25,24 @@ if %errorlevel% == 0 (
     echo.
     set "MSG=%~1"
     if "%~1"=="" set "MSG=update from local"
-    echo [2/3] 提交改动（%MSG%）...
+
+    REM 暂存所有改动（.gitignore 已忽略 .env/node_modules/dist/data/certs 等敏感大文件）
+    echo 暂存改动中 ...
     git add .
+
+    echo.
+    echo 即将提交以下文件：
+    git status --short
+    echo.
+    echo 注意：如果上面出现不该提交的文件（如 .env、证书、node_modules），请先取消并完善 .gitignore。
+    set /p CONFIRM=确认提交以上文件？(y/N):
+    if /i not "%CONFIRM%"=="y" (
+        echo 已取消提交（改动仍保留在本地，未提交，也未暂存）。
+        git reset -q
+        goto end
+    )
+
+    echo [2/3] 提交改动（%MSG%）...
     git commit -m "%MSG%"
 )
 
@@ -46,4 +62,5 @@ if %errorlevel% == 0 (
 
 echo.
 pause
+:end
 endlocal

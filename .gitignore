@@ -34,3 +34,6 @@ resp.txt
 tmp/
 vite.config.ts.timestamp-*.mjs
 
+# --- 本地自签证书（每台机器自己生成，不共享）---
+certs/
+
