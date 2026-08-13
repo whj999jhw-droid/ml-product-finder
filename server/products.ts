@@ -196,7 +196,7 @@ async function searchBySellerItems(
   try {
     const sd = await ensureStoreTokenThen(store, `${base}/${encodeURIComponent(sellerId)}/items/search?${qs.toString()}`);
     const ids = (sd.results || []).map(String);
-    console.log(`[Products] seller-items 搜索 [site=${store.site} sku=${params.sku || ''} seller_sku=${params.seller_sku || ''} q=${params.q || ''}] => ${ids.length} 个 id`);
+    console.log(`[Products] seller-items 搜索 [site=${store.site} sku=${params.sku || ''} seller_sku=${params.seller_sku || ''} q=${params.q || ''}] => ${ids.length} 个 id: ${ids.slice(0, 5).join(',')}${ids.length > 5 ? '...' : ''}`);
     return ids;
   } catch (e: any) {
     console.warn('[Products] seller-items 搜索失败:', params, e?.message?.slice(0, 120));
@@ -205,7 +205,10 @@ async function searchBySellerItems(
 }
 
 /**
- * 批量从 item id 列表取详情（每次最多 20 个）
+ * 批量从 item id 列表取详情（每次最多 20 个）。
+ * 兼容 /items?ids= 的两种返回形态：
+ *   - [{ code: 200, body: {...} }, ...]
+ *   - [{ ... }, ...]（直接是 item 对象）
  */
 async function fetchItemDetailsBatch(ids: string[], store: Store): Promise<any[]> {
   if (!ids.length) return [];
@@ -213,18 +216,43 @@ async function fetchItemDetailsBatch(ids: string[], store: Store): Promise<any[]
   for (let i = 0; i < ids.length; i += 20) {
     const batch = ids.slice(i, i + 20);
     try {
-      const batchData: any[] = await ensureStoreTokenThen(
+      const batchData: any = await ensureStoreTokenThen(
         store,
         `/items?ids=${batch.map(encodeURIComponent).join(',')}`,
       );
-      for (const entry of batchData || []) {
-        if (entry?.code === '200' && entry.body) items.push(entry.body);
+      console.log(`[Products] /items?ids=${batch.join(',')}] raw type=${typeof batchData} isArray=${Array.isArray(batchData)} length=${Array.isArray(batchData) ? batchData.length : 'N/A'}`);
+      const arr = Array.isArray(batchData) ? batchData : [];
+      for (const entry of arr) {
+        const code = entry?.code;
+        const body = entry?.body;
+        if ((code === 200 || code === '200') && body) {
+          console.log(`[Products] /items?ids body id=${body.id} seller_sku=${body.seller_sku || extractSku(body) || '(empty)'}`);
+          items.push(body);
+        } else if (entry && typeof entry === 'object' && entry.id) {
+          // 有些返回直接是 item 对象
+          console.log(`[Products] /items?ids direct id=${entry.id} seller_sku=${entry.seller_sku || extractSku(entry) || '(empty)'}`);
+          items.push(entry);
+        } else {
+          console.log(`[Products] /items?ids 无法解析 entry:`, JSON.stringify(entry).slice(0, 200));
+        }
       }
     } catch (e: any) {
-      console.warn('[Products] 批量取详情失败:', e?.message?.slice(0, 120));
+      console.warn('[Products] 批量取详情失败:', e?.message?.slice(0, 200));
     }
   }
   return items;
+}
+
+/** 单个取 item 详情兜底 */
+async function fetchItemDetailSingle(itemId: string, store: Store): Promise<any | null> {
+  try {
+    const item = await ensureStoreTokenThen(store, `/items/${itemId}`);
+    console.log(`[Products] /items/${itemId} id=${item?.id} seller_sku=${item?.seller_sku || extractSku(item) || '(empty)'}`);
+    return item;
+  } catch (e: any) {
+    console.warn(`[Products] /items/${itemId} 失败:`, e?.message?.slice(0, 200));
+    return null;
+  }
 }
 
 /**
@@ -274,12 +302,21 @@ export async function searchStoreProducts(
     // seller_sku 精确搜索（文档说会匹配 SELLER_SKU 属性）
     if (variant) {
       const ids = await searchBySellerItems(store, sellerId, { seller_sku: variant });
-      for (const item of await fetchItemDetailsBatch(ids, store)) addHit(item, 'sku');
+      let details = await fetchItemDetailsBatch(ids, store);
+      if (ids.length && !details.length) {
+        // /items?ids= 可能解析失败，逐个兜底
+        details = (await Promise.all(ids.map((id) => fetchItemDetailSingle(id, store)))).filter(Boolean) as any[];
+      }
+      for (const item of details) addHit(item, 'sku');
     }
     // sku 精确搜索（匹配 seller_custom_field）
     if (variant) {
       const ids = await searchBySellerItems(store, sellerId, { sku: variant });
-      for (const item of await fetchItemDetailsBatch(ids, store)) addHit(item, 'sku');
+      let details = await fetchItemDetailsBatch(ids, store);
+      if (ids.length && !details.length) {
+        details = (await Promise.all(ids.map((id) => fetchItemDetailSingle(id, store)))).filter(Boolean) as any[];
+      }
+      for (const item of details) addHit(item, 'sku');
     }
   }
 
@@ -288,7 +325,11 @@ export async function searchStoreProducts(
   //    普通 -> /users/{seller_id}/items/search?q=...
   if (q) {
     const ids = await searchBySellerItems(store, sellerId, { q });
-    for (const item of await fetchItemDetailsBatch(ids, store)) addHit(item, 'title');
+    let details = await fetchItemDetailsBatch(ids, store);
+    if (ids.length && !details.length) {
+      details = (await Promise.all(ids.map((id) => fetchItemDetailSingle(id, store)))).filter(Boolean) as any[];
+    }
+    for (const item of details) addHit(item, 'title');
   }
 
   // 4) 非 CBT 额外走公开站点搜索（返回完整结果，无需再批量取详情）
