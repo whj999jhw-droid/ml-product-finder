@@ -303,6 +303,8 @@ export interface ProductDetail extends ProductSearchHit {
   localized_site_id?: string;
   localized_item_id?: string;
   marketplace_items?: { site_id: string; item_id: string }[];
+  // 搜索接口可能返回本地站点 item ID（如 MLM...），保存时必须用 CBT 根 ID（CBT...）
+  root_item_id: string;
 }
 
 export async function getStoreItemDetail(store: Store, itemId: string): Promise<ProductDetail> {
@@ -329,6 +331,17 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
     }
   }
 
+  // 搜索接口（/marketplace/users/{id}/items/search）可能返回本地站点 item ID（MLM...），
+  // 但 CBT 更新必须用 global 根 ID（CBT...）。优先从返回体取 cbt_item_id，其次判断 id 前缀。
+  const looksLikeCbtId = (id?: string) => /^CBT\d+$/i.test(String(id || ''));
+  const root_item_id =
+    (looksLikeCbtId(item.cbt_item_id) ? item.cbt_item_id : undefined) ||
+    (looksLikeCbtId(item.id) ? item.id : undefined) ||
+    itemId;
+  if (root_item_id !== itemId && root_item_id !== item.id) {
+    console.log(`[Products] 商品 ID 映射: 请求=${itemId} 返回=${item.id} 根=${root_item_id}`);
+  }
+
   // CBT 全球售：通过 /items/{id}/marketplace_items 获取各站点本地 item 映射，
   // 再 GET /items/{local_id} 取本地站点的标题/价格（和美客多后台一致）。
   // 参考：https://global-selling.mercadolibre.com/devsite/items-and-searches-global-selling
@@ -338,7 +351,7 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
   let localized_item_id: string | undefined;
   let marketplace_items: { site_id: string; item_id: string }[] | undefined;
   const storeSite = (store.site || '').toUpperCase();
-  if (storeSite === 'CBT' || item.site_id === 'CBT') {
+  if (storeSite === 'CBT' || item.site_id === 'CBT' || looksLikeCbtId(root_item_id)) {
     try {
       const mapping = await ensureStoreTokenThen(
         store,
@@ -390,6 +403,7 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
     localized_site_id,
     localized_item_id,
     marketplace_items,
+    root_item_id,
   };
 }
 

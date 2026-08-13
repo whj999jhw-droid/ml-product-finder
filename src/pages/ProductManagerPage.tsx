@@ -47,6 +47,8 @@ interface ProductDetail extends ProductHit {
   localized_site_id?: string;
   localized_item_id?: string;
   marketplace_items?: { site_id: string; item_id: string }[];
+  // CBT 保存必须用 global 根 ID（CBT...），搜索/详情可能返回本地站点 ID（MLM...）
+  root_item_id?: string;
 }
 
 export function ProductManagerPage() {
@@ -151,8 +153,9 @@ export function ProductManagerPage() {
   const saveEdit = useCallback(async () => {
     if (!storeId || !detail) return;
     setSaving(true);
+    const saveItemId = detail.root_item_id || detail.id;
     try {
-      const r = await fetch(`/api/ml/stores/${storeId}/products/${detail.id}`, {
+      const r = await fetch(`/api/ml/stores/${storeId}/products/${saveItemId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -447,7 +450,9 @@ export function ProductManagerPage() {
             </div>
 
             <div className="text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>
-              商品 ID：{detail.id} ｜ 状态：{detail.status || '—'} ｜ SKU：{detail.seller_sku || '—'}
+              商品 ID：{detail.id}
+              {detail.root_item_id && detail.root_item_id !== detail.id ? `（根 ID：${detail.root_item_id}）` : ''}
+              ｜ 状态：{detail.status || '—'} ｜ SKU：{detail.seller_sku || '—'}
             </div>
           </div>
         )}

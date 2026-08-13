@@ -1160,11 +1160,13 @@ app.put('/api/ml/stores/:id/products/:itemId', async (req, res) => {
     const result = await products.updateStoreItem(store, req.params.itemId, {
       title: payload.title,
       pictures: payload.pictures,
+      price: payload.price,
       weight: payload.weight,
       length: payload.length,
       width: payload.width,
       height: payload.height,
       description: payload.description,
+      site_id: payload.site_id,
     });
     res.json({ success: true, ...result });
   } catch (err: any) {
