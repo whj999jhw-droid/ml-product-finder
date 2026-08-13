@@ -41,6 +41,7 @@ interface ProductDetail extends ProductHit {
   description: string;
   dimensions: { length: string; width: string; height: string; weight: string };
   condition?: string;
+  site_id?: string;
 }
 
 export function ProductManagerPage() {
@@ -154,6 +155,7 @@ export function ProductManagerPage() {
           height: editHei,
           weight: editWeight,
           description: editDesc,
+          site_id: detail.site_id || '',
         }),
       });
       const d = await r.json();

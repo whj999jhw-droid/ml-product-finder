@@ -289,6 +289,7 @@ export interface ProductDetail extends ProductSearchHit {
   description: string;
   dimensions: { length: string; width: string; height: string; weight: string };
   condition?: string;
+  site_id?: string; // CBT 商品需要目标市场站点（如 MLM）才能更新描述
 }
 
 export async function getStoreItemDetail(store: Store, itemId: string): Promise<ProductDetail> {
@@ -303,6 +304,17 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
   const pictures: string[] = (item.pictures || []).map((p: any) => p.url || p.secure_url).filter(Boolean);
   const thumbnail = item.thumbnail || pictures[0] || '';
   const dims = parseDimensions(item?.shipping?.dimensions);
+  // CBT 更新描述需要目标市场 site_id；优先取商品字段，其次从 permalink 推断（如 ...mercadolibre.com.mx/... -> MLM）
+  let site_id = item.site_id || item.original_site_id || '';
+  if (!site_id && item.permalink) {
+    const m = String(item.permalink).match(/mercadolibre\.com\.([a-z]+)/i);
+    if (m) {
+      const domainToSite: Record<string, string> = {
+        ar: 'MLA', br: 'MLB', mx: 'MLM', co: 'MCO', cl: 'MLC', pe: 'MPE', uy: 'MLU', ve: 'MLV', ec: 'MEC',
+      };
+      site_id = domainToSite[m[1].toLowerCase()] || '';
+    }
+  }
   return {
     id: item.id,
     title: item.title || '',
@@ -317,6 +329,7 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
     description,
     dimensions: dims,
     condition: item.condition,
+    site_id,
   };
 }
 
@@ -330,6 +343,7 @@ export interface ProductUpdatePayload {
   width?: string;
   height?: string;
   description?: string;
+  site_id?: string; // CBT 更新描述需要目标市场站点（如 MLM）
 }
 
 export interface ProductUpdateResult {
@@ -340,14 +354,21 @@ export interface ProductUpdateResult {
 }
 
 /**
- * 修改商品。标题/图片/尺寸通过 PUT /items/{id}；描述通过 PUT /items/{id}/description。
+ * 修改商品。
+ * - 普通站点：标题/图片/尺寸走 PUT /items/{id}；描述走 PUT /items/{id}/description。
+ * - CBT 全球售：所有字段（含描述）统一走 PUT /global/items/{id}，描述需额外带 site_id + logistic_type=remote。
  * 每个字段只在被显式提供（非空字符串）时才发送，避免误覆盖。
+ * 参考：https://global-selling.mercadolibre.com/devsite/zh_cn/shang-pin-miao-shu
  */
 export async function updateStoreItem(
   store: Store,
   itemId: string,
   payload: ProductUpdatePayload,
 ): Promise<ProductUpdateResult> {
+  const site = (store.site || '').toUpperCase();
+  const isCbt = site === 'CBT';
+  const itemPath = isCbt ? `/global/items/${itemId}` : `/items/${itemId}`;
+
   const itemBody: Record<string, any> = {};
 
   if (typeof payload.title === 'string' && payload.title.trim()) {
@@ -378,15 +399,30 @@ export async function updateStoreItem(
   }
 
   let item: any = null;
-  if (Object.keys(itemBody).length) {
-    item = await storeApiMutate(store, 'PUT', `/items/${itemId}`, itemBody);
-  }
-
   let descriptionResult: any = null;
-  if (typeof payload.description === 'string') {
-    descriptionResult = await storeApiMutate(store, 'PUT', `/items/${itemId}/description`, {
-      plain_text: payload.description,
-    });
+
+  if (isCbt) {
+    // CBT：描述必须和主字段一起通过 /global/items/{id} 提交，且需要 site_id + logistic_type
+    if (typeof payload.description === 'string') {
+      const cbtSiteId = payload.site_id || 'MLM';
+      itemBody.site_id = cbtSiteId;
+      itemBody.logistic_type = 'remote';
+      itemBody.description = { plain_text: payload.description };
+    }
+    if (Object.keys(itemBody).length) {
+      console.log(`[Products] CBT PUT ${itemPath} body keys=${Object.keys(itemBody).join(',')}`);
+      item = await storeApiMutate(store, 'PUT', itemPath, itemBody);
+      descriptionResult = item;
+    }
+  } else {
+    if (Object.keys(itemBody).length) {
+      item = await storeApiMutate(store, 'PUT', itemPath, itemBody);
+    }
+    if (typeof payload.description === 'string') {
+      descriptionResult = await storeApiMutate(store, 'PUT', `/items/${itemId}/description`, {
+        plain_text: payload.description,
+      });
+    }
   }
 
   return {
