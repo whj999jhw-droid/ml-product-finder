@@ -297,6 +297,12 @@ export interface ProductDetail extends ProductSearchHit {
   dimensions: { length: string; width: string; height: string; weight: string };
   condition?: string;
   site_id?: string; // CBT 商品需要目标市场站点（如 MLM）才能更新描述
+  // CBT 全球售商品在各本地站点（如 MLM）可能有独立的标题和价格
+  localized_title?: string;
+  localized_price?: number;
+  localized_site_id?: string;
+  localized_item_id?: string;
+  marketplace_items?: { site_id: string; item_id: string }[];
 }
 
 export async function getStoreItemDetail(store: Store, itemId: string): Promise<ProductDetail> {
@@ -322,6 +328,48 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
       site_id = domainToSite[m[1].toLowerCase()] || '';
     }
   }
+
+  // CBT 全球售：通过 /items/{id}/marketplace_items 获取各站点本地 item 映射，
+  // 再 GET /items/{local_id} 取本地站点的标题/价格（和美客多后台一致）。
+  // 参考：https://global-selling.mercadolibre.com/devsite/items-and-searches-global-selling
+  let localized_title: string | undefined;
+  let localized_price: number | undefined;
+  let localized_site_id: string | undefined;
+  let localized_item_id: string | undefined;
+  let marketplace_items: { site_id: string; item_id: string }[] | undefined;
+  const storeSite = (store.site || '').toUpperCase();
+  if (storeSite === 'CBT' || item.site_id === 'CBT') {
+    try {
+      const mapping = await ensureStoreTokenThen(
+        store,
+        `/items/${encodeURIComponent(itemId)}/marketplace_items`,
+      );
+      marketplace_items = (mapping?.marketplace_items || []).map((m: any) => ({
+        site_id: String(m.site_id || ''),
+        item_id: String(m.item_id || ''),
+      }));
+      const targetSite = site_id || 'MLM';
+      const local = marketplace_items.find((m) => m.site_id === targetSite);
+      if (local?.item_id) {
+        localized_item_id = local.item_id;
+        localized_site_id = targetSite;
+        const localItem = await ensureStoreTokenThen(
+          store,
+          `/items/${encodeURIComponent(local.item_id)}`,
+        );
+        localized_title = localItem?.title;
+        localized_price = Number(localItem?.price) || undefined;
+        console.log(
+          `[Products] CBT 本地站点映射 ${itemId} -> ${local.item_id} title=${localized_title || '(empty)'} price=${localized_price || '(empty)'}`,
+        );
+      } else {
+        console.log(`[Products] CBT 本地站点映射 ${itemId} 未找到 ${targetSite}: ${JSON.stringify(marketplace_items)}`);
+      }
+    } catch (e: any) {
+      console.warn(`[Products] 获取 CBT 本地站点映射失败 ${itemId}:`, e?.message?.slice(0, 160));
+    }
+  }
+
   return {
     id: item.id,
     title: item.title || '',
@@ -337,6 +385,11 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
     dimensions: dims,
     condition: item.condition,
     site_id,
+    localized_title,
+    localized_price,
+    localized_site_id,
+    localized_item_id,
+    marketplace_items,
   };
 }
 

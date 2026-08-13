@@ -42,6 +42,11 @@ interface ProductDetail extends ProductHit {
   dimensions: { length: string; width: string; height: string; weight: string };
   condition?: string;
   site_id?: string;
+  localized_title?: string;
+  localized_price?: number;
+  localized_site_id?: string;
+  localized_item_id?: string;
+  marketplace_items?: { site_id: string; item_id: string }[];
 }
 
 export function ProductManagerPage() {
@@ -128,14 +133,15 @@ export function ProductManagerPage() {
       }
       const p: ProductDetail = d.product;
       setDetail(p);
-      setEditTitle(p.title || '');
+      // CBT 商品在本地站点（如 MLM）的标题/价格往往与 global 不同，优先展示本地站点的值，和美客多后台保持一致
+      setEditTitle(p.localized_title || p.title || '');
       setEditPictures((p.pictures && p.pictures.length ? p.pictures : [p.thumbnail].filter(Boolean)) as string[]);
       setEditDesc(p.description || '');
       setEditLen(p.dimensions?.length || '');
       setEditWid(p.dimensions?.width || '');
       setEditHei(p.dimensions?.height || '');
       setEditWeight(p.dimensions?.weight || '');
-      setEditPrice(p.price ? String(p.price) : '');
+      setEditPrice(p.localized_price ? String(p.localized_price) : p.price ? String(p.price) : '');
     } catch (e: any) {
       MessagePlugin.error('获取详情失败: ' + (e?.message || e));
       setEditOpen(false);
@@ -372,14 +378,32 @@ export function ProductManagerPage() {
 
             {/* 标题 */}
             <div>
-              <div className="text-sm font-medium mb-2">标题</div>
+              <div className="text-sm font-medium mb-2 flex items-center gap-2">
+                <span>标题</span>
+                {detail?.localized_site_id && (
+                  <Tag size="small" theme="warning">{detail.localized_site_id} 站点</Tag>
+                )}
+                {detail?.localized_title && detail.title !== detail.localized_title && (
+                  <span className="text-xs" style={{ color: 'var(--td-text-color-secondary)' }}>
+                    全局标题：{detail.title}
+                  </span>
+                )}
+              </div>
               <Input value={editTitle} onChange={(v) => setEditTitle(v as string)} placeholder="商品标题" />
             </div>
 
             {/* 价格 */}
             <div>
-              <div className="text-sm font-medium mb-2">
-                价格{detail?.currency_id ? `（${detail.currency_id}）` : ''}
+              <div className="text-sm font-medium mb-2 flex items-center gap-2">
+                <span>价格{detail?.currency_id ? `（${detail.currency_id}）` : ''}</span>
+                {detail?.localized_site_id && (
+                  <Tag size="small" theme="warning">{detail.localized_site_id} 站点</Tag>
+                )}
+                {detail?.localized_price && detail.price !== detail.localized_price && (
+                  <span className="text-xs" style={{ color: 'var(--td-text-color-secondary)' }}>
+                    全局价格：{detail.currency_id} {detail.price}
+                  </span>
+                )}
               </div>
               <Input
                 value={editPrice}
