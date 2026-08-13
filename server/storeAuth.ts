@@ -124,6 +124,7 @@ export async function exchangeStoreCode(code: string, state: string): Promise<{
   expiresIn: number;
   nickname: string;
   site: string;
+  scope?: string;
 }> {
   const pending = states.get(state);
   if (!pending) throw new Error('授权状态已过期或不存在（请重新点击「添加店铺」）');
@@ -160,5 +161,6 @@ export async function exchangeStoreCode(code: string, state: string): Promise<{
     expiresIn: data.expires_in || 21600,
     nickname: pending.nickname,
     site: pending.site,
+    scope: data.scope,
   };
 }

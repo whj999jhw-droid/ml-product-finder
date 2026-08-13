@@ -25,6 +25,7 @@ export interface Store {
   mlUserEmail?: string; // 授权时登录的美客多账号邮箱，便于区分「授权错账号」
   mlSeller?: boolean; // 根据 /users/me 的 seller_reputation/status 判断是否为卖家账号
   lastOrderCheck?: string; // ISO，订单轮询游标
+  scope?: string; // 授权时返回的 scope（如 offline_access read write）
   enabled: boolean;
   createdAt: string;
 }
@@ -94,6 +95,7 @@ export function updateStore(id: string, patch: Partial<Store>): Store | undefine
   if (patch.accessToken !== undefined) st.accessToken = patch.accessToken;
   if (patch.refreshToken !== undefined) st.refreshToken = patch.refreshToken;
   if (patch.expiresAt !== undefined) st.expiresAt = patch.expiresAt;
+  if (patch.scope !== undefined) st.scope = patch.scope;
   save();
   return st;
 }
@@ -132,7 +134,9 @@ export async function ensureStoreToken(store: Store): Promise<string> {
   store.accessToken = data.access_token;
   store.refreshToken = data.refresh_token || store.refreshToken;
   store.expiresAt = Date.now() + (data.expires_in || 21600) * 1000;
+  store.scope = data.scope || store.scope;
   save();
+  console.log(`[Stores] token 刷新成功 scope=${store.scope || 'N/A'} expiry=${new Date(store.expiresAt).toISOString()}`);
   return store.accessToken;
 }
 

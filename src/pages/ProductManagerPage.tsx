@@ -62,6 +62,7 @@ export function ProductManagerPage() {
   const [editWid, setEditWid] = useState('');
   const [editHei, setEditHei] = useState('');
   const [editWeight, setEditWeight] = useState('');
+  const [editPrice, setEditPrice] = useState('');
   const [saving, setSaving] = useState(false);
 
   // 图片放大查看
@@ -134,6 +135,7 @@ export function ProductManagerPage() {
       setEditWid(p.dimensions?.width || '');
       setEditHei(p.dimensions?.height || '');
       setEditWeight(p.dimensions?.weight || '');
+      setEditPrice(p.price ? String(p.price) : '');
     } catch (e: any) {
       MessagePlugin.error('获取详情失败: ' + (e?.message || e));
       setEditOpen(false);
@@ -150,6 +152,7 @@ export function ProductManagerPage() {
         body: JSON.stringify({
           title: editTitle,
           pictures: editPictures,
+          price: editPrice,
           length: editLen,
           width: editWid,
           height: editHei,
@@ -164,10 +167,17 @@ export function ProductManagerPage() {
       } else {
         MessagePlugin.success('保存成功，已提交到美客多');
         setEditOpen(false);
-        // 刷新搜索结果中的标题/缩略图
+        // 刷新搜索结果中的标题/缩略图/价格
         setResults((prev) =>
           prev.map((x) =>
-            x.id === detail.id ? { ...x, title: editTitle, thumbnail: editPictures[0] || x.thumbnail } : x,
+            x.id === detail.id
+              ? {
+                  ...x,
+                  title: editTitle,
+                  price: editPrice ? Number(editPrice) : x.price,
+                  thumbnail: editPictures[0] || x.thumbnail,
+                }
+              : x,
           ),
         );
       }
@@ -176,7 +186,7 @@ export function ProductManagerPage() {
     } finally {
       setSaving(false);
     }
-  }, [storeId, detail, editTitle, editPictures, editLen, editWid, editHei, editWeight, editDesc]);
+  }, [storeId, detail, editTitle, editPictures, editPrice, editLen, editWid, editHei, editWeight, editDesc]);
 
   const updatePicture = (idx: number, val: string) => {
     setEditPictures((prev) => prev.map((u, i) => (i === idx ? val : u)));
@@ -193,7 +203,7 @@ export function ProductManagerPage() {
         <h1 className="text-xl font-semibold">商品管理</h1>
       </div>
       <p className="text-sm mb-4" style={{ color: 'var(--td-text-color-secondary)' }}>
-        按商品 SKU 或标题模糊查询，可编辑图片、标题、重量、长宽高、描述并提交到美客多。
+        按商品 SKU 或标题模糊查询，可编辑图片、标题、价格、重量、长宽高、描述并提交到美客多。
       </p>
 
       {/* 搜索栏 */}
@@ -364,6 +374,18 @@ export function ProductManagerPage() {
             <div>
               <div className="text-sm font-medium mb-2">标题</div>
               <Input value={editTitle} onChange={(v) => setEditTitle(v as string)} placeholder="商品标题" />
+            </div>
+
+            {/* 价格 */}
+            <div>
+              <div className="text-sm font-medium mb-2">
+                价格{detail?.currency_id ? `（${detail.currency_id}）` : ''}
+              </div>
+              <Input
+                value={editPrice}
+                onChange={(v) => setEditPrice(v as string)}
+                placeholder="商品价格"
+              />
             </div>
 
             {/* 尺寸 / 重量 */}

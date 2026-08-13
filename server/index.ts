@@ -1053,6 +1053,7 @@ app.get('/api/ml/oauth/store-callback', async (req, res) => {
       mlUserNick,
       mlUserEmail,
       mlSeller,
+      scope: tok.scope,
       enabled: true,
     });
     console.log('[store-callback] 店铺已添加:', saved.id, saved.mlUserNick || saved.nickname, 'isSeller=', mlSeller);

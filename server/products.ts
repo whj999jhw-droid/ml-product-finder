@@ -33,6 +33,13 @@ export async function storeApiMutate(
       // 204 / 200 都可能；ML 部分更新返回 200 + 修改后的对象，描述更新有时返回 200 无体
       if (!resp.ok) {
         const t = await resp.text();
+        // 403 PolicyAgent 通常是权限/scope 问题，打详细日志便于排查
+        if (resp.status === 403) {
+          console.warn(
+            `[Products] ML API 403 被拒绝: method=${method} url=${getMlApiBase()}${apiPath} token=${token.slice(0, 12)}... bodyKeys=${Object.keys(body || {}).join(',')} bodyPreview=${JSON.stringify(body).slice(0, 300)}`,
+          );
+          console.warn(`[Products] ML API 403 响应: ${t.slice(0, 400)}`);
+        }
         const err = new Error(`ML API ${resp.status}: ${t.slice(0, 400)}`);
         if ((resp.status === 429 || resp.status >= 500) && attempt < retries) {
           lastErr = err;
@@ -338,6 +345,7 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
 export interface ProductUpdatePayload {
   title?: string;
   pictures?: string[]; // 图片 URL 列表（全量替换）
+  price?: string; // 价格（字符串，由后端转数字）
   weight?: string;
   length?: string;
   width?: string;
@@ -398,8 +406,34 @@ export async function updateStoreItem(
     }
   }
 
+  // 价格：官方文档（CBT 全球售）确认 PUT /global/items/{id} 支持 price 字段。
+  // 若商品带变体，价格必须按变体设置（为每个变体设置相同价格，且必须发送全部变体 id，
+  // 漏发会被删除）；无变体则直接设顶层 price。
+  if (typeof payload.price === 'string' && payload.price.trim() !== '') {
+    const priceNum = Number(payload.price);
+    if (Number.isFinite(priceNum) && priceNum > 0) {
+      if (isCbt) {
+        try {
+          const cur = await ensureStoreTokenThen(store, `/items/${encodeURIComponent(itemId)}`);
+          const variations = Array.isArray(cur?.variations) ? cur.variations : [];
+          if (variations.length) {
+            itemBody.variations = variations.map((v: any) => ({ id: v.id, price: priceNum }));
+          } else {
+            itemBody.price = priceNum;
+          }
+        } catch (e: any) {
+          console.warn('[Products] 取当前商品查变体失败，按无变体处理 price:', e?.message?.slice(0, 120));
+          itemBody.price = priceNum;
+        }
+      } else {
+        itemBody.price = priceNum;
+      }
+    }
+  }
+
   let item: any = null;
   let descriptionResult: any = null;
+  let warningNote = '';
 
   if (isCbt) {
     // CBT：描述必须和主字段一起通过 /global/items/{id} 提交，且需要 site_id + logistic_type
@@ -413,6 +447,16 @@ export async function updateStoreItem(
       console.log(`[Products] CBT PUT ${itemPath} body keys=${Object.keys(itemBody).join(',')}`);
       item = await storeApiMutate(store, 'PUT', itemPath, itemBody);
       descriptionResult = item;
+      // 价格自动化开启时，price 可能被忽略（返回 200 + warning）
+      const warns: any[] = item?.warnings || item?.cause || [];
+      const priceWarn = warns.find((w) =>
+        String(w?.message || w?.cause?.[0]?.message || w || '')
+          .toLowerCase()
+          .includes('price'),
+      );
+      if (priceWarn) {
+        warningNote = '（价格可能被自动调价功能忽略，请在美客多后台确认实际价格）';
+      }
     }
   } else {
     if (Object.keys(itemBody).length) {
@@ -427,7 +471,7 @@ export async function updateStoreItem(
 
   return {
     success: true,
-    message: '保存成功',
+    message: warningNote ? `保存成功${warningNote}` : '保存成功',
     item,
     descriptionResult,
   };
