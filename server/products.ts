@@ -158,11 +158,22 @@ function itemToHit(item: any, matchType: 'title' | 'sku'): ProductSearchHit {
 }
 
 /**
+ * 按站点类型取正确的基础路径：
+ * - CBT 全球售：/marketplace/users/{seller_id}
+ * - 普通站点：/users/{seller_id}
+ */
+function getSellerItemsBasePath(site: string) {
+  return (site || '').toUpperCase() === 'CBT' ? '/marketplace/users' : '/users';
+}
+
+/**
  * 按查询词模糊搜索店铺商品：
  * 1) 若查询词像商品 ID（如 MLM2047037776 / CBT123456）：直接 GET /items/{id}。
- * 2) 卖家范围搜索：GET /users/{sellerId}/items/search?q=...&limit=50，再用批量 /items?ids=... 取详情。
- * 3) SKU 扫描：GET /users/{sellerId}/items/search?search_type=scan 分页拉取全部 item id，
- *    批量 /items?ids=... 取详情后比对 seller_sku 是否包含查询词。
+ * 2) 标题搜索：官方 /sites/{site}/search?q=...&seller_id=...（仅 active 刊登）。
+ * 3) SKU 扫描：
+ *    - CBT：/marketplace/users/{sellerId}/items/search?search_type=scan
+ *    - 普通站点：/users/{sellerId}/items/search?search_type=scan
+ *    分页拉取 item id 后批量 /items?ids=... 取详情，再比对 seller_sku。
  * 合并去重后返回。
  */
 export async function searchStoreProducts(
@@ -171,6 +182,8 @@ export async function searchStoreProducts(
   opts: { skuScanPages?: number } = {},
 ): Promise<ProductSearchHit[]> {
   const sellerId = await getStoreSellerId(store);
+  const site = (store.site || '').toUpperCase();
+  const sellerItemsBase = getSellerItemsBasePath(store.site);
   const q = (query || '').trim();
   const ql = q.toLowerCase();
   const map = new Map<string, ProductSearchHit>();
@@ -207,17 +220,21 @@ export async function searchStoreProducts(
     }
   };
 
-  // 2) 卖家范围关键字搜索（比 /sites/{site}/search 更准，且支持 CBT）
+  // 2) 标题搜索：用官方 /sites/{site}/search（支持 seller_id 过滤）
   if (q) {
     try {
+      const searchSite = site === 'CBT' ? 'CBT' : store.site;
       const sd = await ensureStoreTokenThen(
         store,
-        `/users/${encodeURIComponent(sellerId)}/items/search?q=${encodeURIComponent(q)}&limit=50`,
+        `/sites/${encodeURIComponent(searchSite)}/search?q=${encodeURIComponent(q)}&seller_id=${encodeURIComponent(sellerId)}&limit=50`,
       );
-      const ids: string[] = (sd.results || []).filter((id: string) => !map.has(id));
-      await fetchItemDetailsBatch(ids, 'title');
+      for (const it of sd.results || []) {
+        if (!map.has(it.id)) {
+          map.set(it.id, itemToHit(it, 'title'));
+        }
+      }
     } catch (e: any) {
-      console.warn('[Products] 卖家范围搜索失败:', e?.message?.slice(0, 120));
+      console.warn('[Products] 标题搜索失败:', e?.message?.slice(0, 120));
     }
   }
 
@@ -229,12 +246,11 @@ export async function searchStoreProducts(
     try {
       do {
         const path = scrollId
-          ? `/users/${encodeURIComponent(sellerId)}/items/search?search_type=scan&scroll_id=${encodeURIComponent(scrollId)}`
-          : `/users/${encodeURIComponent(sellerId)}/items/search?search_type=scan&limit=1000`;
+          ? `${sellerItemsBase}/${encodeURIComponent(sellerId)}/items/search?search_type=scan&scroll_id=${encodeURIComponent(scrollId)}`
+          : `${sellerItemsBase}/${encodeURIComponent(sellerId)}/items/search?search_type=scan&limit=1000`;
         const sd: any = await ensureStoreTokenThen(store, path);
         const ids: string[] = (sd.results || []).filter((id: string) => !map.has(id));
         if (ids.length) {
-          // 批量取详情后再在内存里过滤 seller_sku，避免逐条请求
           const details = new Map<string, any>();
           for (let i = 0; i < ids.length; i += 20) {
             const batch = ids.slice(i, i + 20);
