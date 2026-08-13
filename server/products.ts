@@ -137,6 +137,13 @@ export interface ProductSearchHit {
   matchType?: 'title' | 'sku';
 }
 
+/** 从 item 里提取 SKU（可能在顶层 seller_sku，也可能在 attributes.SELLER_SKU） */
+function extractSku(item: any): string {
+  if (item?.seller_sku) return String(item.seller_sku);
+  const attr = (item?.attributes || []).find((a: any) => String(a?.id || '').toUpperCase() === 'SELLER_SKU');
+  return attr?.value_name || attr?.value_id || '';
+}
+
 /**
  * 把 /items 返回体转换为前端需要的产品命中结构
  */
@@ -145,7 +152,7 @@ function itemToHit(item: any, matchType: 'title' | 'sku'): ProductSearchHit {
   return {
     id: item.id,
     title: item.title || '',
-    seller_sku: item.seller_sku || '',
+    seller_sku: extractSku(item),
     price: Number(item.price) || 0,
     currency_id: item.currency_id || '',
     thumbnail: item.thumbnail || pictures[0] || '',
@@ -167,14 +174,67 @@ function getSellerItemsBasePath(site: string) {
 }
 
 /**
- * 按查询词模糊搜索店铺商品：
- * 1) 若查询词像商品 ID（如 MLM2047037776 / CBT123456）：直接 GET /items/{id}。
- * 2) 标题搜索：官方 /sites/{site}/search?q=...&seller_id=...（仅 active 刊登）。
- * 3) SKU 扫描：
- *    - CBT：/marketplace/users/{sellerId}/items/search?search_type=scan
- *    - 普通站点：/users/{sellerId}/items/search?search_type=scan
- *    分页拉取 item id 后批量 /items?ids=... 取详情，再比对 seller_sku。
- * 合并去重后返回。
+ * 调用卖家商品搜索接口，返回 item id 列表（需再批量 /items?ids= 取详情）。
+ * 官方文档明确支持（CBT 与普通站点都适用）的参数：
+ *   sku=          -> seller_custom_field
+ *   seller_sku=   -> SELLER_SKU 属性
+ *   q=            -> 文本/标题
+ */
+async function searchBySellerItems(
+  store: Store,
+  sellerId: string,
+  params: { sku?: string; seller_sku?: string; q?: string },
+): Promise<string[]> {
+  if (!params.sku && !params.seller_sku && !params.q) return [];
+  const site = (store.site || '').toUpperCase();
+  const base = site === 'CBT' ? '/marketplace/users' : '/users';
+  const qs = new URLSearchParams();
+  if (params.sku) qs.set('sku', params.sku);
+  if (params.seller_sku) qs.set('seller_sku', params.seller_sku);
+  if (params.q) qs.set('q', params.q);
+  qs.set('limit', '50');
+  try {
+    const sd = await ensureStoreTokenThen(store, `${base}/${encodeURIComponent(sellerId)}/items/search?${qs.toString()}`);
+    const ids = (sd.results || []).map(String);
+    console.log(`[Products] seller-items 搜索 [site=${store.site} sku=${params.sku || ''} seller_sku=${params.seller_sku || ''} q=${params.q || ''}] => ${ids.length} 个 id`);
+    return ids;
+  } catch (e: any) {
+    console.warn('[Products] seller-items 搜索失败:', params, e?.message?.slice(0, 120));
+    return [];
+  }
+}
+
+/**
+ * 批量从 item id 列表取详情（每次最多 20 个）
+ */
+async function fetchItemDetailsBatch(ids: string[], store: Store): Promise<any[]> {
+  if (!ids.length) return [];
+  const items: any[] = [];
+  for (let i = 0; i < ids.length; i += 20) {
+    const batch = ids.slice(i, i + 20);
+    try {
+      const batchData: any[] = await ensureStoreTokenThen(
+        store,
+        `/items?ids=${batch.map(encodeURIComponent).join(',')}`,
+      );
+      for (const entry of batchData || []) {
+        if (entry?.code === '200' && entry.body) items.push(entry.body);
+      }
+    } catch (e: any) {
+      console.warn('[Products] 批量取详情失败:', e?.message?.slice(0, 120));
+    }
+  }
+  return items;
+}
+
+/**
+ * 按查询词搜索店铺商品。
+ * 策略：
+ * 1) 查询词像商品 ID 时直接 GET /items/{id}。
+ * 2) 优先用官方支持的卖家商品精确搜索：sku= / seller_sku= / q=。
+ * 3) 如果查询词以 p_ 开头（常见 ERP 前缀），同时尝试去掉前缀后的值。
+ * 4) 兜底用 scan 扫描全量商品，在内存里按 seller_sku 包含匹配。
+ * 5) 非 CBT 站点额外走公开 /sites/{site}/search?q=&seller_id= 再补一轮标题命中。
  */
 export async function searchStoreProducts(
   store: Store,
@@ -183,99 +243,91 @@ export async function searchStoreProducts(
 ): Promise<ProductSearchHit[]> {
   const sellerId = await getStoreSellerId(store);
   const site = (store.site || '').toUpperCase();
-  const sellerItemsBase = getSellerItemsBasePath(store.site);
+  const isCbt = site === 'CBT';
   const q = (query || '').trim();
   const ql = q.toLowerCase();
   const map = new Map<string, ProductSearchHit>();
+
+  const addHit = (item: any, matchType: 'title' | 'sku') => {
+    if (!item?.id || map.has(item.id)) return;
+    map.set(item.id, itemToHit(item, matchType));
+  };
 
   // 1) 按商品 ID 精确查找（MLM2047037776 / CBT123456789 等）
   if (/^[A-Z]{2,3}\d+$/i.test(q)) {
     try {
       const item = await ensureStoreTokenThen(store, `/items/${q.toUpperCase()}`);
-      if (String(item?.seller_id) === String(sellerId)) {
-        map.set(item.id, itemToHit(item, 'sku'));
-      }
+      addHit(item, 'sku');
     } catch (e: any) {
       console.warn('[Products] 按 ID 查找失败:', e?.message?.slice(0, 120));
     }
   }
 
-  // 批量从 item id 列表取详情（每次最多 20 个）
-  const fetchItemDetailsBatch = async (ids: string[], matchType: 'title' | 'sku') => {
-    for (let i = 0; i < ids.length; i += 20) {
-      const batch = ids.slice(i, i + 20);
-      try {
-        const batchData: any[] = await ensureStoreTokenThen(
-          store,
-          `/items?ids=${batch.map(encodeURIComponent).join(',')}`,
-        );
-        for (const entry of batchData || []) {
-          if (entry?.code === '200' && entry.body) {
-            map.set(entry.body.id, itemToHit(entry.body, matchType));
-          }
-        }
-      } catch (e: any) {
-        console.warn('[Products] 批量取详情失败:', e?.message?.slice(0, 120));
-      }
-    }
-  };
+  // 构造要尝试的 SKU 变体：原始值、去掉 p_ 前缀、去掉下划线及前面前缀
+  const skuVariants = [q];
+  if (q.toLowerCase().startsWith('p_')) skuVariants.push(q.slice(2));
+  const lastUnderscorePart = q.split('_').pop() || '';
+  if (lastUnderscorePart && lastUnderscorePart !== q) skuVariants.push(lastUnderscorePart);
 
-  // 2) 标题搜索：用官方 /sites/{site}/search（支持 seller_id 过滤）
-  if (q) {
-    try {
-      const searchSite = site === 'CBT' ? 'CBT' : store.site;
-      const sd = await ensureStoreTokenThen(
-        store,
-        `/sites/${encodeURIComponent(searchSite)}/search?q=${encodeURIComponent(q)}&seller_id=${encodeURIComponent(sellerId)}&limit=50`,
-      );
-      for (const it of sd.results || []) {
-        if (!map.has(it.id)) {
-          map.set(it.id, itemToHit(it, 'title'));
-        }
-      }
-    } catch (e: any) {
-      console.warn('[Products] 标题搜索失败:', e?.message?.slice(0, 120));
+  // 2) 官方精确搜索：sku= / seller_sku= / q=（CBT 与普通站点都支持，但路径不同）
+  for (const variant of skuVariants) {
+    // seller_sku 精确搜索（文档说会匹配 SELLER_SKU 属性）
+    if (variant) {
+      const ids = await searchBySellerItems(store, sellerId, { seller_sku: variant });
+      for (const item of await fetchItemDetailsBatch(ids, store)) addHit(item, 'sku');
+    }
+    // sku 精确搜索（匹配 seller_custom_field）
+    if (variant) {
+      const ids = await searchBySellerItems(store, sellerId, { sku: variant });
+      for (const item of await fetchItemDetailsBatch(ids, store)) addHit(item, 'sku');
     }
   }
 
-  // 3) SKU 扫描（用 scan 接口扫全量商品，再用批量 /items?ids= 取详情过滤 seller_sku）
+  // 3) 官方文本/标题搜索：
+  //    CBT -> /marketplace/users/{merchant_id}/items/search?q=...
+  //    普通 -> /users/{seller_id}/items/search?q=...
   if (q) {
-    const maxPages = opts.skuScanPages ?? 4; // 每页默认 1000 个 id
+    const ids = await searchBySellerItems(store, sellerId, { q });
+    for (const item of await fetchItemDetailsBatch(ids, store)) addHit(item, 'title');
+  }
+
+  // 4) 非 CBT 额外走公开站点搜索（返回完整结果，无需再批量取详情）
+  if (q && !isCbt) {
+    try {
+      const sd = await ensureStoreTokenThen(
+        store,
+        `/sites/${encodeURIComponent(store.site)}/search?q=${encodeURIComponent(q)}&seller_id=${encodeURIComponent(sellerId)}&limit=50`,
+      );
+      for (const it of sd.results || []) addHit(it, 'title');
+    } catch (e: any) {
+      console.warn('[Products] 公开站点搜索失败:', e?.message?.slice(0, 120));
+    }
+  }
+
+  // 5) 兜底：scan 全量扫描后在内存里按 seller_sku 包含匹配
+  //    仅在前面都没结果，或查询词很短（可能是 SKU 的一部分）时才启用
+  if (q && map.size === 0) {
+    const maxPages = opts.skuScanPages ?? 2; // 默认 2 页（2000 个 id），避免超时
+    const base = isCbt ? '/marketplace/users' : '/users';
     let scrollId: string | undefined;
     let page = 0;
     try {
       do {
         const path = scrollId
-          ? `${sellerItemsBase}/${encodeURIComponent(sellerId)}/items/search?search_type=scan&scroll_id=${encodeURIComponent(scrollId)}`
-          : `${sellerItemsBase}/${encodeURIComponent(sellerId)}/items/search?search_type=scan&limit=1000`;
+          ? `${base}/${encodeURIComponent(sellerId)}/items/search?search_type=scan&scroll_id=${encodeURIComponent(scrollId)}`
+          : `${base}/${encodeURIComponent(sellerId)}/items/search?search_type=scan&limit=1000`;
         const sd: any = await ensureStoreTokenThen(store, path);
-        const ids: string[] = (sd.results || []).filter((id: string) => !map.has(id));
+        const ids: string[] = (sd.results || []).map(String).filter((id) => !map.has(id));
         if (ids.length) {
-          const details = new Map<string, any>();
-          for (let i = 0; i < ids.length; i += 20) {
-            const batch = ids.slice(i, i + 20);
-            try {
-              const batchData: any[] = await ensureStoreTokenThen(
-                store,
-                `/items?ids=${batch.map(encodeURIComponent).join(',')}`,
-              );
-              for (const entry of batchData || []) {
-                if (entry?.code === '200' && entry.body) details.set(entry.body.id, entry.body);
-              }
-            } catch (e: any) {
-              console.warn('[Products] SKU 扫描批量详情失败:', e?.message?.slice(0, 120));
-            }
-          }
-          for (const [id, item] of details) {
-            const sku = item?.seller_sku || '';
-            if (sku && sku.toLowerCase().includes(ql)) {
-              map.set(id, itemToHit(item, 'sku'));
-            }
+          for (const item of await fetchItemDetailsBatch(ids, store)) {
+            const sku = extractSku(item);
+            if (sku && sku.toLowerCase().includes(ql)) addHit(item, 'sku');
+            if (!isCbt && item.title && item.title.toLowerCase().includes(ql)) addHit(item, 'title');
           }
         }
         scrollId = sd.scroll_id;
         page++;
-      } while (scrollId && page < maxPages);
+      } while (scrollId && page < maxPages && map.size === 0);
     } catch (e: any) {
       console.warn('[Products] SKU 扫描失败/中断:', e?.message?.slice(0, 120));
     }
