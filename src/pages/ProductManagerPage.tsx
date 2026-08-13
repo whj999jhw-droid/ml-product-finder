@@ -415,21 +415,21 @@ export function ProductManagerPage() {
               />
             </div>
 
-            {/* 尺寸 / 重量 */}
+            {/* 尺寸 / 重量：与美客多后台顺序一致（高 × 宽 × 长，重量 g） */}
             <div>
               <div className="text-sm font-medium mb-2">尺寸与重量（单位：厘米 / 克）</div>
               <div className="grid grid-cols-4 gap-2">
                 <div>
-                  <div className="text-xs mb-1" style={{ color: 'var(--td-text-color-secondary)' }}>长</div>
-                  <Input value={editLen} onChange={(v) => setEditLen(v as string)} placeholder="长" />
+                  <div className="text-xs mb-1" style={{ color: 'var(--td-text-color-secondary)' }}>高</div>
+                  <Input value={editHei} onChange={(v) => setEditHei(v as string)} placeholder="高" />
                 </div>
                 <div>
                   <div className="text-xs mb-1" style={{ color: 'var(--td-text-color-secondary)' }}>宽</div>
                   <Input value={editWid} onChange={(v) => setEditWid(v as string)} placeholder="宽" />
                 </div>
                 <div>
-                  <div className="text-xs mb-1" style={{ color: 'var(--td-text-color-secondary)' }}>高</div>
-                  <Input value={editHei} onChange={(v) => setEditHei(v as string)} placeholder="高" />
+                  <div className="text-xs mb-1" style={{ color: 'var(--td-text-color-secondary)' }}>长</div>
+                  <Input value={editLen} onChange={(v) => setEditLen(v as string)} placeholder="长" />
                 </div>
                 <div>
                   <div className="text-xs mb-1" style={{ color: 'var(--td-text-color-secondary)' }}>重量</div>

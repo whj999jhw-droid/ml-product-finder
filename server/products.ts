@@ -104,12 +104,13 @@ export function parseDimensions(dim?: string): {
   const [dimsPart, weightPart] = dim.split(',');
   const parts = (dimsPart || '').split('x').map((s) => s.trim());
   const weight = (weightPart || '').replace(/[^\d.]/g, '');
+  // 官方顺序：高 x 宽 x 长，重量
   return {
-    length: parts[0] || '',
+    height: parts[0] || '',
     width: parts[1] || '',
-    height: parts[2] || '',
+    length: parts[2] || '',
     weight,
-  };
+  } as any;
 }
 
 export function buildDimensions(d: {
@@ -118,7 +119,8 @@ export function buildDimensions(d: {
   height: string;
   weight: string;
 }): string | undefined {
-  const dims = [d.length, d.width, d.height]
+  // 按官方顺序回写：高 x 宽 x 长，重量
+  const dims = [d.height, d.width, d.length]
     .map((s) => String(s || '').trim())
     .filter(Boolean);
   if (!dims.length && !String(d.weight || '').trim()) return undefined;
