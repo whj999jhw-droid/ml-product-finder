@@ -138,83 +138,123 @@ export interface ProductSearchHit {
 }
 
 /**
+ * 把 /items 返回体转换为前端需要的产品命中结构
+ */
+function itemToHit(item: any, matchType: 'title' | 'sku'): ProductSearchHit {
+  const pictures: string[] = (item.pictures || []).map((p: any) => p.url || p.secure_url).filter(Boolean);
+  return {
+    id: item.id,
+    title: item.title || '',
+    seller_sku: item.seller_sku || '',
+    price: Number(item.price) || 0,
+    currency_id: item.currency_id || '',
+    thumbnail: item.thumbnail || pictures[0] || '',
+    permalink: item.permalink || '',
+    available_quantity: Number(item.available_quantity) || 0,
+    status: item.status,
+    pictures,
+    matchType,
+  };
+}
+
+/**
  * 按查询词模糊搜索店铺商品：
- * 1) 标题搜索：GET /sites/{site}/search?q=&seller_id=  （快速，返回标题/缩略图/价格）
- * 2) SKU 扫描：GET /users/{sellerId}/items/search?search_type=scan 分页拿到全部 item id，
- *    逐个取 /items/{id} 比对 seller_sku 是否包含查询词（SKU 无独立搜索端点）。
- * 合并去重后返回。SKU 扫描有页数上限，超大店铺可能不全。
+ * 1) 若查询词像商品 ID（如 MLM2047037776 / CBT123456）：直接 GET /items/{id}。
+ * 2) 卖家范围搜索：GET /users/{sellerId}/items/search?q=...&limit=50，再用批量 /items?ids=... 取详情。
+ * 3) SKU 扫描：GET /users/{sellerId}/items/search?search_type=scan 分页拉取全部 item id，
+ *    批量 /items?ids=... 取详情后比对 seller_sku 是否包含查询词。
+ * 合并去重后返回。
  */
 export async function searchStoreProducts(
   store: Store,
   query: string,
   opts: { skuScanPages?: number } = {},
 ): Promise<ProductSearchHit[]> {
-  const site = (store.site || '').toUpperCase() === 'CBT' ? 'MLM' : store.site; // CBT 用主站 search 兜底
   const sellerId = await getStoreSellerId(store);
   const q = (query || '').trim();
   const ql = q.toLowerCase();
   const map = new Map<string, ProductSearchHit>();
 
-  // 1) 标题搜索（仅在有关键词时）
+  // 1) 按商品 ID 精确查找（MLM2047037776 / CBT123456789 等）
+  if (/^[A-Z]{2,3}\d+$/i.test(q)) {
+    try {
+      const item = await ensureStoreTokenThen(store, `/items/${q.toUpperCase()}`);
+      if (String(item?.seller_id) === String(sellerId)) {
+        map.set(item.id, itemToHit(item, 'sku'));
+      }
+    } catch (e: any) {
+      console.warn('[Products] 按 ID 查找失败:', e?.message?.slice(0, 120));
+    }
+  }
+
+  // 批量从 item id 列表取详情（每次最多 20 个）
+  const fetchItemDetailsBatch = async (ids: string[], matchType: 'title' | 'sku') => {
+    for (let i = 0; i < ids.length; i += 20) {
+      const batch = ids.slice(i, i + 20);
+      try {
+        const batchData: any[] = await ensureStoreTokenThen(
+          store,
+          `/items?ids=${batch.map(encodeURIComponent).join(',')}`,
+        );
+        for (const entry of batchData || []) {
+          if (entry?.code === '200' && entry.body) {
+            map.set(entry.body.id, itemToHit(entry.body, matchType));
+          }
+        }
+      } catch (e: any) {
+        console.warn('[Products] 批量取详情失败:', e?.message?.slice(0, 120));
+      }
+    }
+  };
+
+  // 2) 卖家范围关键字搜索（比 /sites/{site}/search 更准，且支持 CBT）
   if (q) {
     try {
       const sd = await ensureStoreTokenThen(
         store,
-        `/sites/${site}/search?q=${encodeURIComponent(q)}&seller_id=${encodeURIComponent(sellerId)}&limit=50`,
+        `/users/${encodeURIComponent(sellerId)}/items/search?q=${encodeURIComponent(q)}&limit=50`,
       );
-      for (const it of sd.results || []) {
-        map.set(it.id, {
-          id: it.id,
-          title: it.title || '',
-          price: Number(it.price) || 0,
-          currency_id: it.currency_id || '',
-          thumbnail: it.thumbnail || (it.pictures?.[0]?.url || ''),
-          permalink: it.permalink || '',
-          available_quantity: Number(it.available_quantity) || 0,
-          status: it.status,
-          pictures: (it.pictures || []).map((p: any) => p.url || p.secure_url).filter(Boolean),
-          matchType: 'title',
-        });
-      }
+      const ids: string[] = (sd.results || []).filter((id: string) => !map.has(id));
+      await fetchItemDetailsBatch(ids, 'title');
     } catch (e: any) {
-      console.warn('[Products] 标题搜索失败:', e?.message?.slice(0, 120));
+      console.warn('[Products] 卖家范围搜索失败:', e?.message?.slice(0, 120));
     }
   }
 
-  // 2) SKU 扫描（仅在有关键词时，且标题未覆盖）
+  // 3) SKU 扫描（用 scan 接口扫全量商品，再用批量 /items?ids= 取详情过滤 seller_sku）
   if (q) {
-    const maxPages = opts.skuScanPages ?? 4; // 每页默认 1000 个 id，4 页 = 最多 4000 个商品
+    const maxPages = opts.skuScanPages ?? 4; // 每页默认 1000 个 id
     let scrollId: string | undefined;
     let page = 0;
     try {
       do {
         const path = scrollId
-          ? `/users/${sellerId}/items/search?search_type=scan&scroll_id=${encodeURIComponent(scrollId)}`
-          : `/users/${sellerId}/items/search?search_type=scan&limit=1000`;
+          ? `/users/${encodeURIComponent(sellerId)}/items/search?search_type=scan&scroll_id=${encodeURIComponent(scrollId)}`
+          : `/users/${encodeURIComponent(sellerId)}/items/search?search_type=scan&limit=1000`;
         const sd: any = await ensureStoreTokenThen(store, path);
-        const ids: string[] = sd.results || [];
-        for (const id of ids) {
-          if (map.has(id)) continue; // 标题已命中，跳过避免重复拉取
-          try {
-            const item = await ensureStoreTokenThen(store, `/items/${id}`);
+        const ids: string[] = (sd.results || []).filter((id: string) => !map.has(id));
+        if (ids.length) {
+          // 批量取详情后再在内存里过滤 seller_sku，避免逐条请求
+          const details = new Map<string, any>();
+          for (let i = 0; i < ids.length; i += 20) {
+            const batch = ids.slice(i, i + 20);
+            try {
+              const batchData: any[] = await ensureStoreTokenThen(
+                store,
+                `/items?ids=${batch.map(encodeURIComponent).join(',')}`,
+              );
+              for (const entry of batchData || []) {
+                if (entry?.code === '200' && entry.body) details.set(entry.body.id, entry.body);
+              }
+            } catch (e: any) {
+              console.warn('[Products] SKU 扫描批量详情失败:', e?.message?.slice(0, 120));
+            }
+          }
+          for (const [id, item] of details) {
             const sku = item?.seller_sku || '';
             if (sku && sku.toLowerCase().includes(ql)) {
-              map.set(id, {
-                id,
-                title: item.title || '',
-                seller_sku: sku,
-                price: Number(item.price) || 0,
-                currency_id: item.currency_id || '',
-                thumbnail: item.thumbnail || (item.pictures?.[0]?.url || ''),
-                permalink: item.permalink || '',
-                available_quantity: Number(item.available_quantity) || 0,
-                status: item.status,
-                pictures: (item.pictures || []).map((p: any) => p.url || p.secure_url).filter(Boolean),
-                matchType: 'sku',
-              });
+              map.set(id, itemToHit(item, 'sku'));
             }
-          } catch {
-            /* 单个商品失败忽略 */
           }
         }
         scrollId = sd.scroll_id;
