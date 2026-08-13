@@ -1,8 +1,16 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
+import { realpathSync } from 'fs';
+
+// 工作目录可能是 Windows 目录联接（junction），cwd 显示 C: 但真实路径在 D:，
+// 导致 vite 用 C: 作 root、rollup 把 index.html 解析成 D: 绝对路径，
+// 相对路径计算失败并报 "must be strings that are neither absolute nor relative paths"。
+// 统一用 realpath 作 root 消除盘符不一致。
+const root = realpathSync(process.cwd());
 
 export default defineConfig({
+  root,
   plugins: [react()],
   // Electron 兼容: 使用相对路径
   base: './',

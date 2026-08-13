@@ -20,6 +20,7 @@ import { StoreManagementPage } from './pages/StoreManagementPage';
 import { OrdersPage } from './pages/OrdersPage';
 import { TrendsPage } from './pages/TrendsPage';
 import { NotificationSettingsPage } from './pages/NotificationSettingsPage';
+import { ProductManagerPage } from './pages/ProductManagerPage';
 
 function App() {
   return (
@@ -34,6 +35,7 @@ function App() {
       <Route path="/orders" element={<AppContent />} />
       <Route path="/notifications" element={<AppContent />} />
       <Route path="/trends" element={<AppContent />} />
+      <Route path="/product-admin" element={<AppContent />} />
     </Routes>
   );
 }
@@ -50,6 +52,7 @@ function AppContent() {
   const isOrdersPage = location.pathname === '/orders';
   const isNotificationsPage = location.pathname === '/notifications';
   const isTrendsPage = location.pathname === '/trends';
+  const isProductAdminPage = location.pathname === '/product-admin';
 
   // Hooks
   const { theme, toggleTheme } = useTheme();
@@ -178,6 +181,10 @@ function AppContent() {
     navigate('/trends');
   }, [navigate]);
 
+  const handleOpenProductAdmin = useCallback(() => {
+    navigate('/product-admin');
+  }, [navigate]);
+
   // Sidebar 状态
   const [sidebarOpen, setSidebarOpen] = useState(true);
   
@@ -201,6 +208,7 @@ function AppContent() {
         isOrdersPage={isOrdersPage}
         isNotificationsPage={isNotificationsPage}
         isTrendsPage={isTrendsPage}
+        isProductAdminPage={isProductAdminPage}
         sidebarOpen={sidebarOpen}
         agents={agents}
         getAgent={getAgent}
@@ -215,6 +223,7 @@ function AppContent() {
         onOpenOrders={handleOpenOrders}
         onOpenNotifications={handleOpenNotifications}
         onOpenTrends={handleOpenTrends}
+        onOpenProductAdmin={handleOpenProductAdmin}
       />
 
       {/* 主内容区 */}
@@ -232,6 +241,7 @@ function AppContent() {
           isOrdersPage={isOrdersPage}
           isNotificationsPage={isNotificationsPage}
           isTrendsPage={isTrendsPage}
+          isProductAdminPage={isProductAdminPage}
           sidebarOpen={sidebarOpen}
           theme={theme}
           currentSession={currentSession}
@@ -264,6 +274,8 @@ function AppContent() {
           <NotificationSettingsPage />
         ) : isTrendsPage ? (
           <TrendsPage />
+        ) : isProductAdminPage ? (
+          <ProductManagerPage />
         ) : (
           <ChatPage
             currentSession={currentSession}

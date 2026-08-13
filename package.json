@@ -68,8 +68,6 @@
       "output": "release"
     },
     "files": [
-      "dist/**/*",
-      "dist-server/**/*",
       "electron/**/*",
       "package.json"
     ],

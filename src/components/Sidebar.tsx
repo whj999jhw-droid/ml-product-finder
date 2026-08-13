@@ -17,6 +17,7 @@ interface SidebarProps {
   isOrdersPage?: boolean;
   isNotificationsPage?: boolean;
   isTrendsPage?: boolean;
+  isProductAdminPage?: boolean;
   sidebarOpen: boolean;
   agents: Agent[];
   getAgent: (id: string) => Agent | undefined;
@@ -31,6 +32,7 @@ interface SidebarProps {
   onOpenOrders?: () => void;
   onOpenNotifications?: () => void;
   onOpenTrends?: () => void;
+  onOpenProductAdmin?: () => void;
 }
 
 export function Sidebar({
@@ -44,6 +46,7 @@ export function Sidebar({
   isOrdersPage,
   isNotificationsPage,
   isTrendsPage,
+  isProductAdminPage,
   sidebarOpen,
   agents,
   getAgent,
@@ -58,6 +61,7 @@ export function Sidebar({
   onOpenOrders,
   onOpenNotifications,
   onOpenTrends,
+  onOpenProductAdmin,
 }: SidebarProps) {
   return (
     <aside 
@@ -157,6 +161,15 @@ export function Sidebar({
           theme={isTrendsPage ? 'primary' : 'default'}
         >
           热搜词
+        </Button>
+        <Button 
+          icon={<ShoppingBag size={16} />}
+          onClick={onOpenProductAdmin}
+          block
+          variant={isProductAdminPage ? 'outline' : 'text'}
+          theme={isProductAdminPage ? 'primary' : 'default'}
+        >
+          商品管理
         </Button>
       </div>
 

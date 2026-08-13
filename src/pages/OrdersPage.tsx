@@ -41,6 +41,14 @@ const SHIP_STATUS_TEXT: Record<string, string> = {
   handling: '处理中',
 };
 
+const SITE_COUNTRY_NAME: Record<string, string> = {
+  MLM: '墨西哥',
+  MLB: '巴西',
+  MLC: '智利',
+  MCO: '哥伦比亚',
+  CBT: '跨境',
+};
+
 function fmtDate(s?: string): string {
   if (!s) return '—';
   const d = new Date(s);
@@ -82,7 +90,19 @@ export function OrdersPage() {
   const [activeStore, setActiveStore] = useState('');
   const [ordersMap, setOrdersMap] = useState<Record<string, StoreOrders>>({});
   const [activeTab, setActiveTab] = useState('unshipped');
-  const [detail, setDetail] = useState<{ orderId: string; storeId: string; data?: any; shipments?: any[]; itemsDetail?: any[]; category?: 'unshipped' | 'shipped' | 'cancelled'; shippingAddress?: any; loading: boolean } | null>(null);
+  const [detail, setDetail] = useState<{
+    orderId: string;
+    storeId: string;
+    data?: any;
+    shipments?: any[];
+    itemsDetail?: any[];
+    category?: 'unshipped' | 'shipped' | 'cancelled';
+    shippingAddress?: any;
+    shippingMethod?: string;
+    buyerBilling?: { docType: string; docNumber: string; name: string; additionalInfo: any } | null;
+    financialSummary?: { productTotal: number; marketplaceFee: number; shippingCost: number; netTotal: number; currency: string };
+    loading: boolean;
+  } | null>(null);
   const [ordersError, setOrdersError] = useState<Record<string, string>>({});
   const [translated, setTranslated] = useState<Record<string, string>>({});
   const [translating, setTranslating] = useState(false);
@@ -148,7 +168,19 @@ export function OrdersPage() {
       const r = await fetch(`/api/ml/orders/${orderId}/detail?storeId=${storeId}`);
       const d = await r.json();
       if (d.success) {
-        setDetail({ orderId, storeId, data: d.order, shipments: d.shipments || [], itemsDetail: d.itemsDetail || d.order?.order_items || [], category: d.category, shippingAddress: d.shippingAddress, loading: false });
+        setDetail({
+          orderId,
+          storeId,
+          data: d.order,
+          shipments: d.shipments || [],
+          itemsDetail: d.itemsDetail || d.order?.order_items || [],
+          category: d.category,
+          shippingAddress: d.shippingAddress,
+          shippingMethod: d.shippingMethod,
+          buyerBilling: d.buyerBilling,
+          financialSummary: d.financialSummary,
+          loading: false,
+        });
       } else {
         MessagePlugin.error(d.message || '详情获取失败');
         setDetail(null);
@@ -350,7 +382,9 @@ export function OrdersPage() {
             <Section title="基本信息">
               <div className="grid grid-cols-2 gap-x-4">
                 <KV k="订单号" v={String(detailItems.id)} />
+                <KV k="国家/站点" v={`${SITE_COUNTRY_NAME[activeSite] || activeSite}（${activeSite}）`} />
                 <KV k="状态" v={STATUS_TEXT[detail?.category || detailItems.status] || detail?.category || detailItems.status} />
+                <KV k="物流方式" v={detail?.shippingMethod || '—'} />
                 <KV k="下单时间" v={fmtDate(detailItems.date_created)} />
                 <KV k="关闭/发货时间" v={fmtDate(detailItems.date_closed || detailItems.date_last_updated)} />
                 <KV k="订单总额" v={`${detailItems.currency_id || ''} ${(detailItems.total_amount ?? 0).toFixed(2)}`} />
@@ -361,6 +395,7 @@ export function OrdersPage() {
             <Section title="买家">
               <KV k="昵称" v={getText(detailItems.buyer?.nickname) || '—'} />
               <KV k="姓名" v={[detailItems.buyer?.first_name, detailItems.buyer?.last_name].filter(Boolean).join(' ') || '—'} />
+              <KV k="税务证件" v={(detail?.buyerBilling && (detail.buyerBilling.docType || detail.buyerBilling.docNumber)) ? `${detail.buyerBilling.docType || ''} ${detail.buyerBilling.docNumber || ''}`.trim() : '—'} />
               <KV k="邮箱" v={detailItems.buyer?.email || '—'} />
               <KV k="电话" v={detailItems.buyer?.phone ? `${detailItems.buyer.phone.area_code || ''} ${detailItems.buyer.phone.number || ''}` : '—'} />
             </Section>
@@ -431,6 +466,17 @@ export function OrdersPage() {
             </Section>
 
             <Section title="支付与到手金额">
+              {detail?.financialSummary ? (
+                <div className="grid grid-cols-2 gap-x-4 mb-3">
+                  <KV k="商品总价" v={`${detail.financialSummary.currency} ${detail.financialSummary.productTotal.toFixed(2)}`} />
+                  <KV k="销售/平台费" v={`- ${detail.financialSummary.currency} ${detail.financialSummary.marketplaceFee.toFixed(2)}`} />
+                  <KV k="物流费用" v={`- ${detail.financialSummary.currency} ${detail.financialSummary.shippingCost.toFixed(2)}`} />
+                  <KV
+                    k="实得到手"
+                    v={<strong style={{ color: 'var(--td-success-color)' }}>{detail.financialSummary.currency} {detail.financialSummary.netTotal.toFixed(2)}</strong>}
+                  />
+                </div>
+              ) : null}
               {payments.length ? (
                 <>
                   <Table

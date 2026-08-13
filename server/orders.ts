@@ -459,34 +459,111 @@ async function enrichItemsWithImages(store: Store, orderItems: any[]): Promise<a
   });
 }
 
-/** 拉取单个订单的完整详情（含物流、商品图片），用于弹窗展示 */
+/** 计算订单财务汇总（商品总价 / 销售费用 / 物流费用 / 实得总计） */
+function computeFinancialSummary(order: any, shipmentCosts: any): {
+  productTotal: number;
+  marketplaceFee: number;
+  shippingCost: number;
+  netTotal: number;
+  currency: string;
+} {
+  const currency = order.currency_id || '';
+  const items = order.order_items || [];
+  const productTotal =
+    typeof order.total_amount === 'number'
+      ? order.total_amount
+      : items.reduce((s: number, it: any) => s + (it.unit_price || 0) * (it.quantity || 1), 0);
+  const paidAmount = typeof order.paid_amount === 'number' ? order.paid_amount : productTotal;
+
+  // 销售费用：优先用各商品 sale_fee 合计，否则用首笔支付 marketplace_fee
+  const saleFeeSum = items.reduce((s: number, it: any) => s + (typeof it.sale_fee === 'number' ? it.sale_fee : 0), 0);
+  const paymentFee = (order.payments || []).reduce(
+    (s: number, p: any) => s + (typeof p.marketplace_fee === 'number' ? p.marketplace_fee : 0),
+    0
+  );
+  const marketplaceFee = saleFeeSum || paymentFee;
+
+  // 物流费用：优先用 /shipments/{id}/costs 里卖家承担部分，否则用支付或订单里的 shipping_cost
+  let shippingCost = 0;
+  if (shipmentCosts?.senders?.[0] && typeof shipmentCosts.senders[0].cost === 'number') {
+    shippingCost = shipmentCosts.senders[0].cost;
+  } else if (shipmentCosts?.gross_amount != null && typeof shipmentCosts.gross_amount === 'number') {
+    shippingCost = shipmentCosts.gross_amount;
+  } else {
+    shippingCost = (order.payments || []).reduce(
+      (s: number, p: any) => s + (typeof p.shipping_cost === 'number' ? p.shipping_cost : 0),
+      0
+    );
+  }
+  if (!shippingCost && typeof order.shipping_cost === 'number') shippingCost = order.shipping_cost;
+
+  const netTotal = paidAmount - marketplaceFee - shippingCost;
+  return { productTotal, marketplaceFee, shippingCost, netTotal, currency };
+}
+
+/** 拉取单个订单的完整详情（含物流、商品图片、费用、买家证件），用于弹窗展示 */
 export async function fetchOrderDetail(store: Store, orderId: string): Promise<{
   order: any;
   shipments: any[];
   itemsDetail: any[];
   category: 'unshipped' | 'shipped' | 'cancelled';
   shippingAddress?: any;
+  shippingMethod?: string;
+  buyerBilling?: { docType: string; docNumber: string; name: string; additionalInfo: any } | null;
+  financialSummary?: { productTotal: number; marketplaceFee: number; shippingCost: number; netTotal: number; currency: string };
 }> {
   const isCbt = (store.site || '').toUpperCase() === 'CBT';
+  let buyerBilling: any = null;
+  try {
+    // 买家税务证件（RFC/CPF/CUIT/DNI 等）来自独立接口，订单对象里的 buyer.billing_info 仅有 id
+    const billingPath = isCbt
+      ? `/marketplace/orders/${orderId}/billing_info`
+      : `/orders/${orderId}/billing_info`;
+    const billing = await storeApiGet(store, billingPath, 2, isCbt ? undefined : { 'x-version': '2' });
+    // 兼容两种返回结构：v1 顶层 doc_type/doc_number；v2 嵌套在 buyer.billing_info.identification
+    const bi = billing?.billing_info || billing?.buyer?.billing_info || billing;
+    if (bi) {
+      const ident = bi.identification || {};
+      buyerBilling = {
+        docType: bi.doc_type || ident.type || '',
+        docNumber: bi.doc_number || ident.number || '',
+        name: bi.name || (billing?.buyer?.name) || '',
+        additionalInfo: bi.additional_info || null,
+      };
+    }
+  } catch {
+    /* 部分站点/订单无 billing_info 权限或为空，忽略 */
+  }
+
   // CBT 子订单必须用 /marketplace/orders/{id}（/orders/{id} 会 403）
   const order = isCbt
     ? await storeApiGet(store, `/marketplace/orders/${orderId}`)
     : await storeApiGet(store, `/orders/${orderId}`);
 
   let shipments: any[] = [];
+  let shipmentCosts: any = null;
   if (isCbt && order.shipping?.id) {
     try {
-      const ship = await storeApiGet(store, `/marketplace/shipments/${order.shipping.id}`);
+      const ship = await storeApiGet(store, `/marketplace/shipments/${order.shipping.id}`, 3, { 'x-format-new': 'true' });
       shipments = ship ? [ship] : [];
     } catch {
       /* CBT 物流端点可能限流或无权限，忽略 */
     }
   } else if (!isCbt) {
     try {
-      const ship = await storeApiGet(store, `/orders/${orderId}/shipments`);
+      const ship = await storeApiGet(store, `/orders/${orderId}/shipments`, 3, { 'x-format-new': 'true' });
       shipments = Array.isArray(ship) ? ship : (ship ? [ship] : []);
     } catch {
       /* 某些站点/订单无 shipments 端点，忽略 */
+    }
+    // 取第一笔物流的详细费用（若存在）
+    const firstShipId = shipments[0]?.id || order.shipping?.id;
+    if (firstShipId) {
+      try {
+        shipmentCosts = await storeApiGet(store, `/shipments/${firstShipId}/costs`);
+      } catch {
+        /* 费用端点可能无权限，忽略 */
+      }
     }
   }
 
@@ -502,6 +579,14 @@ export async function fetchOrderDetail(store: Store, orderId: string): Promise<{
     shippingAddress = shipments[0].destination;
   }
 
+  // 物流方式：优先 shipments.lead_time.shipping_method.name，其次 shipping_option.name
+  const shippingMethod =
+    shipments[0]?.lead_time?.shipping_method?.name ||
+    shipments[0]?.shipping_option?.name ||
+    order.shipping?.option?.name ||
+    order.shipping?.method ||
+    '';
+
   // 尝试补充买家基本信息（/users/{id} 为公开信息，email/phone 受隐私保护通常没有）
   if (order.buyer?.id && !order.buyer.email && !order.buyer.phone) {
     try {
@@ -514,7 +599,9 @@ export async function fetchOrderDetail(store: Store, orderId: string): Promise<{
     }
   }
 
-  return { order, shipments, itemsDetail, category, shippingAddress };
+  const financialSummary = computeFinancialSummary(order, shipmentCosts);
+
+  return { order, shipments, itemsDetail, category, shippingAddress, shippingMethod, buyerBilling, financialSummary };
 }
 
 /** 订单状态 → 中文分类标签（以 mlStatus 为准） */

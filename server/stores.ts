@@ -136,14 +136,14 @@ export async function ensureStoreToken(store: Store): Promise<string> {
   return store.accessToken;
 }
 
-/** 以该店铺身份调用 ML API（GET），带 429/5xx 自动退避重试 */
-export async function storeApiGet(store: Store, apiPath: string, retries = 3): Promise<any> {
+/** 以该店铺身份调用 ML API（GET），带 429/5xx 自动退避重试；可传额外 headers（如 x-format-new） */
+export async function storeApiGet(store: Store, apiPath: string, retries = 3, extraHeaders?: Record<string, string>): Promise<any> {
   let lastErr: any;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const token = await ensureStoreToken(store);
       const resp = await fetch(`${getMlApiBase()}${apiPath}`, {
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(extraHeaders || {}) },
       });
       if (!resp.ok) {
         const t = await resp.text();

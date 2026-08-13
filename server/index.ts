@@ -716,6 +716,7 @@ import * as storeAuth from './storeAuth.js';
 import * as stores from './stores.js';
 import * as notify from './notify.js';
 import * as orders from './orders.js';
+import * as products from './products.js';
 import { getSchedule, saveSchedule, startScheduler } from './scheduler.js';
 import { startTunnel, stopTunnel, getTunnelInfo, isTunnelRunning } from './tunnel.js';
 import * as sourcing from './sourcing.js';
@@ -1117,6 +1118,54 @@ app.get('/api/ml/orders/:id/detail', async (req, res) => {
     if (!store) return res.status(404).json({ success: false, message: '店铺不存在或缺失 storeId' });
     const detail = await orders.fetchOrderDetail(store, req.params.id);
     res.json({ success: true, ...detail });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+// ===== 商品管理：按 SKU / 标题模糊查询、查看与编辑 =====
+
+// 按 SKU / 标题模糊搜索店铺商品
+app.get('/api/ml/stores/:id/products/search', async (req, res) => {
+  try {
+    const store = stores.getStoreRaw(req.params.id);
+    if (!store) return res.status(404).json({ success: false, message: '店铺不存在' });
+    const q = (req.query.q as string) || '';
+    const hits = await products.searchStoreProducts(store, q);
+    res.json({ success: true, products: hits });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+// 单个商品完整详情（含描述、尺寸/重量）
+app.get('/api/ml/stores/:id/products/:itemId', async (req, res) => {
+  try {
+    const store = stores.getStoreRaw(req.params.id);
+    if (!store) return res.status(404).json({ success: false, message: '店铺不存在' });
+    const detail = await products.getStoreItemDetail(store, req.params.itemId);
+    res.json({ success: true, product: detail });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+// 修改商品（标题 / 图片 / 重量 / 长宽高 / 描述）
+app.put('/api/ml/stores/:id/products/:itemId', async (req, res) => {
+  try {
+    const store = stores.getStoreRaw(req.params.id);
+    if (!store) return res.status(404).json({ success: false, message: '店铺不存在' });
+    const payload = req.body || {};
+    const result = await products.updateStoreItem(store, req.params.itemId, {
+      title: payload.title,
+      pictures: payload.pictures,
+      weight: payload.weight,
+      length: payload.length,
+      width: payload.width,
+      height: payload.height,
+      description: payload.description,
+    });
+    res.json({ success: true, ...result });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err?.message || String(err) });
   }
