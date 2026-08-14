@@ -18,6 +18,7 @@ interface SidebarProps {
   isNotificationsPage?: boolean;
   isTrendsPage?: boolean;
   isProductAdminPage?: boolean;
+  isMobile?: boolean;
   sidebarOpen: boolean;
   agents: Agent[];
   getAgent: (id: string) => Agent | undefined;
@@ -47,6 +48,7 @@ export function Sidebar({
   isNotificationsPage,
   isTrendsPage,
   isProductAdminPage,
+  isMobile,
   sidebarOpen,
   agents,
   getAgent,
@@ -65,9 +67,10 @@ export function Sidebar({
 }: SidebarProps) {
   return (
     <aside 
-      className="flex flex-col flex-shrink-0 transition-all duration-300 overflow-hidden"
+      className={`${isMobile ? 'fixed top-0 left-0 z-40 h-[100dvh]' : 'flex-shrink-0'} flex flex-col transition-all duration-300 overflow-hidden`}
       style={{ 
-        width: sidebarOpen ? 260 : 0,
+        width: isMobile ? 260 : (sidebarOpen ? 260 : 0),
+        transform: isMobile && !sidebarOpen ? 'translateX(-100%)' : 'translateX(0)',
         backgroundColor: 'var(--td-bg-color-container)'
       }}
     >

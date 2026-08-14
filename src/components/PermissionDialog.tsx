@@ -104,7 +104,7 @@ export function PermissionDialog({ visible, request, onAllow, onDeny }: Permissi
           </Button>
         </div>
       }
-      width={520}
+      width="min(520px, 92vw)"
       destroyOnClose
     >
       <div className="space-y-4">

@@ -192,7 +192,7 @@ export function ListingPage() {
         </Card>
 
         <Card title="2. 编辑你的 Listing 草稿" bordered>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <label className="flex flex-col gap-1 text-sm">
               <span>站点</span>
               <Select value={draft.site} onChange={(v) => patch({ site: v as string })} options={SITE_OPTIONS} />

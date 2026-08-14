@@ -1426,7 +1426,7 @@ export function ProductFinderPage() {
               </div>
               {smtpOpen && (
                 <div className="px-3 pb-3">
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="flex items-center gap-2">
                       <span className="text-xs w-16 flex-shrink-0" style={{ color: 'var(--td-text-color-secondary)' }}>SMTP 主机</span>
                       <Input value={emailCfg.host} onChange={(val: any) => setEmailCfg({ ...emailCfg, host: val })} placeholder="如 smtp.gmail.com" />

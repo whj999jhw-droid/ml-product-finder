@@ -266,7 +266,7 @@ export function ProductManagerPage() {
       )}
 
       {searched && !searching && results.length > 0 && (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
           {results.map((hit) => (
             <div
               key={hit.id}
@@ -319,7 +319,7 @@ export function ProductManagerPage() {
         visible={editOpen}
         onClose={() => setEditOpen(false)}
         header="编辑商品"
-        width={720}
+        width="min(720px, 92vw)"
         footer={
           <Space>
             <Button theme="default" variant="outline" onClick={() => setEditOpen(false)}>
@@ -418,7 +418,7 @@ export function ProductManagerPage() {
             {/* 尺寸 / 重量：与美客多后台顺序一致（高 × 宽 × 长，重量 g） */}
             <div>
               <div className="text-sm font-medium mb-2">尺寸与重量（单位：厘米 / 克）</div>
-              <div className="grid grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 <div>
                   <div className="text-xs mb-1" style={{ color: 'var(--td-text-color-secondary)' }}>高</div>
                   <Input value={editHei} onChange={(v) => setEditHei(v as string)} placeholder="高" />

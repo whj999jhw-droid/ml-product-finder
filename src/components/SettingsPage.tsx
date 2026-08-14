@@ -366,7 +366,7 @@ export function SettingsPage({
             
             {showEnvConfig ? (
               <div className="space-y-3">
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label 
                       className="text-xs block mb-1"
@@ -648,7 +648,7 @@ export function SettingsPage({
                     <h4 className="text-sm font-medium mb-3" style={{ color: 'var(--td-text-color-secondary)' }}>
                       快速创建
                     </h4>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {PRESET_TEMPLATES.map(template => {
                         const Icon = getIconComponent(template.icon);
                         return (

@@ -1243,16 +1243,18 @@ export function SourcingPage() {
           {loading ? (
             <Loading loading={true} text="加载中..." />
           ) : (
-            <Table
-              data={rows}
-              columns={columns}
-              rowKey="itemId"
-              size="small"
-              bordered
-              tableLayout="auto"
-              maxHeight={560}
-              pagination={{ pageSize: 50, showJumper: true }}
-            />
+            <div style={{ overflowX: 'auto' }}>
+              <Table
+                data={rows}
+                columns={columns}
+                rowKey="itemId"
+                size="small"
+                bordered
+                tableLayout="auto"
+                maxHeight={560}
+                pagination={{ pageSize: 50, showJumper: true }}
+              />
+            </div>
           )}
         </Card>
 
@@ -1262,7 +1264,7 @@ export function SourcingPage() {
           visible={genOpen}
           onClose={() => setGenOpen(false)}
           footer={false}
-          width={560}
+          width="min(560px, 92vw)"
         >
           {genLoading ? (
             <Loading loading={true} text="生成中..." />
@@ -1294,7 +1296,7 @@ export function SourcingPage() {
           visible={kwOpen}
           onClose={() => setKwOpen(false)}
           footer={false}
-          width={520}
+          width="min(520px, 92vw)"
         >
           <div className="space-y-3">
             <p className="text-sm" style={{ color: 'var(--td-text-color-secondary)' }}>
@@ -1314,7 +1316,7 @@ export function SourcingPage() {
           onClose={() => setPublishOpen(false)}
           onConfirm={handlePublishConfirm}
           confirmBtn={{ content: publishing ? '上架中...' : '确认上架', loading: publishing }}
-          width={540}
+          width="min(540px, 92vw)"
         >
           <div className="space-y-3 text-sm">
             {/* 目标店铺选择 */}

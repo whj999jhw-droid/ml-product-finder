@@ -157,7 +157,7 @@ export function AgentConfigDialog({
       visible={visible}
       onClose={() => { resetForm(); onClose(); }}
       header="Agent 配置"
-      width={700}
+      width="min(700px, 92vw)"
       footer={null}
       closeOnOverlayClick={false}
     >
@@ -249,7 +249,7 @@ export function AgentConfigDialog({
               <h4 className="text-sm font-medium mb-3" style={{ color: 'var(--td-text-color-secondary)' }}>
                 快速创建
               </h4>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {PRESET_TEMPLATES.map(template => {
                   const Icon = getIconComponent(template.icon);
                   return (

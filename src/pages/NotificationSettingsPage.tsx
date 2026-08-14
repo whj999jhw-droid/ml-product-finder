@@ -397,7 +397,7 @@ export function NotificationSettingsPage() {
             {emailOk === true && <Tag theme="success" variant="light">上次测试成功</Tag>}
             {emailOk === false && <Tag theme="danger" variant="light">上次测试失败</Tag>}
           </div>
-          <div className="grid grid-cols-2 gap-3" style={{ maxWidth: 760 }}>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3" style={{ maxWidth: 760 }}>
             <div>
               <label className="text-xs block mb-1" style={{ color: 'var(--td-text-color-placeholder)' }}>SMTP 服务器</label>
               <Input value={emailCfg.host} onChange={(v: string) => setEmailCfg({ ...emailCfg, host: v })} placeholder="如 smtp.qq.com" />
@@ -464,7 +464,7 @@ export function NotificationSettingsPage() {
             style={{ maxWidth: 520 }}
           />
           {smsForm.provider === 'twilio' && (
-            <div className="grid grid-cols-2 gap-3" style={{ maxWidth: 760 }}>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3" style={{ maxWidth: 760 }}>
               <Input value={smsForm.accountSid} onChange={(v: string) => setSmsForm({ ...smsForm, accountSid: v })} placeholder="Twilio Account SID" />
               <Input type="password" value={smsForm.authToken} onChange={(v: string) => setSmsForm({ ...smsForm, authToken: v })} placeholder="Twilio Auth Token" />
               <Input value={smsForm.fromNumber} onChange={(v: string) => setSmsForm({ ...smsForm, fromNumber: v })} placeholder="发送号码 From（+国家码）" />
@@ -563,7 +563,7 @@ export function NotificationSettingsPage() {
         onClose={() => setDetailItem(null)}
         header="提醒详情"
         footer={false}
-        width={640}
+        width="min(640px, 92vw)"
       >
         {detailItem && (
           <Space direction="vertical" style={{ width: '100%' }}>
@@ -609,7 +609,7 @@ export function NotificationSettingsPage() {
         onClose={() => setPreviewVisible(false)}
         header="通知内容预览"
         footer={false}
-        width={680}
+        width="min(680px, 92vw)"
       >
         <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 13, lineHeight: 1.7 }}>
           {emailPreview || smsPreview}

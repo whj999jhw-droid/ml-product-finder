@@ -185,19 +185,44 @@ function AppContent() {
     navigate('/product-admin');
   }, [navigate]);
 
-  // Sidebar 状态
+  // 移动端检测：≤767px 视为手机，侧边栏切换为抽屉模式
+  const [isMobile, setIsMobile] = useState<boolean>(
+    typeof window !== 'undefined' &&
+      window.matchMedia('(max-width: 767px)').matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 767px)');
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
+
+  // Sidebar 状态：桌面默认展开，移动端默认收起为抽屉
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  useEffect(() => {
+    setSidebarOpen(!isMobile);
+  }, [isMobile]);
   
   // 权限模式状态
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('default');
 
   return (
     <div 
-      className="flex h-screen w-screen"
+      className="flex h-[100dvh] w-full overflow-hidden"
       style={{ backgroundColor: 'var(--td-bg-color-page)' }}
     >
+      {/* 移动端抽屉遮罩 */}
+      {isMobile && sidebarOpen && (
+        <div
+          className="fixed inset-0 z-30"
+          style={{ backgroundColor: 'rgba(0,0,0,0.45)' }}
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
       {/* 侧边栏 */}
       <Sidebar
+        isMobile={isMobile}
         sessions={sessions}
         currentSessionId={currentSessionId}
         isSettingsPage={isSettingsPage}

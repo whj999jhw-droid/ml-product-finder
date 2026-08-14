@@ -374,13 +374,13 @@ export function OrdersPage() {
         visible={!!detail}
         onClose={() => setDetail(null)}
         footer={false}
-        width={780}
+        width="min(780px, 92vw)"
       >
         {detail?.loading && <Loading loading text="加载中..." />}
         {detail && !detail.loading && detailItems && (
           <div className="space-y-4 text-sm">
             <Section title="基本信息">
-              <div className="grid grid-cols-2 gap-x-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4">
                 <KV k="订单号" v={String(detailItems.id)} />
                 <KV k="国家/站点" v={`${SITE_COUNTRY_NAME[activeSite] || activeSite}（${activeSite}）`} />
                 <KV k="状态" v={STATUS_TEXT[detail?.category || detailItems.status] || detail?.category || detailItems.status} />
@@ -467,7 +467,7 @@ export function OrdersPage() {
 
             <Section title="支付与到手金额">
               {detail?.financialSummary ? (
-                <div className="grid grid-cols-2 gap-x-4 mb-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 mb-3">
                   <KV k="商品总价" v={`${detail.financialSummary.currency} ${detail.financialSummary.productTotal.toFixed(2)}`} />
                   <KV k="销售/平台费" v={`- ${detail.financialSummary.currency} ${detail.financialSummary.marketplaceFee.toFixed(2)}`} />
                   <KV k="物流费用" v={`- ${detail.financialSummary.currency} ${detail.financialSummary.shippingCost.toFixed(2)}`} />
@@ -506,7 +506,7 @@ export function OrdersPage() {
               {detail.shipments && detail.shipments.length ? (
                 detail.shipments.map((sp: any, i: number) => (
                   <div key={i} className="mb-3 p-2 rounded" style={{ background: 'var(--td-bg-color-component)' }}>
-                    <div className="grid grid-cols-2 gap-x-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4">
                       <KV k="物流公司" v={sp.carrier?.name || sp.tracking_method || sp.logistic_type || '—'} />
                       <KV k="物流方式" v={getText(sp.shipping_option?.name) || sp.shipping_option?.name || '—'} />
                       <KV k="物流单号" v={sp.tracking_number || '—'} />

@@ -108,14 +108,14 @@ export function ChatInput({
           onChange={handleChange}
         >
           {/* 模型选择器和权限模式选择器放在 footer-prefix 插槽 */}
-          <div slot="footer-prefix" className="flex items-center gap-2">
+          <div slot="footer-prefix" className="flex items-center gap-2 flex-wrap w-full">
             {/* 模型选择器 */}
             <Select
               value={selectedModel}
               onChange={(value) => onModelChange(value as string)}
               placeholder="选择模型"
               size="small"
-              style={{ width: 160 }}
+              style={{ flex: 1, minWidth: 120 }}
               filterable
               borderless
               suffixIcon={<ChevronDownIcon />}
@@ -137,7 +137,7 @@ export function ChatInput({
                 value={permissionMode}
                 onChange={(value) => onPermissionModeChange(value as PermissionMode)}
                 size="small"
-                style={{ width: 110 }}
+                style={{ flex: 1, minWidth: 90 }}
                 borderless
                 suffixIcon={<ChevronDownIcon />}
                 prefixIcon={

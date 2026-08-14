@@ -465,7 +465,7 @@ export function ProductTable({ products, isFetching, onExportSelected }: Product
     <div className="space-y-4">
       {/* ===== 统计卡片 ===== */}
       {filteredProducts.length > 0 && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
           <StatCard label="商品总数" value={stats.total.toLocaleString()} color="var(--td-brand-color)" />
           <StatCard
             label="均价 USD"
@@ -556,7 +556,7 @@ export function ProductTable({ products, isFetching, onExportSelected }: Product
       )}
 
       {/* ===== 商品表格 ===== */}
-      <div style={{ maxHeight: '500px', overflowY: 'auto' }}>
+      <div style={{ maxHeight: '500px', overflow: 'auto' }}>
         <Table
           data={filteredProducts.map((p) => ({ ...p, key: p.itemId }))}
           columns={columns}

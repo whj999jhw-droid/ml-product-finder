@@ -86,7 +86,7 @@ export function NewChatDialog({
       visible={visible}
       onClose={handleClose}
       header="新建对话"
-      width={500}
+      width="min(500px, 92vw)"
       confirmBtn={
         <Button theme="primary" onClick={handleConfirm}>
           开始对话
