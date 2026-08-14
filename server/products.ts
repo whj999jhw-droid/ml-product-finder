@@ -365,9 +365,12 @@ export interface ProductDetail extends ProductSearchHit {
   localized_price?: number;
   localized_site_id?: string;
   localized_item_id?: string;
-  marketplace_items?: { site_id: string; item_id: string }[];
+  marketplace_items?: { site_id: string; item_id: string; logistic_type?: string }[];
   // 搜索接口可能返回本地站点 item ID（如 MLM...），保存时必须用 CBT 根 ID（CBT...）
   root_item_id: string;
+  // User Products 新模型标识（如果存在，更新需走 /global/user-products）
+  siteless_user_product_id?: string;
+  user_product_id?: string;
   // 主要特性
   brand?: string;
   model?: string;
@@ -422,13 +425,40 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
     throw new Error('无法获取商品详情（CBT/本地端点均失败）');
   }
 
+  // CBT 描述读取：官方要求 GET /marketplace/items/{CBT_id}/description?site_id=&logistic_type=
   let description = '';
-  try {
-    const desc = await ensureStoreTokenThen(store, `/items/${itemId}/description`);
-    description = desc?.plain_text || desc?.text || '';
-  } catch {
-    /* 描述接口可能限流/无权限，忽略 */
+  if (isCbtItem && cbtTargetSite) {
+    try {
+      const desc = await ensureStoreTokenThen(
+        store,
+        `/marketplace/items/${encodeURIComponent(root_item_id)}/description?site_id=${encodeURIComponent(cbtTargetSite)}&logistic_type=${encodeURIComponent(cbtTargetLogisticType)}`,
+      );
+      description = desc?.plain_text || desc?.text || '';
+    } catch (e: any) {
+      console.warn(`[Products] CBT 描述读取失败 ${root_item_id}/${cbtTargetSite}:`, e?.message?.slice(0, 120));
+    }
   }
+  if (!description) {
+    try {
+      const desc = await ensureStoreTokenThen(store, `/items/${encodeURIComponent(itemId)}/description`);
+      description = desc?.plain_text || desc?.text || '';
+    } catch {
+      /* 描述接口可能限流/无权限，忽略 */
+    }
+  }
+
+  // User Products 新模型标识：/marketplace/items/{CBT_id} 响应中可能直接存在，或从原始 marketplace_items 取第一个
+  const rawMarketplaceItems = baseItem?.marketplace_items || [];
+  const siteless_user_product_id =
+    baseItem?.siteless_user_product_id ||
+    rawMarketplaceItems[0]?.siteless_user_product_id ||
+    undefined;
+  const user_product_id =
+    baseItem?.user_product_id ||
+    baseItem?.parent_user_product_id ||
+    rawMarketplaceItems[0]?.user_product_id ||
+    undefined;
+
   const pictures: string[] = (baseItem.pictures || []).map((p: any) => p.url || p.secure_url).filter(Boolean);
   const picturesWithId: ProductPicture[] = (baseItem.pictures || []).map((p: any) => ({
     id: p.id,
@@ -467,20 +497,24 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
   let localized_price: number | undefined;
   let localized_site_id: string | undefined;
   let localized_item_id: string | undefined;
-  let marketplace_items: { site_id: string; item_id: string }[] | undefined;
+  let marketplace_items: { site_id: string; item_id: string; logistic_type?: string }[] | undefined;
   let sites_from_marketplace: ProductSiteToSell[] | undefined;
+  let cbtTargetSite = site_id || '';
+  let cbtTargetLogisticType = 'remote';
   const isCbtItem = isCbtId || baseItem.site_id === 'CBT' || looksLikeCbtId(root_item_id);
   if (isCbtItem) {
     marketplace_items = (baseItem.marketplace_items || []).map((m: any) => ({
       site_id: String(m.site_id || ''),
       item_id: String(m.item_id || ''),
+      logistic_type: String(m.logistic_type || ''),
     }));
     if (marketplace_items.length) {
-      const targetSite = site_id || 'MLM';
-      const targetLocal = marketplace_items.find((m) => m.site_id === targetSite);
+      cbtTargetSite = site_id || marketplace_items[0].site_id || 'MLM';
+      const targetLocal = marketplace_items.find((m) => m.site_id === cbtTargetSite);
+      cbtTargetLogisticType = targetLocal?.logistic_type || marketplace_items[0].logistic_type || 'remote';
       if (targetLocal?.item_id) {
         localized_item_id = targetLocal.item_id;
-        localized_site_id = targetSite;
+        localized_site_id = cbtTargetSite;
       }
       // 取所有站点价格（净收入优先）
       sites_from_marketplace = [];
@@ -495,7 +529,7 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
           const np = li?.net_proceeds?.amount ?? li?.net_proceeds;
           const priceVal = np != null ? Number(np) : (li?.price != null ? Number(li.price) : undefined);
           if (priceVal != null) {
-            if (m.site_id === targetSite && !localized_price) {
+            if (m.site_id === cbtTargetSite && !localized_price) {
               localized_title = li?.title;
               localized_price = Number(priceVal);
             }
@@ -504,7 +538,7 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
               price: Number(priceVal),
               currency_id: np != null ? 'USD' : (li?.currency_id || 'USD'),
               listing_type_id: li?.listing_type_id,
-              logistic_type: li?.shipping?.logistic_type || 'remote',
+              logistic_type: li?.shipping?.logistic_type || m.logistic_type || 'remote',
               net_proceeds: np != null,
             });
           }
@@ -557,6 +591,8 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
     localized_item_id,
     marketplace_items,
     root_item_id,
+    siteless_user_product_id,
+    user_product_id,
     brand: getAttrValue(baseItem, 'BRAND'),
     model: getAttrValue(baseItem, 'MODEL'),
     sites_to_sell,
@@ -634,14 +670,55 @@ function normalizePicturesInput(input?: ProductUpdatePayload['pictures']): Produ
 }
 
 /**
+ * CBT / User Products 更新图片必须用 picture id。
+ * 把输入图片解析/上传为 { id } 数组；无法处理的会被跳过。
+ */
+async function resolveCbtPictureIds(store: Store, picInputs: ProductPicture[]): Promise<{ id: string }[]> {
+  const out: { id: string }[] = [];
+  for (const pic of picInputs) {
+    let id = pic.id;
+    if (!id && pic.url) {
+      if (looksLikeMlPictureId(pic.url)) id = pic.url;
+      else if (looksLikeMlPictureUrl(pic.url)) id = extractPictureIdFromUrl(pic.url);
+    }
+    if (!id && pic.url) {
+      id = await uploadPictureFromUrl(store, pic.url);
+    }
+    if (id) out.push({ id });
+    else console.warn('[Products] 无法识别/上传图片，已跳过:', pic.url);
+  }
+  return out;
+}
+
+/**
+ * 打印 User Products 更新响应中的错误/警告，便于联调。
+ */
+function logUpResponse(prefix: string, res: any) {
+  if (!res) return;
+  if (res.errors) {
+    console.warn(`[Products] ${prefix} 返回 errors:`, JSON.stringify(res.errors).slice(0, 500));
+  }
+  if (Array.isArray(res.listing_sites)) {
+    for (const ls of res.listing_sites) {
+      if (ls?.errors) {
+        console.warn(`[Products] ${prefix} listing_site ${ls.id || ls.listing_id} 错误:`, JSON.stringify(ls.errors).slice(0, 500));
+      }
+    }
+  }
+}
+
+/**
  * 修改商品。
  * - 普通站点：标题/图片/尺寸走 PUT /items/{id}；描述走 PUT /items/{id}/description。
- * - CBT 全球售：所有字段（含描述）统一走 PUT /global/items/{id}。
+ * - CBT 全球售：优先检测 User Products 新模型（存在 siteless_user_product_id）。
+ *   - UP 模型：价格/站点销售条件走 PUT /global/user-products/{siteless_user_product_id} + listing_sites；
+ *     描述/图片/属性/库存/标题（映射为 family_name）走同端点。
+ *   - 旧模型：价格走 POST /global/items/{CBT_id} + sites_to_sell；其他走 PUT /global/items/{CBT_id}。
  * 每个字段只在被显式提供（非空字符串）时才发送，避免误覆盖。
  * 参考：
  *   https://global-selling.mercadolibre.com/devsite/zh_cn/shang-pin-miao-shu
- *   https://global-selling.mercadolibre.com/devsite/en_us/user-products-cbt/pictures
- *   https://global-selling.mercadolibre.com/devsite/en_us/atributtes-global-selling
+ *   https://global-selling.mercadolibre.com/devsite/zh_cn/mei-kuan-chan-pin-de-jie-ge
+ *   https://global-selling.mercadolibre.com/devsite/devsite/user-products-cbt
  */
 export async function updateStoreItem(
   store: Store,
@@ -652,38 +729,14 @@ export async function updateStoreItem(
   const isCbt = site === 'CBT';
   const itemPath = isCbt ? `/global/items/${itemId}` : `/items/${itemId}`;
 
-  const itemBody: Record<string, any> = {};
+  // 通用属性构建
   const attributes: { id: string; value_name: string }[] = [];
-
-  if (typeof payload.title === 'string' && payload.title.trim()) {
-    itemBody.title = payload.title.trim();
+  if (typeof payload.brand === 'string' && payload.brand.trim()) {
+    attributes.push({ id: 'BRAND', value_name: payload.brand.trim() });
   }
-
-  // 图片：CBT /global/items 必须传 {id}；普通 /items 可传 {source}。
-  const picInputs = normalizePicturesInput(payload.pictures);
-  if (picInputs.length) {
-    if (isCbt) {
-      const picIds: string[] = [];
-      for (const pic of picInputs) {
-        let id = pic.id;
-        if (!id && pic.url) {
-          if (looksLikeMlPictureId(pic.url)) id = pic.url;
-          else if (looksLikeMlPictureUrl(pic.url)) id = extractPictureIdFromUrl(pic.url);
-        }
-        if (!id && pic.url) {
-          // 外部 URL：先上传到 ML 图床，再取 id
-          id = await uploadPictureFromUrl(store, pic.url);
-        }
-        if (id) picIds.push(id);
-        else console.warn('[Products] 无法识别/上传图片，已跳过:', pic.url);
-      }
-      if (picIds.length) itemBody.pictures = picIds.map((id) => ({ id }));
-    } else {
-      itemBody.pictures = picInputs.map((p) => ({ source: p.url || p.id || '' })).filter((p) => p.source);
-    }
+  if (typeof payload.model === 'string' && payload.model.trim()) {
+    attributes.push({ id: 'MODEL', value_name: payload.model.trim() });
   }
-
-  // 尺寸/重量：优先通过 attributes 的 PACKAGE_* 更新（与后台“主要特性-包裹重量与尺寸”一致）。
   const dimProvided =
     payload.weight !== undefined ||
     payload.length !== undefined ||
@@ -698,120 +751,176 @@ export async function updateStoreItem(
     if (w) attributes.push({ id: 'PACKAGE_WIDTH', value_name: w });
     if (l) attributes.push({ id: 'PACKAGE_LENGTH', value_name: l });
     if (wt) attributes.push({ id: 'PACKAGE_WEIGHT', value_name: wt });
-    // 同时保留 shipping.dimensions 作为兼容
-    const dims = buildDimensions({
-      length: payload.length ?? '',
-      width: payload.width ?? '',
-      height: payload.height ?? '',
-      weight: payload.weight ?? '',
-    });
-    if (dims) itemBody.shipping = { dimensions: dims };
   }
 
-  // 主要特性：品牌 / 模型
-  if (typeof payload.brand === 'string' && payload.brand.trim()) {
-    attributes.push({ id: 'BRAND', value_name: payload.brand.trim() });
-  }
-  if (typeof payload.model === 'string' && payload.model.trim()) {
-    attributes.push({ id: 'MODEL', value_name: payload.model.trim() });
-  }
-
-  if (attributes.length) {
-    itemBody.attributes = attributes;
-  }
-
-  // 库存
-  if (typeof payload.available_quantity === 'string' && payload.available_quantity.trim() !== '') {
-    const q = Number(payload.available_quantity);
-    if (Number.isFinite(q) && q >= 0) {
-      itemBody.available_quantity = q;
-    }
-  }
-
-  // 价格：CBT 必须按国家写到 sites_to_sell；普通站点写顶层 price。
-  if (isCbt) {
-    if (Array.isArray(payload.sites_to_sell) && payload.sites_to_sell.length) {
-      // 读取当前 sites_to_sell 保持 listing_type_id/logistic_type，仅替换价格
-      let curSites: any[] = [];
-      try {
-        const cur = await ensureStoreTokenThen(store, `/items/${encodeURIComponent(itemId)}`);
-        curSites = Array.isArray(cur?.sites_to_sell) ? cur.sites_to_sell : [];
-      } catch (e: any) {
-        console.warn('[Products] 取当前商品查 sites_to_sell 失败:', e?.message?.slice(0, 120));
-      }
-      itemBody.sites_to_sell = payload.sites_to_sell.map((s) => {
-        const existing = curSites.find((c: any) => String(c.site_id) === s.site_id);
-        const base: any = {
-          site_id: s.site_id,
-          listing_type_id: s.listing_type_id || existing?.listing_type_id,
-          logistic_type: s.logistic_type || existing?.logistic_type || 'remote',
-        };
-        if (s.net_proceeds) {
-          // net_proceeds 模式（卖家设净收入，系统自动加成本算公开价）：只发 net_proceeds，不发 price
-          base.net_proceeds = Number(s.price);
-          base.currency_id = s.currency_id || existing?.currency_id || 'USD';
-        } else {
-          base.price = Number(s.price);
-          base.currency_id = s.currency_id || existing?.currency_id || 'USD';
-        }
-        return base;
-      });
-    }
-  } else if (typeof payload.price === 'string' && payload.price.trim() !== '') {
-    const priceNum = Number(payload.price);
-    if (Number.isFinite(priceNum) && priceNum > 0) {
-      itemBody.price = priceNum;
-    }
-  }
+  // 图片标准化
+  const picInputs = normalizePicturesInput(payload.pictures);
+  const cbtPictures = isCbt && picInputs.length ? await resolveCbtPictureIds(store, picInputs) : [];
 
   let item: any = null;
   let descriptionResult: any = null;
   let warningNote = '';
 
   if (isCbt) {
-    // CBT：描述必须和主字段一起通过 /global/items/{id} 提交，且需要 site_id + logistic_type
-    if (typeof payload.description === 'string') {
-      const cbtSiteId = payload.site_id || 'MLM';
-      itemBody.site_id = cbtSiteId;
-      itemBody.logistic_type = 'remote';
-      itemBody.description = { plain_text: payload.description };
+    // 更新前先取一次父商品，判断是不是 User Products 模型，并拿到 marketplace_items 映射
+    let cbtParent: any = null;
+    let marketplace_items: any[] = [];
+    let siteless_user_product_id: string | undefined;
+    try {
+      cbtParent = await ensureStoreTokenThen(store, `/marketplace/items/${encodeURIComponent(itemId)}`);
+      marketplace_items = Array.isArray(cbtParent?.marketplace_items) ? cbtParent.marketplace_items : [];
+      siteless_user_product_id =
+        cbtParent?.siteless_user_product_id ||
+        (marketplace_items[0]?.siteless_user_product_id);
+    } catch (e: any) {
+      console.warn(`[Products] 更新前取 CBT 父商品失败 ${itemId}，尝试旧接口:`, e?.message?.slice(0, 160));
     }
 
-    // 官方文档（global-listing）指定：更新/新增市场销售条件用 POST /global/items/{CBT_id} + sites_to_sell
-    // 商品基础信息（标题、图片、属性、库存等）仍走 PUT /global/items/{CBT_id}
-    const sitesBody = Array.isArray(itemBody.sites_to_sell) && itemBody.sites_to_sell.length
-      ? { sites_to_sell: itemBody.sites_to_sell }
-      : undefined;
-    if (sitesBody) {
-      console.log(`[Products] CBT POST /global/items/${itemId} sites_to_sell`);
-      try {
-        const postRes = await storeApiMutate(store, 'POST', itemPath, sitesBody);
-        item = postRes;
-        descriptionResult = postRes;
-      } catch (e: any) {
-        console.warn(`[Products] CBT POST /global/items/${itemId} sites_to_sell 失败:`, e?.message?.slice(0, 200));
+    if (siteless_user_product_id) {
+      // ========== User Products 新模型 ==========
+      const upPath = `/global/user-products/${encodeURIComponent(siteless_user_product_id)}`;
+      console.log(`[Products] CBT 走 User Products 更新: ${upPath}`);
+
+      // 1) 按国家价格（net_proceeds / price）-> listing_sites
+      if (Array.isArray(payload.sites_to_sell) && payload.sites_to_sell.length && marketplace_items.length) {
+        const listingSites: any[] = [];
+        for (const s of payload.sites_to_sell) {
+          const child = marketplace_items.find((m: any) => String(m.site_id) === s.site_id);
+          if (!child?.item_id) {
+            console.warn(`[Products] 找不到站点 ${s.site_id} 对应 listing_id，跳过该站点价格`);
+            continue;
+          }
+          const entry: any = { listing_id: String(child.item_id) };
+          if (s.net_proceeds) {
+            entry.net_proceeds = Number(s.price);
+          } else {
+            entry.price = Number(s.price);
+          }
+          if (s.listing_type_id) entry.listing_type_id = s.listing_type_id;
+          listingSites.push(entry);
+        }
+        if (listingSites.length) {
+          console.log(`[Products] UP PUT ${upPath} listing_sites`);
+          const priceRes = await storeApiMutate(store, 'PUT', upPath, { listing_sites: listingSites });
+          item = priceRes;
+          logUpResponse('UP 价格', priceRes);
+        }
       }
-      delete itemBody.sites_to_sell;
-    }
 
-    if (Object.keys(itemBody).length) {
-      console.log(`[Products] CBT PUT ${itemPath} body keys=${Object.keys(itemBody).join(',')}`);
-      const putRes = await storeApiMutate(store, 'PUT', itemPath, itemBody);
-      // 优先使用 PUT 返回的完整 item；保留 POST 可能已返回的对象
-      item = putRes || item;
-      descriptionResult = putRes || descriptionResult;
-      // 价格自动化开启时，price 可能被忽略（返回 200 + warning）
-      const warns: any[] = item?.warnings || item?.cause || [];
-      const priceWarn = warns.find((w) =>
-        String(w?.message || w?.cause?.[0]?.message || w || '')
-          .toLowerCase()
-          .includes('price'),
-      );
-      if (priceWarn) {
-        warningNote = '（价格可能被自动调价功能忽略，请在美客多后台确认实际价格）';
+      // 2) 描述
+      if (typeof payload.description === 'string' && payload.description.trim() !== '') {
+        console.log(`[Products] UP PUT ${upPath} description`);
+        const descRes = await storeApiMutate(store, 'PUT', upPath, {
+          description: { plain_text: payload.description },
+        });
+        descriptionResult = descRes;
+        logUpResponse('UP 描述', descRes);
+      }
+
+      // 3) 产品信息（标题映射为 family_name，图片/属性/库存）
+      const productBody: Record<string, any> = {};
+      if (typeof payload.title === 'string' && payload.title.trim()) {
+        productBody.family_name = payload.title.trim();
+      }
+      if (cbtPictures.length) productBody.pictures = cbtPictures;
+      if (attributes.length) productBody.attributes = attributes;
+      if (typeof payload.available_quantity === 'string' && payload.available_quantity.trim() !== '') {
+        const q = Number(payload.available_quantity);
+        if (Number.isFinite(q) && q >= 0) productBody.available_quantity = q;
+      }
+      if (Object.keys(productBody).length) {
+        console.log(`[Products] UP PUT ${upPath} body keys=${Object.keys(productBody).join(',')}`);
+        const prodRes = await storeApiMutate(store, 'PUT', upPath, productBody);
+        item = prodRes || item;
+        logUpResponse('UP 产品信息', prodRes);
+      }
+    } else {
+      // ========== 传统 /global/items 路径（保留兼容） ==========
+      const itemBody: Record<string, any> = {};
+
+      if (typeof payload.title === 'string' && payload.title.trim()) itemBody.title = payload.title.trim();
+      if (cbtPictures.length) itemBody.pictures = cbtPictures;
+      if (attributes.length) itemBody.attributes = attributes;
+      if (typeof payload.available_quantity === 'string' && payload.available_quantity.trim() !== '') {
+        const q = Number(payload.available_quantity);
+        if (Number.isFinite(q) && q >= 0) itemBody.available_quantity = q;
+      }
+      if (dimProvided) {
+        const dims = buildDimensions({
+          length: payload.length ?? '',
+          width: payload.width ?? '',
+          height: payload.height ?? '',
+          weight: payload.weight ?? '',
+        });
+        if (dims) itemBody.shipping = { dimensions: dims };
+      }
+
+      // 描述单独请求，避免与其他字段冲突导致被忽略
+      if (typeof payload.description === 'string' && payload.description.trim() !== '') {
+        const cbtSiteId = payload.site_id || 'MLM';
+        console.log(`[Products] 旧 CBT PUT ${itemPath} description`);
+        descriptionResult = await storeApiMutate(store, 'PUT', itemPath, {
+          site_id: cbtSiteId,
+          logistic_type: 'remote',
+          description: { plain_text: payload.description },
+        });
+      }
+
+      // 价格：POST /global/items/{id} + sites_to_sell
+      if (Array.isArray(payload.sites_to_sell) && payload.sites_to_sell.length) {
+        const sitesBody = {
+          sites_to_sell: payload.sites_to_sell.map((s) => {
+            const base: any = {
+              site_id: s.site_id,
+              listing_type_id: s.listing_type_id,
+              logistic_type: s.logistic_type || 'remote',
+            };
+            if (s.net_proceeds) base.net_proceeds = Number(s.price);
+            else base.price = Number(s.price);
+            return base;
+          }),
+        };
+        console.log(`[Products] 旧 CBT POST /global/items/${itemId} sites_to_sell`);
+        try {
+          const postRes = await storeApiMutate(store, 'POST', itemPath, sitesBody);
+          item = postRes;
+          logUpResponse('旧 CBT 价格', postRes);
+        } catch (e: any) {
+          console.warn(`[Products] 旧 CBT POST /global/items/${itemId} 失败:`, e?.message?.slice(0, 200));
+        }
+      }
+
+      // 其他基础字段
+      if (Object.keys(itemBody).length) {
+        console.log(`[Products] 旧 CBT PUT ${itemPath} body keys=${Object.keys(itemBody).join(',')}`);
+        const putRes = await storeApiMutate(store, 'PUT', itemPath, itemBody);
+        item = putRes || item;
       }
     }
   } else {
+    // 普通站点
+    const itemBody: Record<string, any> = {};
+    if (typeof payload.title === 'string' && payload.title.trim()) itemBody.title = payload.title.trim();
+    if (picInputs.length) itemBody.pictures = picInputs.map((p) => ({ source: p.url || p.id || '' })).filter((p) => p.source);
+    if (attributes.length) itemBody.attributes = attributes;
+    if (typeof payload.available_quantity === 'string' && payload.available_quantity.trim() !== '') {
+      const q = Number(payload.available_quantity);
+      if (Number.isFinite(q) && q >= 0) itemBody.available_quantity = q;
+    }
+    if (typeof payload.price === 'string' && payload.price.trim() !== '') {
+      const priceNum = Number(payload.price);
+      if (Number.isFinite(priceNum) && priceNum > 0) itemBody.price = priceNum;
+    }
+    if (dimProvided) {
+      const dims = buildDimensions({
+        length: payload.length ?? '',
+        width: payload.width ?? '',
+        height: payload.height ?? '',
+        weight: payload.weight ?? '',
+      });
+      if (dims) itemBody.shipping = { dimensions: dims };
+    }
+
     if (Object.keys(itemBody).length) {
       item = await storeApiMutate(store, 'PUT', itemPath, itemBody);
     }
