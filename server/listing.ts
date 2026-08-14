@@ -1,9 +1,17 @@
 /**
- * M3：合规上架到美客多（POST /items）
+ * M3：合规上架到美客多（CBT 全球售：POST /global/items）
  * 合规红线：只用你自己的标题/描述/图片/品牌；绝不复制竞品销量、评论、原图。
- * 非 Full 店：shipping.mode='custom'（自选物流，不经 fulfillment）。
+ * CBT 全球售规则（来自 global-selling.mercadolibre.com 官方文档，勿猜）：
+ *  - 创建必须 POST /global/items（绝不用本地 /items，否则不符合 CBT 模型、不会复制到本地市场）。
+ *  - 图片必须传 {id}（不是 {source}）；外部/1688 图先 POST /pictures/items/upload 取 id。
+ *  - 价格按国家写在 sites_to_sell[]（USD）；不要单站点顶层 price。
+ *  - 包裹尺寸/重量用 attributes PACKAGE_HEIGHT/WIDTH/LENGTH/WEIGHT（"10 cm"/"500 g"）；
+ *    不要用 shipping.dimensions（仅本地站有效）。品牌/模型/成色用 BRAND/MODEL/ITEM_CONDITION。
+ *  - 注意：官方两份文档对「创建时 pictures 放根级 vs 放进 sites_to_sell 内部」说法矛盾，
+ *    本实现按 global-listing 主文档放根级（与 PUT /global/items 更新路径一致）；若 API 报
+ *    pictures schema 错，将其移入 sites_to_sell[].pictures 再联调。
  */
-import { getAccessToken, ML_SITES } from './mercadolibre.js';
+import { getAccessToken } from './mercadolibre.js';
 import { checkBannedWords } from './bannedWords.js';
 
 export interface ListingDraft {
@@ -46,6 +54,43 @@ export function precheckCompliance(draft: Partial<ListingDraft>): PrecheckResult
   };
 }
 
+// ===== CBT 图片 id 解析 =====
+// 把外部/1688 图片 URL 或 ML 图片 URL 解析为 CBT 可用的 picture id。
+function looksLikeMlPictureId(s: string): boolean {
+  return /^\d+-[A-Z]{2,3}\d+_[\d]{6}$/i.test(s.trim());
+}
+function extractPictureIdFromUrl(url: string): string | undefined {
+  // 形如 https://http2.mlstatic.com/D_xxxx-MLM456_112021-O.jpg → xxxx-MLM456_112021
+  const m = String(url).match(/D_[NQNP]_?([\d-]+-[A-Z]{2,3}\d+_\d{6})/i)
+    || String(url).match(/([\d-]+-[A-Z]{2,3}\d+_\d{6})/i);
+  return m ? m[1] : undefined;
+}
+async function resolvePictureId(url: string, token: string): Promise<string | undefined> {
+  const u = (url || '').trim();
+  if (!u) return undefined;
+  if (looksLikeMlPictureId(u)) return u;
+  const fromUrl = extractPictureIdFromUrl(u);
+  if (fromUrl) return fromUrl;
+  // 外部 URL：先上传到 ML 图床取 id（CBT 必须传 id）
+  try {
+    const imgResp = await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0' }, redirect: 'follow' });
+    if (!imgResp.ok) return undefined;
+    const blob = await imgResp.blob();
+    const form: any = new FormData();
+    form.append('file', blob, 'image.jpg');
+    const up = await fetch('https://api.mercadolibre.com/pictures/items/upload', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    if (!up.ok) return undefined;
+    const d = await up.json();
+    return d?.id;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function createListing(draft: ListingDraft, tokenOverride?: string): Promise<{ itemId: string; permalink: string }> {
   // 多店铺：优先用传入的店铺 token；否则回退全局 token
   const token = tokenOverride || getAccessToken();
@@ -53,35 +98,55 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
     throw new Error('未获取到卖家 write token，请先在「店铺管理」中添加并授权店铺（需含 write scope），或先在设置页完成全局授权');
   }
 
-  const siteInfo = ML_SITES[draft.site as keyof typeof ML_SITES];
-  const currency_id = draft.currency_id || siteInfo?.currency || 'MXN';
+  // 图片：CBT 必须传 {id}（外部/1688 图先上传图床取 id）
+  const picIds: string[] = [];
+  for (const u of draft.pictureUrls || []) {
+    const id = await resolvePictureId(u, token);
+    if (id) picIds.push(id);
+    else console.warn(`[Listing] 无法解析/上传图片，已跳过: ${u}`);
+  }
 
+  // attributes：品牌 / 模型 / 成色 / 包裹尺寸重量（CBT 用 PACKAGE_*，不用 shipping.dimensions）
+  const attributes: any[] = [];
+  attributes.push({ id: 'BRAND', value_name: draft.brand || 'Generic' });
+  if (draft.model) attributes.push({ id: 'MODEL', value_name: draft.model });
+  // CBT 用 ITEM_CONDITION attribute 替代旧 condition 字段（New 的 value_id 为官方值 2230284）
+  attributes.push({ id: 'ITEM_CONDITION', value_id: '2230284', value_name: 'New' });
+  const addPkg = (id: string, val: number | undefined, unit: string) => {
+    if (val != null && val > 0) attributes.push({ id, value_name: `${val} ${unit}` });
+  };
+  addPkg('PACKAGE_HEIGHT', draft.height, 'cm');
+  addPkg('PACKAGE_WIDTH', draft.width, 'cm');
+  addPkg('PACKAGE_LENGTH', draft.length, 'cm');
+  addPkg('PACKAGE_WEIGHT', draft.weight, 'g');
+
+  // CBT 创建：POST /global/items，价格按国家写在 sites_to_sell（USD）
   const payload: any = {
-    title: draft.title,
+    title: draft.title, // CBT 要求英文标题（全局）
+    currency_id: 'USD', // CBT 一律 USD
+    catalog_listing: false,
     category_id: draft.category_id,
-    price: draft.price,
-    currency_id,
     available_quantity: draft.available_quantity,
-    buying_mode: 'buy_it_now',
-    listing_type_id: draft.listing_type_id || 'bronze',
     description: { plain_text: draft.description },
-    pictures: (draft.pictureUrls || []).map((u) => ({ source: u })),
-    // 非 Full 店：自选物流
-    shipping: {
-      mode: 'custom',
-      local_pick_up: false,
-      free_shipping: false,
-      dimensions: {
-        weight: draft.weight || 0.5,
-        height: draft.height || 10,
-        width: draft.width || 10,
-        length: draft.length || 10,
+    pictures: picIds.map((id) => ({ id })),
+    attributes,
+    // 官方创建文档列为必填的保修条款（标准类目通用值，联调时按类目微调）
+    sale_terms: [
+      { id: 'WARRANTY_TYPE', value_name: 'Factory warranty' },
+      { id: 'WARRANTY_TIME', value_name: '90 days' },
+    ],
+    sites_to_sell: [
+      {
+        site_id: draft.site,
+        logistic_type: 'remote',
+        title: draft.title, // 本地站点标题（MVP 先用全局标题，后续可逐站本地化）
+        price: draft.price, // USD
+        listing_type_id: draft.listing_type_id || 'bronze',
       },
-    },
-    attributes: [{ id: 'BRAND', value_name: draft.brand || 'Generic' }],
+    ],
   };
 
-  const resp = await fetch('https://api.mercadolibre.com/items', {
+  const resp = await fetch('https://api.mercadolibre.com/global/items', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

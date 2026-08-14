@@ -76,13 +76,17 @@ async function uploadToML(buf: Buffer): Promise<string> {
   if (!token) throw new Error('未获取卖家 write token，无法上传图片（请先在「美客多商品抓取」页授权店铺）');
   const form: any = new FormData();
   form.append('file', new Blob([buf], { type: 'image/jpeg' }), 'img.jpg');
-  const r = await fetch(`https://api.mercadolibre.com/pictures?access_token=${token}`, {
+  // CBT 全球售：图片必须走 /pictures/items/upload（multipart + Bearer），返回 { id, url, secure_url }。
+  // 旧版 POST /pictures?access_token= 是本地站写法，CBT 不适用。
+  const r = await fetch(`https://api.mercadolibre.com/pictures/items/upload`, {
     method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
     body: form,
   });
   const data: any = await r.json();
   if (!r.ok) throw new Error(`上传失败 ${r.status}: ${data?.message || ''}`);
-  return data.secure_url || data.url;
+  // 返回公网 URL 供前端预览；CBT 发布时 createListing 会再解析出 picture id。
+  return data.secure_url || data.url || data.id;
 }
 
 /** 批量处理一组 1688 货源图：下载 → (AI修图/水印) → 上传美客多 → 返回公网 URL */

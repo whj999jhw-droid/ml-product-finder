@@ -1992,7 +1992,7 @@ app.post('/api/ml/listing/precheck', (req, res) => {
   }
 });
 
-// 创建 Listing（POST /items，需卖家 write token）
+// 创建 Listing（CBT 全球售：POST /global/items，需卖家 write token）
 app.post('/api/ml/listing/create', async (req, res) => {
   try {
     const storeId = req.body?.storeId as string | undefined;
