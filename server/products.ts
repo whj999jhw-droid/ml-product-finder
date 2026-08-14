@@ -425,28 +425,6 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
     throw new Error('无法获取商品详情（CBT/本地端点均失败）');
   }
 
-  // CBT 描述读取：官方要求 GET /marketplace/items/{CBT_id}/description?site_id=&logistic_type=
-  let description = '';
-  if (isCbtItem && cbtTargetSite) {
-    try {
-      const desc = await ensureStoreTokenThen(
-        store,
-        `/marketplace/items/${encodeURIComponent(root_item_id)}/description?site_id=${encodeURIComponent(cbtTargetSite)}&logistic_type=${encodeURIComponent(cbtTargetLogisticType)}`,
-      );
-      description = desc?.plain_text || desc?.text || '';
-    } catch (e: any) {
-      console.warn(`[Products] CBT 描述读取失败 ${root_item_id}/${cbtTargetSite}:`, e?.message?.slice(0, 120));
-    }
-  }
-  if (!description) {
-    try {
-      const desc = await ensureStoreTokenThen(store, `/items/${encodeURIComponent(itemId)}/description`);
-      description = desc?.plain_text || desc?.text || '';
-    } catch {
-      /* 描述接口可能限流/无权限，忽略 */
-    }
-  }
-
   // User Products 新模型标识：/marketplace/items/{CBT_id} 响应中可能直接存在，或从原始 marketplace_items 取第一个
   const rawMarketplaceItems = baseItem?.marketplace_items || [];
   const siteless_user_product_id =
@@ -552,6 +530,29 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
       );
     } else {
       console.log(`[Products] CBT marketplace_items ${itemId} 为空，按国家价格无法获取`);
+    }
+  }
+
+  // CBT 描述读取：官方要求 GET /marketplace/items/{CBT_id}/description?site_id=&logistic_type=
+  // 必须在 isCbtItem / cbtTargetSite / root_item_id 声明之后执行，避免 TDZ。
+  let description = '';
+  if (isCbtItem && cbtTargetSite) {
+    try {
+      const desc = await ensureStoreTokenThen(
+        store,
+        `/marketplace/items/${encodeURIComponent(root_item_id)}/description?site_id=${encodeURIComponent(cbtTargetSite)}&logistic_type=${encodeURIComponent(cbtTargetLogisticType)}`,
+      );
+      description = desc?.plain_text || desc?.text || '';
+    } catch (e: any) {
+      console.warn(`[Products] CBT 描述读取失败 ${root_item_id}/${cbtTargetSite}:`, e?.message?.slice(0, 120));
+    }
+  }
+  if (!description) {
+    try {
+      const desc = await ensureStoreTokenThen(store, `/items/${encodeURIComponent(itemId)}/description`);
+      description = desc?.plain_text || desc?.text || '';
+    } catch {
+      /* 描述接口可能限流/无权限，忽略 */
     }
   }
 
