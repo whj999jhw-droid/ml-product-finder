@@ -1151,7 +1151,7 @@ app.get('/api/ml/stores/:id/products/:itemId', async (req, res) => {
   }
 });
 
-// 修改商品（标题 / 图片 / 重量 / 长宽高 / 描述）
+// 修改商品（标题 / 图片 / 库存 / 尺寸重量 / 品牌模型 / 按国家价格 / 描述）
 app.put('/api/ml/stores/:id/products/:itemId', async (req, res) => {
   try {
     const store = stores.getStoreRaw(req.params.id);
@@ -1161,12 +1161,16 @@ app.put('/api/ml/stores/:id/products/:itemId', async (req, res) => {
       title: payload.title,
       pictures: payload.pictures,
       price: payload.price,
+      sites_to_sell: payload.sites_to_sell,
       weight: payload.weight,
       length: payload.length,
       width: payload.width,
       height: payload.height,
       description: payload.description,
       site_id: payload.site_id,
+      available_quantity: payload.available_quantity,
+      brand: payload.brand,
+      model: payload.model,
     });
     res.json({ success: true, ...result });
   } catch (err: any) {

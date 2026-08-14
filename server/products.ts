@@ -92,7 +92,8 @@ async function ensureStoreTokenThen(store: Store, apiPath: string): Promise<any>
 
 // ===== 尺寸 / 重量解析 =====
 // ML shipping.dimensions 官方字符串格式："高x宽x长,重量"（厘米 / 克，整数）。
-// 解析按 API 返回的顺序切分三段 + 重量，回写时保持原顺序拼接，避免语义错位。
+// 同时后台“包裹重量与尺寸”对应 attributes 里的 PACKAGE_HEIGHT/WIDTH/LENGTH/WEIGHT，
+// 优先从 attributes 读取，shipping.dimensions 作为 fallback。
 
 export function parseDimensions(dim?: string): {
   length: string;
@@ -128,6 +129,45 @@ export function buildDimensions(d: {
   const w = String(d.weight || '').trim();
   if (w) s += `,${w}`;
   return s;
+}
+
+// ===== attributes 辅助 =====
+
+function getAttrValue(item: any, id: string): string | undefined {
+  const attr = (item?.attributes || []).find(
+    (a: any) => String(a?.id || '').toUpperCase() === id.toUpperCase(),
+  );
+  if (!attr) return undefined;
+  return attr.value_name ?? attr.value_id ?? undefined;
+}
+
+function parseNumberUnit(v: any): string {
+  if (v === undefined || v === null) return '';
+  const s = String(v);
+  const m = s.match(/^([\d.]+)/);
+  return m ? m[1] : s.replace(/[^\d.]/g, '');
+}
+
+function buildAttrNumberUnit(value: string, unit: string): string | undefined {
+  const n = String(value || '').trim();
+  if (!n) return undefined;
+  return `${n} ${unit}`;
+}
+
+function looksLikeMlPictureId(s: string): boolean {
+  // e.g. 123-MLM456_112021, 679765-CBT423366854653_082021
+  return /^\d+-[A-Z]{2,3}\d+_[\d]{6}$/i.test(s);
+}
+
+function looksLikeMlPictureUrl(s: string): boolean {
+  return /^https?:\/\/.*\.mlstatic\.com\//i.test(s);
+}
+
+function extractPictureIdFromUrl(url: string): string | undefined {
+  // URL like https://http2.mlstatic.com/D_NQ_NP_123-MLM456_112021-F.jpg
+  const m = url.match(/D_NQ_NP_([\d]+-[A-Z]{2,3}\d+_[\d]+)/i);
+  if (m) return m[1];
+  return undefined;
 }
 
 // ===== 搜索：按 SKU / 标题模糊查询 =====
@@ -293,6 +333,19 @@ export async function searchStoreProducts(
 
 // ===== 详情：/items/{id} + /items/{id}/description =====
 
+export interface ProductSiteToSell {
+  site_id: string;
+  price: number;
+  currency_id?: string;
+  listing_type_id?: string;
+  logistic_type?: string;
+}
+
+export interface ProductPicture {
+  id?: string;
+  url: string;
+}
+
 export interface ProductDetail extends ProductSearchHit {
   seller_sku: string;
   description: string;
@@ -307,6 +360,15 @@ export interface ProductDetail extends ProductSearchHit {
   marketplace_items?: { site_id: string; item_id: string }[];
   // 搜索接口可能返回本地站点 item ID（如 MLM...），保存时必须用 CBT 根 ID（CBT...）
   root_item_id: string;
+  // 主要特性
+  brand?: string;
+  model?: string;
+  // 库存（后台“您的仓库库存和识别码”）
+  available_quantity: number;
+  // CBT 按国家价格（后台“按国家的价格和销售条件”）
+  sites_to_sell?: ProductSiteToSell[];
+  // 图片（带 id，CBT 更新必须用 id）
+  pictures_with_id?: ProductPicture[];
 }
 
 export async function getStoreItemDetail(store: Store, itemId: string): Promise<ProductDetail> {
@@ -319,8 +381,20 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
     /* 描述接口可能限流/无权限，忽略 */
   }
   const pictures: string[] = (item.pictures || []).map((p: any) => p.url || p.secure_url).filter(Boolean);
+  const picturesWithId: ProductPicture[] = (item.pictures || []).map((p: any) => ({
+    id: p.id,
+    url: p.url || p.secure_url || '',
+  })).filter((p: ProductPicture) => p.url || p.id);
   const thumbnail = item.thumbnail || pictures[0] || '';
-  const dims = parseDimensions(item?.shipping?.dimensions);
+  // 优先从 attributes 的 PACKAGE_* 读包裹尺寸重量；fallback 到 shipping.dimensions
+  const pkgH = parseNumberUnit(getAttrValue(item, 'PACKAGE_HEIGHT'));
+  const pkgW = parseNumberUnit(getAttrValue(item, 'PACKAGE_WIDTH'));
+  const pkgL = parseNumberUnit(getAttrValue(item, 'PACKAGE_LENGTH'));
+  const pkgWt = parseNumberUnit(getAttrValue(item, 'PACKAGE_WEIGHT'));
+  const dimsFromAttributes = pkgH || pkgW || pkgL || pkgWt;
+  const dims = dimsFromAttributes
+    ? { height: pkgH, width: pkgW, length: pkgL, weight: pkgWt }
+    : parseDimensions(item?.shipping?.dimensions);
   // CBT 更新描述需要目标市场 site_id；优先取商品字段，其次从 permalink 推断（如 ...mercadolibre.com.mx/... -> MLM）
   let site_id = item.site_id || item.original_site_id || '';
   if (!site_id && item.permalink) {
@@ -385,6 +459,17 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
     }
   }
 
+  // CBT 按国家价格与销售条件
+  const sites_to_sell: ProductSiteToSell[] | undefined = Array.isArray(item.sites_to_sell)
+    ? item.sites_to_sell.map((s: any) => ({
+        site_id: String(s.site_id || ''),
+        price: Number(s.price) || 0,
+        currency_id: s.currency_id || item.currency_id || 'USD',
+        listing_type_id: s.listing_type_id,
+        logistic_type: s.logistic_type || 'remote',
+      }))
+    : undefined;
+
   return {
     id: item.id,
     title: item.title || '',
@@ -396,6 +481,7 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
     available_quantity: Number(item.available_quantity) || 0,
     status: item.status,
     pictures,
+    pictures_with_id: picturesWithId,
     description,
     dimensions: dims,
     condition: item.condition,
@@ -406,6 +492,9 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
     localized_item_id,
     marketplace_items,
     root_item_id,
+    brand: getAttrValue(item, 'BRAND'),
+    model: getAttrValue(item, 'MODEL'),
+    sites_to_sell,
   };
 }
 
@@ -413,14 +502,18 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
 
 export interface ProductUpdatePayload {
   title?: string;
-  pictures?: string[]; // 图片 URL 列表（全量替换）
-  price?: string; // 价格（字符串，由后端转数字）
+  pictures?: string[] | { id?: string; url: string }[]; // 图片 URL 或带 id 对象（全量替换）
+  price?: string; // 已废弃：保留兼容；新逻辑使用 sites_to_sell
+  sites_to_sell?: ProductSiteToSell[]; // CBT 按国家价格
   weight?: string;
   length?: string;
   width?: string;
   height?: string;
   description?: string;
   site_id?: string; // CBT 更新描述需要目标市场站点（如 MLM）
+  available_quantity?: string; // 库存
+  brand?: string; // 主要特性 - 品牌
+  model?: string; // 主要特性 - 模型
 }
 
 export interface ProductUpdateResult {
@@ -431,11 +524,59 @@ export interface ProductUpdateResult {
 }
 
 /**
+ * 上传外部图片 URL 到美客多图片服务器，返回 picture id。
+ * 用于 CBT /global/items 更新（该端点只接受 {id}，不接受 {source}）。
+ */
+async function uploadPictureFromUrl(store: Store, url: string): Promise<string | undefined> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
+    const imgResp = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!imgResp.ok) throw new Error(`download ${imgResp.status}`);
+    const blob = await imgResp.blob();
+    const form = new FormData();
+    form.append('file', blob, 'image.jpg');
+    const token = await ensureStoreToken(store);
+    const upResp = await fetch(`${getMlApiBase()}/pictures/items/upload`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    if (!upResp.ok) {
+      const t = await upResp.text();
+      throw new Error(`upload ${upResp.status}: ${t.slice(0, 200)}`);
+    }
+    const data = await upResp.json();
+    return data.id;
+  } catch (e: any) {
+    console.warn('[Products] 上传图片失败:', url, e?.message?.slice(0, 200));
+    return undefined;
+  }
+}
+
+/**
+ * 把前端传入的图片列表标准化为 ProductPicture[]。
+ */
+function normalizePicturesInput(input?: ProductUpdatePayload['pictures']): ProductPicture[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map((p: any) => {
+      if (typeof p === 'string') return { url: p };
+      return { id: p?.id, url: p?.url || p?.source || '' };
+    })
+    .filter((p) => (p.id && String(p.id).trim()) || (p.url && String(p.url).trim()));
+}
+
+/**
  * 修改商品。
  * - 普通站点：标题/图片/尺寸走 PUT /items/{id}；描述走 PUT /items/{id}/description。
- * - CBT 全球售：所有字段（含描述）统一走 PUT /global/items/{id}，描述需额外带 site_id + logistic_type=remote。
+ * - CBT 全球售：所有字段（含描述）统一走 PUT /global/items/{id}。
  * 每个字段只在被显式提供（非空字符串）时才发送，避免误覆盖。
- * 参考：https://global-selling.mercadolibre.com/devsite/zh_cn/shang-pin-miao-shu
+ * 参考：
+ *   https://global-selling.mercadolibre.com/devsite/zh_cn/shang-pin-miao-shu
+ *   https://global-selling.mercadolibre.com/devsite/en_us/user-products-cbt/pictures
+ *   https://global-selling.mercadolibre.com/devsite/en_us/atributtes-global-selling
  */
 export async function updateStoreItem(
   store: Store,
@@ -447,56 +588,107 @@ export async function updateStoreItem(
   const itemPath = isCbt ? `/global/items/${itemId}` : `/items/${itemId}`;
 
   const itemBody: Record<string, any> = {};
+  const attributes: { id: string; value_name: string }[] = [];
 
   if (typeof payload.title === 'string' && payload.title.trim()) {
     itemBody.title = payload.title.trim();
   }
-  if (Array.isArray(payload.pictures) && payload.pictures.length) {
-    itemBody.pictures = payload.pictures
-      .map((u) => String(u || '').trim())
-      .filter(Boolean)
-      .map((u) => ({ source: u }));
+
+  // 图片：CBT /global/items 必须传 {id}；普通 /items 可传 {source}。
+  const picInputs = normalizePicturesInput(payload.pictures);
+  if (picInputs.length) {
+    if (isCbt) {
+      const picIds: string[] = [];
+      for (const pic of picInputs) {
+        let id = pic.id;
+        if (!id && pic.url) {
+          if (looksLikeMlPictureId(pic.url)) id = pic.url;
+          else if (looksLikeMlPictureUrl(pic.url)) id = extractPictureIdFromUrl(pic.url);
+        }
+        if (!id && pic.url) {
+          // 外部 URL：先上传到 ML 图床，再取 id
+          id = await uploadPictureFromUrl(store, pic.url);
+        }
+        if (id) picIds.push(id);
+        else console.warn('[Products] 无法识别/上传图片，已跳过:', pic.url);
+      }
+      if (picIds.length) itemBody.pictures = picIds.map((id) => ({ id }));
+    } else {
+      itemBody.pictures = picInputs.map((p) => ({ source: p.url || p.id || '' })).filter((p) => p.source);
+    }
   }
-  // 尺寸/重量：任一提供则整体重建 dimensions 发送
-  if (
+
+  // 尺寸/重量：优先通过 attributes 的 PACKAGE_* 更新（与后台“主要特性-包裹重量与尺寸”一致）。
+  const dimProvided =
     payload.weight !== undefined ||
     payload.length !== undefined ||
     payload.width !== undefined ||
-    payload.height !== undefined
-  ) {
+    payload.height !== undefined;
+  if (dimProvided) {
+    const h = buildAttrNumberUnit(payload.height ?? '', 'cm');
+    const w = buildAttrNumberUnit(payload.width ?? '', 'cm');
+    const l = buildAttrNumberUnit(payload.length ?? '', 'cm');
+    const wt = buildAttrNumberUnit(payload.weight ?? '', 'g');
+    if (h) attributes.push({ id: 'PACKAGE_HEIGHT', value_name: h });
+    if (w) attributes.push({ id: 'PACKAGE_WIDTH', value_name: w });
+    if (l) attributes.push({ id: 'PACKAGE_LENGTH', value_name: l });
+    if (wt) attributes.push({ id: 'PACKAGE_WEIGHT', value_name: wt });
+    // 同时保留 shipping.dimensions 作为兼容
     const dims = buildDimensions({
       length: payload.length ?? '',
       width: payload.width ?? '',
       height: payload.height ?? '',
       weight: payload.weight ?? '',
     });
-    if (dims) {
-      itemBody.shipping = { dimensions: dims };
+    if (dims) itemBody.shipping = { dimensions: dims };
+  }
+
+  // 主要特性：品牌 / 模型
+  if (typeof payload.brand === 'string' && payload.brand.trim()) {
+    attributes.push({ id: 'BRAND', value_name: payload.brand.trim() });
+  }
+  if (typeof payload.model === 'string' && payload.model.trim()) {
+    attributes.push({ id: 'MODEL', value_name: payload.model.trim() });
+  }
+
+  if (attributes.length) {
+    itemBody.attributes = attributes;
+  }
+
+  // 库存
+  if (typeof payload.available_quantity === 'string' && payload.available_quantity.trim() !== '') {
+    const q = Number(payload.available_quantity);
+    if (Number.isFinite(q) && q >= 0) {
+      itemBody.available_quantity = q;
     }
   }
 
-  // 价格：官方文档（CBT 全球售）确认 PUT /global/items/{id} 支持 price 字段。
-  // 若商品带变体，价格必须按变体设置（为每个变体设置相同价格，且必须发送全部变体 id，
-  // 漏发会被删除）；无变体则直接设顶层 price。
-  if (typeof payload.price === 'string' && payload.price.trim() !== '') {
+  // 价格：CBT 必须按国家写到 sites_to_sell；普通站点写顶层 price。
+  if (isCbt) {
+    if (Array.isArray(payload.sites_to_sell) && payload.sites_to_sell.length) {
+      // 读取当前 sites_to_sell 保持 listing_type_id/logistic_type，仅替换价格
+      let curSites: any[] = [];
+      try {
+        const cur = await ensureStoreTokenThen(store, `/items/${encodeURIComponent(itemId)}`);
+        curSites = Array.isArray(cur?.sites_to_sell) ? cur.sites_to_sell : [];
+      } catch (e: any) {
+        console.warn('[Products] 取当前商品查 sites_to_sell 失败:', e?.message?.slice(0, 120));
+      }
+      itemBody.sites_to_sell = payload.sites_to_sell.map((s) => {
+        const existing = curSites.find((c: any) => String(c.site_id) === s.site_id);
+        return {
+          site_id: s.site_id,
+          price: Number(s.price),
+          currency_id: s.currency_id || existing?.currency_id || 'USD',
+          listing_type_id: s.listing_type_id || existing?.listing_type_id,
+          logistic_type: s.logistic_type || existing?.logistic_type || 'remote',
+        };
+      });
+    }
+  } else if (typeof payload.price === 'string' && payload.price.trim() !== '') {
     const priceNum = Number(payload.price);
     if (Number.isFinite(priceNum) && priceNum > 0) {
-      if (isCbt) {
-        try {
-          const cur = await ensureStoreTokenThen(store, `/items/${encodeURIComponent(itemId)}`);
-          const variations = Array.isArray(cur?.variations) ? cur.variations : [];
-          if (variations.length) {
-            itemBody.variations = variations.map((v: any) => ({ id: v.id, price: priceNum }));
-          } else {
-            itemBody.price = priceNum;
-          }
-        } catch (e: any) {
-          console.warn('[Products] 取当前商品查变体失败，按无变体处理 price:', e?.message?.slice(0, 120));
-          itemBody.price = priceNum;
-        }
-      } else {
-        itemBody.price = priceNum;
-      }
+      itemBody.price = priceNum;
     }
   }
 
