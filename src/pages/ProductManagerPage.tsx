@@ -48,6 +48,7 @@ interface ProductSiteToSell {
   currency_id?: string;
   listing_type_id?: string;
   logistic_type?: string;
+  net_proceeds?: boolean;
 }
 
 interface ProductDetail extends ProductHit {
@@ -453,15 +454,18 @@ export function ProductManagerPage() {
               <Input value={editTitle} onChange={(v) => setEditTitle(v as string)} placeholder="商品标题" />
             </div>
 
-            {/* 价格：按国家（CBT） */}
+            {/* 价格：按国家（CBT）— 净收入（net_proceeds，USD） */}
             <div>
               <div className="text-sm font-medium mb-2 flex items-center gap-2">
-                <span>按国家的价格</span>
+                <span>按国家的净收入（USD）</span>
                 {detail?.price !== undefined && (
                   <span className="text-xs" style={{ color: 'var(--td-text-color-secondary)' }}>
                     全局参考价：{detail.currency_id || 'USD'} {detail.price}
                   </span>
                 )}
+              </div>
+              <div className="text-xs mb-2" style={{ color: 'var(--td-text-color-placeholder)' }}>
+                每个国家单独设置卖家净收入，美客多自动加运费/佣金计算公开售价。保存时按各站点定价模式（净收入/标价）分别提交。
               </div>
               {editSitesToSell.length === 0 ? (
                 <div className="text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>

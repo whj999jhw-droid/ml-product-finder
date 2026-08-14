@@ -344,6 +344,9 @@ export interface ProductSiteToSell {
   currency_id?: string;
   listing_type_id?: string;
   logistic_type?: string;
+  // 该站点是否以「净收入（net_proceeds）」定价（CBT 新定价方式，卖家设净收入，系统自动加成本算公开价）。
+  // true 时保存走 net_proceeds 字段；false 时走 price 字段。
+  net_proceeds?: boolean;
 }
 
 export interface ProductPicture {
@@ -379,19 +382,46 @@ export interface ProductDetail extends ProductSearchHit {
 export async function getStoreItemDetail(store: Store, itemId: string): Promise<ProductDetail> {
   const looksLikeCbtId = (id?: string) => /^CBT\d+$/i.test(String(id || ''));
   const isCbtId = looksLikeCbtId(itemId);
-  // CBT 全球售商品：官方读取端点是 /marketplace/items/{CBT_id}（返回 marketplace_items 等 CBT 专属字段）
-  // 旧 /items/{id} 不会返回 marketplace_items / sites_to_sell，导致按国家价格为空
+
+  // 入口 itemId 可能是 CBT 父 ID（CBT...）或子站点 ID（MCO/MLM...）。
+  // 先按形状取一次详情；若是子站点，再从 item.cbt_item_id 解析出父 ID。
   let item: any;
-  if (isCbtId) {
-    try {
-      item = await ensureStoreTokenThen(store, `/marketplace/items/${encodeURIComponent(itemId)}`);
-    } catch (e: any) {
-      console.warn(`[Products] GET /marketplace/items/${itemId} 失败，回退 /items/${itemId}:`, e?.message?.slice(0, 160));
-      item = await ensureStoreTokenThen(store, `/items/${encodeURIComponent(itemId)}`);
-    }
-  } else {
-    item = await ensureStoreTokenThen(store, `/items/${encodeURIComponent(itemId)}`);
+  try {
+    item = isCbtId
+      ? await ensureStoreTokenThen(store, `/marketplace/items/${encodeURIComponent(itemId)}`)
+      : await ensureStoreTokenThen(store, `/items/${encodeURIComponent(itemId)}`);
+  } catch (e: any) {
+    console.warn(`[Products] GET 详情失败 ${itemId}:`, e?.message?.slice(0, 160));
+    item = null;
   }
+  if (!item) {
+    // 兜底再试一次父商品端点（CBT 父 ID 用 /marketplace/items）
+    try {
+      if (!isCbtId) item = await ensureStoreTokenThen(store, `/marketplace/items/${encodeURIComponent(itemId)}`);
+    } catch { /* ignore */ }
+  }
+
+  // 解析 CBT 父商品 ID：优先 item.cbt_item_id，其次 item.id（若本身是 CBT 父 ID）
+  const cbtRootId =
+    (looksLikeCbtId(item?.cbt_item_id) ? item.cbt_item_id : undefined) ||
+    (looksLikeCbtId(item?.id) ? item.id : undefined);
+
+  // 若入口是子站点 ID，需要通过父商品才能拿到 marketplace_items（按国家价格/净收入映射）
+  let cbtItem = item;
+  if (cbtRootId && (!item?.marketplace_items || item.id !== cbtRootId)) {
+    try {
+      cbtItem = await ensureStoreTokenThen(store, `/marketplace/items/${encodeURIComponent(cbtRootId)}`);
+      console.log(`[Products] 入口为子站点 ${item?.id}，已解析父商品 ${cbtRootId} 取 marketplace_items`);
+    } catch (e: any) {
+      console.warn(`[Products] 取 CBT 父商品 ${cbtRootId} 失败:`, e?.message?.slice(0, 160));
+    }
+  }
+  // 标题/图片等以父商品为准（父商品含完整英文标题与图片）
+  const baseItem = cbtItem || item;
+  if (!baseItem) {
+    throw new Error('无法获取商品详情（CBT/本地端点均失败）');
+  }
+
   let description = '';
   try {
     const desc = await ensureStoreTokenThen(store, `/items/${itemId}/description`);
@@ -399,25 +429,25 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
   } catch {
     /* 描述接口可能限流/无权限，忽略 */
   }
-  const pictures: string[] = (item.pictures || []).map((p: any) => p.url || p.secure_url).filter(Boolean);
-  const picturesWithId: ProductPicture[] = (item.pictures || []).map((p: any) => ({
+  const pictures: string[] = (baseItem.pictures || []).map((p: any) => p.url || p.secure_url).filter(Boolean);
+  const picturesWithId: ProductPicture[] = (baseItem.pictures || []).map((p: any) => ({
     id: p.id,
     url: p.url || p.secure_url || '',
   })).filter((p: ProductPicture) => p.url || p.id);
-  const thumbnail = item.thumbnail || pictures[0] || '';
+  const thumbnail = baseItem.thumbnail || pictures[0] || '';
   // 优先从 attributes 的 PACKAGE_* 读包裹尺寸重量；fallback 到 shipping.dimensions
-  const pkgH = parseNumberUnit(getAttrValue(item, 'PACKAGE_HEIGHT'));
-  const pkgW = parseNumberUnit(getAttrValue(item, 'PACKAGE_WIDTH'));
-  const pkgL = parseNumberUnit(getAttrValue(item, 'PACKAGE_LENGTH'));
-  const pkgWt = parseNumberUnit(getAttrValue(item, 'PACKAGE_WEIGHT'));
+  const pkgH = parseNumberUnit(getAttrValue(baseItem, 'PACKAGE_HEIGHT'));
+  const pkgW = parseNumberUnit(getAttrValue(baseItem, 'PACKAGE_WIDTH'));
+  const pkgL = parseNumberUnit(getAttrValue(baseItem, 'PACKAGE_LENGTH'));
+  const pkgWt = parseNumberUnit(getAttrValue(baseItem, 'PACKAGE_WEIGHT'));
   const dimsFromAttributes = pkgH || pkgW || pkgL || pkgWt;
   const dims = dimsFromAttributes
     ? { height: pkgH, width: pkgW, length: pkgL, weight: pkgWt }
-    : parseDimensions(item?.shipping?.dimensions);
+    : parseDimensions(baseItem?.shipping?.dimensions);
   // CBT 更新描述需要目标市场 site_id；优先取商品字段，其次从 permalink 推断（如 ...mercadolibre.com.mx/... -> MLM）
-  let site_id = item.site_id || item.original_site_id || '';
-  if (!site_id && item.permalink) {
-    const m = String(item.permalink).match(/mercadolibre\.com\.([a-z]+)/i);
+  let site_id = baseItem.site_id || baseItem.original_site_id || '';
+  if (!site_id && baseItem.permalink) {
+    const m = String(baseItem.permalink).match(/mercadolibre\.com\.([a-z]+)/i);
     if (m) {
       const domainToSite: Record<string, string> = {
         ar: 'MLA', br: 'MLB', mx: 'MLM', co: 'MCO', cl: 'MLC', pe: 'MPE', uy: 'MLU', ve: 'MLV', ec: 'MEC',
@@ -426,18 +456,12 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
     }
   }
 
-  // 搜索接口（/marketplace/users/{id}/items/search）可能返回本地站点 item ID（MLM...），
-  // 但 CBT 更新必须用 global 根 ID（CBT...）。优先从返回体取 cbt_item_id，其次判断 id 前缀。
-  const root_item_id =
-    (looksLikeCbtId(item.cbt_item_id) ? item.cbt_item_id : undefined) ||
-    (looksLikeCbtId(item.id) ? item.id : undefined) ||
-    itemId;
-  if (root_item_id !== itemId && root_item_id !== item.id) {
-    console.log(`[Products] 商品 ID 映射: 请求=${itemId} 返回=${item.id} 根=${root_item_id}`);
-  }
+  // CBT 更新必须用 global 根 ID（CBT...）。优先用已解析的 cbtRootId。
+  const root_item_id = cbtRootId || itemId;
 
   // CBT 全球售：/marketplace/items/{CBT_id} 返回 marketplace_items（各站点本地 item 映射）。
-  // 通过 GET /items/{local_id} 取各本地站点的价格/币种/列表类型，拼装成 sites_to_sell 供前端展示。
+  // 通过 GET /marketplace/items/{site_item_id} 取各站点的「净收入（net_proceeds.amount）」优先，
+  // 回退公开标价 price（本地币种时折算展示）。美客多后台按国家改的正是净收入。
   // 参考：https://global-selling.mercadolibre.com/devsite/en_us/user-products-cbt/global-listing
   let localized_title: string | undefined;
   let localized_price: number | undefined;
@@ -445,9 +469,9 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
   let localized_item_id: string | undefined;
   let marketplace_items: { site_id: string; item_id: string }[] | undefined;
   let sites_from_marketplace: ProductSiteToSell[] | undefined;
-  const isCbtItem = isCbtId || item.site_id === 'CBT' || looksLikeCbtId(root_item_id);
+  const isCbtItem = isCbtId || baseItem.site_id === 'CBT' || looksLikeCbtId(root_item_id);
   if (isCbtItem) {
-    marketplace_items = (item.marketplace_items || []).map((m: any) => ({
+    marketplace_items = (baseItem.marketplace_items || []).map((m: any) => ({
       site_id: String(m.site_id || ''),
       item_id: String(m.item_id || ''),
     }));
@@ -458,29 +482,34 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
         localized_item_id = targetLocal.item_id;
         localized_site_id = targetSite;
       }
-      // 取所有站点价格
+      // 取所有站点价格（净收入优先）
       sites_from_marketplace = [];
       for (const m of marketplace_items) {
         try {
+          // 用 /marketplace/items/{site_item_id}：开启 net_proceeds 时返回 net_proceeds 节点与 net_proceeds_prices 标签
           const li = await ensureStoreTokenThen(
             store,
-            `/items/${encodeURIComponent(m.item_id)}`,
+            `/marketplace/items/${encodeURIComponent(m.item_id)}`,
           );
-          if (li?.price != null) {
-            if (m.site_id === targetSite) {
+          // 净收入（USD）：net_proceeds.amount 或直接数值
+          const np = li?.net_proceeds?.amount ?? li?.net_proceeds;
+          const priceVal = np != null ? Number(np) : (li?.price != null ? Number(li.price) : undefined);
+          if (priceVal != null) {
+            if (m.site_id === targetSite && !localized_price) {
               localized_title = li?.title;
-              localized_price = Number(li.price) || undefined;
+              localized_price = Number(priceVal);
             }
             sites_from_marketplace.push({
               site_id: m.site_id,
-              price: Number(li.price),
-              currency_id: li.currency_id || 'USD',
-              listing_type_id: li.listing_type_id,
-              logistic_type: li.shipping?.logistic_type || 'remote',
+              price: Number(priceVal),
+              currency_id: np != null ? 'USD' : (li?.currency_id || 'USD'),
+              listing_type_id: li?.listing_type_id,
+              logistic_type: li?.shipping?.logistic_type || 'remote',
+              net_proceeds: np != null,
             });
           }
         } catch (e: any) {
-          console.warn(`[Products] 取本地站点价格失败 ${m.site_id}/${m.item_id}:`, e?.message?.slice(0, 120));
+          console.warn(`[Products] 取站点价格失败 ${m.site_id}/${m.item_id}:`, e?.message?.slice(0, 120));
         }
       }
       if (!sites_from_marketplace.length) sites_from_marketplace = undefined;
@@ -492,34 +521,35 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
     }
   }
 
-  // CBT 按国家价格：/marketplace/items/{CBT_id} 不返回 sites_to_sell，需从 marketplace_items 本地 item 价格拼装
+  // CBT 按国家价格：优先用刚才从 marketplace_items 拼装的（含 net_proceeds 标记），回退父商品 sites_to_sell
   const sites_to_sell: ProductSiteToSell[] | undefined = sites_from_marketplace?.length
     ? sites_from_marketplace
-    : (Array.isArray(item.sites_to_sell) && item.sites_to_sell.length
-        ? item.sites_to_sell.map((s: any) => ({
+    : (Array.isArray(baseItem.sites_to_sell) && baseItem.sites_to_sell.length
+        ? baseItem.sites_to_sell.map((s: any) => ({
             site_id: String(s.site_id || ''),
             price: Number(s.price) || 0,
-            currency_id: s.currency_id || item.currency_id || 'USD',
+            currency_id: s.currency_id || baseItem.currency_id || 'USD',
             listing_type_id: s.listing_type_id,
             logistic_type: s.logistic_type || 'remote',
+            net_proceeds: false,
           }))
         : undefined);
 
   return {
-    id: item.id,
-    title: item.title || '',
-    seller_sku: item.seller_sku || '',
-    price: Number(item.price) || 0,
-    currency_id: item.currency_id || '',
+    id: baseItem.id,
+    title: baseItem.title || '',
+    seller_sku: baseItem.seller_sku || '',
+    price: Number(baseItem.price) || 0,
+    currency_id: baseItem.currency_id || '',
     thumbnail,
-    permalink: item.permalink || '',
-    available_quantity: Number(item.available_quantity) || 0,
-    status: item.status,
+    permalink: baseItem.permalink || '',
+    available_quantity: Number(baseItem.available_quantity) || 0,
+    status: baseItem.status,
     pictures,
     pictures_with_id: picturesWithId,
     description,
     dimensions: dims,
-    condition: item.condition,
+    condition: baseItem.condition,
     site_id,
     localized_title,
     localized_price,
@@ -527,8 +557,8 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
     localized_item_id,
     marketplace_items,
     root_item_id,
-    brand: getAttrValue(item, 'BRAND'),
-    model: getAttrValue(item, 'MODEL'),
+    brand: getAttrValue(baseItem, 'BRAND'),
+    model: getAttrValue(baseItem, 'MODEL'),
     sites_to_sell,
   };
 }
@@ -711,13 +741,20 @@ export async function updateStoreItem(
       }
       itemBody.sites_to_sell = payload.sites_to_sell.map((s) => {
         const existing = curSites.find((c: any) => String(c.site_id) === s.site_id);
-        return {
+        const base: any = {
           site_id: s.site_id,
-          price: Number(s.price),
-          currency_id: s.currency_id || existing?.currency_id || 'USD',
           listing_type_id: s.listing_type_id || existing?.listing_type_id,
           logistic_type: s.logistic_type || existing?.logistic_type || 'remote',
         };
+        if (s.net_proceeds) {
+          // net_proceeds 模式（卖家设净收入，系统自动加成本算公开价）：只发 net_proceeds，不发 price
+          base.net_proceeds = Number(s.price);
+          base.currency_id = s.currency_id || existing?.currency_id || 'USD';
+        } else {
+          base.price = Number(s.price);
+          base.currency_id = s.currency_id || existing?.currency_id || 'USD';
+        }
+        return base;
       });
     }
   } else if (typeof payload.price === 'string' && payload.price.trim() !== '') {
