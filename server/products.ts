@@ -219,12 +219,17 @@ function itemToHit(item: any, matchType: 'title' | 'sku'): ProductSearchHit {
  * multiget 返回格式歧义（其返回 [{ code:200, body:{...} }] 且 code 为数字）。
  */
 async function fetchItemDetail(itemId: string, store: Store): Promise<any | null> {
+  const looksLikeCbtId = (id?: string) => /^CBT\d+$/i.test(String(id || ''));
   try {
-    const item = await ensureStoreTokenThen(store, `/items/${encodeURIComponent(itemId)}`);
-    console.log(`[Products] GET /items/${itemId} => id=${item?.id} sku=${item?.seller_sku || extractSku(item) || '(empty)'}`);
+    // CBT 全球售商品：官方读取端点是 /marketplace/items/{CBT_id}（返回 marketplace_items 等 CBT 专属字段）
+    const path = looksLikeCbtId(itemId)
+      ? `/marketplace/items/${encodeURIComponent(itemId)}`
+      : `/items/${encodeURIComponent(itemId)}`;
+    const item = await ensureStoreTokenThen(store, path);
+    console.log(`[Products] GET ${path} => id=${item?.id} sku=${item?.seller_sku || extractSku(item) || '(empty)'}`);
     return item;
   } catch (e: any) {
-    console.warn(`[Products] GET /items/${itemId} 失败:`, e?.message?.slice(0, 160));
+    console.warn(`[Products] GET 详情失败 ${itemId}:`, e?.message?.slice(0, 160));
     return null;
   }
 }
@@ -372,7 +377,21 @@ export interface ProductDetail extends ProductSearchHit {
 }
 
 export async function getStoreItemDetail(store: Store, itemId: string): Promise<ProductDetail> {
-  const item = await ensureStoreTokenThen(store, `/items/${itemId}`);
+  const looksLikeCbtId = (id?: string) => /^CBT\d+$/i.test(String(id || ''));
+  const isCbtId = looksLikeCbtId(itemId);
+  // CBT 全球售商品：官方读取端点是 /marketplace/items/{CBT_id}（返回 marketplace_items 等 CBT 专属字段）
+  // 旧 /items/{id} 不会返回 marketplace_items / sites_to_sell，导致按国家价格为空
+  let item: any;
+  if (isCbtId) {
+    try {
+      item = await ensureStoreTokenThen(store, `/marketplace/items/${encodeURIComponent(itemId)}`);
+    } catch (e: any) {
+      console.warn(`[Products] GET /marketplace/items/${itemId} 失败，回退 /items/${itemId}:`, e?.message?.slice(0, 160));
+      item = await ensureStoreTokenThen(store, `/items/${encodeURIComponent(itemId)}`);
+    }
+  } else {
+    item = await ensureStoreTokenThen(store, `/items/${encodeURIComponent(itemId)}`);
+  }
   let description = '';
   try {
     const desc = await ensureStoreTokenThen(store, `/items/${itemId}/description`);
@@ -409,7 +428,6 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
 
   // 搜索接口（/marketplace/users/{id}/items/search）可能返回本地站点 item ID（MLM...），
   // 但 CBT 更新必须用 global 根 ID（CBT...）。优先从返回体取 cbt_item_id，其次判断 id 前缀。
-  const looksLikeCbtId = (id?: string) => /^CBT\d+$/i.test(String(id || ''));
   const root_item_id =
     (looksLikeCbtId(item.cbt_item_id) ? item.cbt_item_id : undefined) ||
     (looksLikeCbtId(item.id) ? item.id : undefined) ||
@@ -418,57 +436,74 @@ export async function getStoreItemDetail(store: Store, itemId: string): Promise<
     console.log(`[Products] 商品 ID 映射: 请求=${itemId} 返回=${item.id} 根=${root_item_id}`);
   }
 
-  // CBT 全球售：通过 /items/{id}/marketplace_items 获取各站点本地 item 映射，
-  // 再 GET /items/{local_id} 取本地站点的标题/价格（和美客多后台一致）。
-  // 参考：https://global-selling.mercadolibre.com/devsite/items-and-searches-global-selling
+  // CBT 全球售：/marketplace/items/{CBT_id} 返回 marketplace_items（各站点本地 item 映射）。
+  // 通过 GET /items/{local_id} 取各本地站点的价格/币种/列表类型，拼装成 sites_to_sell 供前端展示。
+  // 参考：https://global-selling.mercadolibre.com/devsite/en_us/user-products-cbt/global-listing
   let localized_title: string | undefined;
   let localized_price: number | undefined;
   let localized_site_id: string | undefined;
   let localized_item_id: string | undefined;
   let marketplace_items: { site_id: string; item_id: string }[] | undefined;
-  const storeSite = (store.site || '').toUpperCase();
-  if (storeSite === 'CBT' || item.site_id === 'CBT' || looksLikeCbtId(root_item_id)) {
-    try {
-      const mapping = await ensureStoreTokenThen(
-        store,
-        `/items/${encodeURIComponent(itemId)}/marketplace_items`,
-      );
-      marketplace_items = (mapping?.marketplace_items || []).map((m: any) => ({
-        site_id: String(m.site_id || ''),
-        item_id: String(m.item_id || ''),
-      }));
+  let sites_from_marketplace: ProductSiteToSell[] | undefined;
+  const isCbtItem = isCbtId || item.site_id === 'CBT' || looksLikeCbtId(root_item_id);
+  if (isCbtItem) {
+    marketplace_items = (item.marketplace_items || []).map((m: any) => ({
+      site_id: String(m.site_id || ''),
+      item_id: String(m.item_id || ''),
+    }));
+    if (marketplace_items.length) {
       const targetSite = site_id || 'MLM';
-      const local = marketplace_items.find((m) => m.site_id === targetSite);
-      if (local?.item_id) {
-        localized_item_id = local.item_id;
+      const targetLocal = marketplace_items.find((m) => m.site_id === targetSite);
+      if (targetLocal?.item_id) {
+        localized_item_id = targetLocal.item_id;
         localized_site_id = targetSite;
-        const localItem = await ensureStoreTokenThen(
-          store,
-          `/items/${encodeURIComponent(local.item_id)}`,
-        );
-        localized_title = localItem?.title;
-        localized_price = Number(localItem?.price) || undefined;
-        console.log(
-          `[Products] CBT 本地站点映射 ${itemId} -> ${local.item_id} title=${localized_title || '(empty)'} price=${localized_price || '(empty)'}`,
-        );
-      } else {
-        console.log(`[Products] CBT 本地站点映射 ${itemId} 未找到 ${targetSite}: ${JSON.stringify(marketplace_items)}`);
       }
-    } catch (e: any) {
-      console.warn(`[Products] 获取 CBT 本地站点映射失败 ${itemId}:`, e?.message?.slice(0, 160));
+      // 取所有站点价格
+      sites_from_marketplace = [];
+      for (const m of marketplace_items) {
+        try {
+          const li = await ensureStoreTokenThen(
+            store,
+            `/items/${encodeURIComponent(m.item_id)}`,
+          );
+          if (li?.price != null) {
+            if (m.site_id === targetSite) {
+              localized_title = li?.title;
+              localized_price = Number(li.price) || undefined;
+            }
+            sites_from_marketplace.push({
+              site_id: m.site_id,
+              price: Number(li.price),
+              currency_id: li.currency_id || 'USD',
+              listing_type_id: li.listing_type_id,
+              logistic_type: li.shipping?.logistic_type || 'remote',
+            });
+          }
+        } catch (e: any) {
+          console.warn(`[Products] 取本地站点价格失败 ${m.site_id}/${m.item_id}:`, e?.message?.slice(0, 120));
+        }
+      }
+      if (!sites_from_marketplace.length) sites_from_marketplace = undefined;
+      console.log(
+        `[Products] CBT marketplace_items ${itemId} => ${marketplace_items.map((m) => `${m.site_id}:${m.item_id}`).join(', ')}; 价格条数=${sites_from_marketplace?.length || 0}`,
+      );
+    } else {
+      console.log(`[Products] CBT marketplace_items ${itemId} 为空，按国家价格无法获取`);
     }
   }
 
-  // CBT 按国家价格与销售条件
-  const sites_to_sell: ProductSiteToSell[] | undefined = Array.isArray(item.sites_to_sell)
-    ? item.sites_to_sell.map((s: any) => ({
-        site_id: String(s.site_id || ''),
-        price: Number(s.price) || 0,
-        currency_id: s.currency_id || item.currency_id || 'USD',
-        listing_type_id: s.listing_type_id,
-        logistic_type: s.logistic_type || 'remote',
-      }))
-    : undefined;
+  // CBT 按国家价格：/marketplace/items/{CBT_id} 不返回 sites_to_sell，需从 marketplace_items 本地 item 价格拼装
+  const sites_to_sell: ProductSiteToSell[] | undefined = sites_from_marketplace?.length
+    ? sites_from_marketplace
+    : (Array.isArray(item.sites_to_sell) && item.sites_to_sell.length
+        ? item.sites_to_sell.map((s: any) => ({
+            site_id: String(s.site_id || ''),
+            price: Number(s.price) || 0,
+            currency_id: s.currency_id || item.currency_id || 'USD',
+            listing_type_id: s.listing_type_id,
+            logistic_type: s.logistic_type || 'remote',
+          }))
+        : undefined);
 
   return {
     id: item.id,
@@ -704,10 +739,30 @@ export async function updateStoreItem(
       itemBody.logistic_type = 'remote';
       itemBody.description = { plain_text: payload.description };
     }
+
+    // 官方文档（global-listing）指定：更新/新增市场销售条件用 POST /global/items/{CBT_id} + sites_to_sell
+    // 商品基础信息（标题、图片、属性、库存等）仍走 PUT /global/items/{CBT_id}
+    const sitesBody = Array.isArray(itemBody.sites_to_sell) && itemBody.sites_to_sell.length
+      ? { sites_to_sell: itemBody.sites_to_sell }
+      : undefined;
+    if (sitesBody) {
+      console.log(`[Products] CBT POST /global/items/${itemId} sites_to_sell`);
+      try {
+        const postRes = await storeApiMutate(store, 'POST', itemPath, sitesBody);
+        item = postRes;
+        descriptionResult = postRes;
+      } catch (e: any) {
+        console.warn(`[Products] CBT POST /global/items/${itemId} sites_to_sell 失败:`, e?.message?.slice(0, 200));
+      }
+      delete itemBody.sites_to_sell;
+    }
+
     if (Object.keys(itemBody).length) {
       console.log(`[Products] CBT PUT ${itemPath} body keys=${Object.keys(itemBody).join(',')}`);
-      item = await storeApiMutate(store, 'PUT', itemPath, itemBody);
-      descriptionResult = item;
+      const putRes = await storeApiMutate(store, 'PUT', itemPath, itemBody);
+      // 优先使用 PUT 返回的完整 item；保留 POST 可能已返回的对象
+      item = putRes || item;
+      descriptionResult = putRes || descriptionResult;
       // 价格自动化开启时，price 可能被忽略（返回 200 + warning）
       const warns: any[] = item?.warnings || item?.cause || [];
       const priceWarn = warns.find((w) =>
