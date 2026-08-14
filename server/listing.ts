@@ -25,10 +25,14 @@ export interface ListingDraft {
   description: string;
   pictureUrls: string[]; // 公网可访问的图片 URL（必须是你自有/已授权的图）
   brand: string; // 你的品牌或 Generic
+  model?: string; // 模型（可选，对应 MODEL attribute）
   weight?: number;
   height?: number;
   width?: number;
   length?: number;
+  // 保修（sale_terms）一般可选：仅在调用方显式提供时才发送，默认不强制填写
+  warrantyType?: string; // 如 'Factory warranty' / 'No warranty'
+  warrantyTime?: string; // 如 '90 days' / '1 year'
   listing_type_id?: string; // gold_pro / silver / bronze
 }
 
@@ -121,6 +125,11 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
   addPkg('PACKAGE_WEIGHT', draft.weight, 'g');
 
   // CBT 创建：POST /global/items，价格按国家写在 sites_to_sell（USD）
+  // 保修（sale_terms）一般可选：仅当调用方提供保修信息时才发送，避免对不需要保修的类目强制填值
+  const saleTerms: any[] = [];
+  if (draft.warrantyType) saleTerms.push({ id: 'WARRANTY_TYPE', value_name: draft.warrantyType });
+  if (draft.warrantyTime) saleTerms.push({ id: 'WARRANTY_TIME', value_name: draft.warrantyTime });
+
   const payload: any = {
     title: draft.title, // CBT 要求英文标题（全局）
     currency_id: 'USD', // CBT 一律 USD
@@ -130,11 +139,8 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
     description: { plain_text: draft.description },
     pictures: picIds.map((id) => ({ id })),
     attributes,
-    // 官方创建文档列为必填的保修条款（标准类目通用值，联调时按类目微调）
-    sale_terms: [
-      { id: 'WARRANTY_TYPE', value_name: 'Factory warranty' },
-      { id: 'WARRANTY_TIME', value_name: '90 days' },
-    ],
+    // 仅在有保修信息时发送 sale_terms（保修在 CBT 一般可选）
+    ...(saleTerms.length ? { sale_terms: saleTerms } : {}),
     sites_to_sell: [
       {
         site_id: draft.site,
