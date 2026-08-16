@@ -8,6 +8,7 @@ import {
   InputNumber,
   NotificationPlugin,
 } from 'tdesign-react';
+import { FeatureIntro } from '../components/FeatureIntro';
 
 interface SourceProduct {
   site: string;
@@ -164,13 +165,25 @@ export function ListingPage() {
   return (
     <div className="flex-1 overflow-y-auto p-6">
       <div className="max-w-5xl mx-auto space-y-6">
-        <div>
-          <h1 className="text-xl font-semibold">合规上架（M3）</h1>
-          <p className="text-sm mt-1" style={{ color: 'var(--td-text-color-secondary)' }}>
-            基于 M1 爆款自建 Listing：<b>标题/描述/图片/品牌必须由你自行撰写</b>，禁止复制竞品销量、评论、原图。
-            上架用卖家 write token，非 Full 店走 <code>shipping.mode=custom</code>。
-          </p>
-        </div>
+        <FeatureIntro
+          title="合规上架（M3）"
+          summary="基于 M1 爆款自建 Listing，红线与操作步骤"
+          defaultOpen={false}
+        >
+          <p>本页用于把「美客多商品抓取（M1）」导出的爆款，做成<strong>你自己的</strong> Listing 上架。核心原则：</p>
+          <ul className="list-disc pl-5 space-y-1">
+            <li><b>内容必须自建</b>：标题、描述、图片、品牌均需自行撰写 / 自有或已授权，<b style={{ color: '#E34D59' }}>严禁复制竞品的销量、评论、原图</b>。</li>
+            <li><b>图片红线</b>：不可使用从美客多抓到的竞品原图（版权风险），请填入你自有或已授权的图床 URL。</li>
+            <li><b>上架凭证</b>：使用卖家 write token；非 Full 官方仓店铺走 <code>shipping.mode=custom</code>。</li>
+          </ul>
+          <p className="pt-1 font-medium" style={{ color: 'var(--td-text-color-primary)' }}>操作流程</p>
+          <ol className="list-decimal pl-5 space-y-1">
+            <li>从「M1 导出」选择爆款作分类 / 定价参考（仅参考，内容仍需自建）。</li>
+            <li>在「编辑草稿」填写标题 / 描述 / 图片 / 规格 / 价格 / 库存。</li>
+            <li>点「运行合规预检」，通过后点「确认上架」。</li>
+          </ol>
+          <p className="pt-1" style={{ color: 'var(--td-text-color-placeholder)' }}>⚠️ 上架会真实写入店铺（不可逆），建议先小批量灰度。</p>
+        </FeatureIntro>
 
         <Card title="1. 选择源爆款（仅取分类/定价参考，内容须自建）" bordered>
           <Select

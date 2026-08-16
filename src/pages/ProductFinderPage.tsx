@@ -16,6 +16,8 @@ import {
   DeleteIcon,
 } from 'tdesign-icons-react';
 import { ShoppingBag } from 'lucide-react';
+import { FeatureIntro } from '../components/FeatureIntro';
+import { Collapsible } from '../components/Collapsible';
 import { ProductTable, type ProductItem } from '../components/ProductTable';
 
 // 进度消息类型
@@ -833,25 +835,29 @@ export function ProductFinderPage() {
       : 0;
 
   return (
-    <div className="flex-1 overflow-y-auto p-6">
-      <div className="max-w-6xl mx-auto space-y-6">
-        {/* 标题 */}
-        <div className="flex items-center gap-3 mb-2">
-          <div
-            className="w-10 h-10 rounded-xl flex items-center justify-center"
-            style={{ backgroundColor: 'var(--td-brand-color)' }}
-          >
-            <ShoppingBag size={20} color="white" />
-          </div>
-          <div>
-            <h2 className="text-xl font-bold" style={{ color: 'var(--td-text-color-primary)' }}>
-              美客多商品抓取
-            </h2>
-            <p className="text-sm" style={{ color: 'var(--td-text-color-secondary)' }}>
-              每日获取墨西哥/巴西/智利/哥伦比亚各品类销量前100、单价≤设定上限的商品
-            </p>
-          </div>
-        </div>
+    <div className="flex-1 overflow-y-auto p-4">
+      <div className="max-w-6xl mx-auto space-y-4">
+        <FeatureIntro
+          title="美客多商品抓取"
+          summary="每日抓取墨/巴/智/哥各品类销量前100、单价≤上限的商品"
+          defaultOpen={false}
+        >
+          <p>本页用于按站点、分类抓取美客多（Mercado Libre）各品类<strong>销量前 100</strong>的商品，导出 Excel / 妙手素材包，供「货源与利润（M2）」「合规上架（M3）」使用。</p>
+          <ul className="list-disc pl-5 space-y-1">
+            <li><b>认证</b>：推荐「获取应用 Token」（Client Credentials，无需公网隧道）；失败再用「OAuth 授权获取 Token」（需公网隧道回调）。Token 有效期约 6 小时，可一键刷新。</li>
+            <li><b>抓取模式</b>：后端 Node 从中国<b>直连</b> ML 接口（免 VPN）；留空代理每类目约 20 条，填入<strong>地理匹配</strong>的住宅代理后走 /search 翻页（每类目最多约 2000 条）。</li>
+            <li><b>筛选</b>：按价格上限、排除 ML Full / 本土卖家、仅全新、展开子分类扩量等条件过滤。</li>
+            <li><b>断点续传</b>：抓取中断后可「继续上次抓取」，无需从头开始。</li>
+            <li><b>导出</b>：生成 xlsx 明细与可选「妙手素材包」ZIP；配置邮箱后可自动发送，配置定时任务可每日自动运行。</li>
+          </ul>
+          <p className="pt-1 font-medium" style={{ color: 'var(--td-text-color-primary)' }}>快速开始</p>
+          <ol className="list-decimal pl-5 space-y-1">
+            <li>填 App ID / Secret Key → 保存配置 → 获取应用 Token。</li>
+            <li>在「抓取配置」勾选站点、设价格上限与筛选条件。</li>
+            <li>点「开始抓取（后端直连·免 VPN）」。</li>
+          </ol>
+          <p className="pt-1" style={{ color: 'var(--td-text-color-placeholder)' }}>※ 美客多 API 有速率限制，完整抓取可能需数分钟，请耐心等待。</p>
+        </FeatureIntro>
 
         {/* API 认证配置 */}
         <Card title="API 认证配置" bordered>
@@ -879,18 +885,6 @@ export function ProductFinderPage() {
                     {oauthConfig.tokenExpired
                       ? 'Token 已过期'
                       : `过期时间: ${new Date(oauthConfig.tokenExpiry).toLocaleString('zh-CN')}`}
-                    {oauthConfig.hasRefreshToken && (
-                      <Button
-                        size="small"
-                        variant="text"
-                        theme="primary"
-                        onClick={handleRefreshToken}
-                        loading={oauthRefreshing}
-                        style={{ marginLeft: '8px', padding: '0 4px' }}
-                      >
-                        刷新 Token
-                      </Button>
-                    )}
                   </div>
                 )}
                 {tokenValid !== null && (
@@ -1126,27 +1120,6 @@ export function ProductFinderPage() {
               </div>
             </details>
 
-            {/* 后端直连说明（无需代理 / VPN） */}
-            <div className="text-xs p-3 rounded-lg flex items-start gap-2" style={{ backgroundColor: 'rgba(103, 194, 58, 0.06)', color: 'var(--td-text-color-secondary)' }}>
-              <CheckCircleIcon size={16} style={{ color: '#67c23a', marginTop: 1 }} />
-              <div>
-                <p className="font-medium mb-1" style={{ color: '#67c23a' }}>后端直连模式（免 VPN）</p>
-                <p>后端 Node 进程从中国直连 ML 的 <code style={{ color: 'var(--td-brand-color)' }}>/highlights</code> 与 <code style={{ color: 'var(--td-brand-color)' }}>/products</code> 接口抓取（无需 VPN、无需任何代理）。若填入<strong>住宅代理</strong>，则自动改走 <code style={{ color: 'var(--td-brand-color)' }}>/search</code> 翻页拉取更多数据。下方按需求设置筛选条件即可。</p>
-              </div>
-            </div>
-
-            {/* 帮助说明 */}
-            <div className="text-xs p-3 rounded-lg" style={{ backgroundColor: 'var(--td-bg-color-component)', color: 'var(--td-text-color-secondary)' }}>
-              <p className="font-medium mb-1" style={{ color: 'var(--td-text-color-primary)' }}>快速开始:</p>
-              <p>1. 访问 <a href="https://developers.mercadolibre.com.mx/devcenter/" target="_blank" rel="noopener" style={{ color: 'var(--td-brand-color)' }}>developers.mercadolibre.com.mx</a> 登录并创建应用，获取 <strong>App ID</strong> 和 <strong>Secret Key</strong></p>
-              <p>2. 将 App ID 和 Secret Key 填入上方输入框 → 点击「保存配置」</p>
-              <p>3. 点击「获取应用 Token」（推荐，无需公网隧道和用户授权）</p>
-              <p>4. 如果步骤3失败，点击「OAuth 授权获取 Token」→ 启动公网隧道 → 前往美客多授权</p>
-              <p>5. 在「抓取配置」中勾选站点、设置价格上限与筛选条件</p>
-              <p>6. 点击「开始抓取（后端直连·免 VPN）」即可，无需任何代理</p>
-              <p className="mt-1" style={{ color: 'var(--td-text-color-placeholder)' }}>※ Token 有效期约 6 小时，过期后可点击「刷新 Token」一键续期</p>
-              <p className="mt-1" style={{ color: 'var(--td-text-color-placeholder)' }}>※ 后端直接从中国直连 ML 接口抓取，无需 VPN、无需代理</p>
-            </div>
           </div>
         </Card>
 
@@ -1159,54 +1132,26 @@ export function ProductFinderPage() {
                 目标站点
               </span>
               <div className="flex gap-3 flex-wrap">
-                <Checkbox
-                  checked={selectedSites.includes('MLM')}
-                  onChange={(val) => {
-                    if (val) {
-                      setSelectedSites([...selectedSites, 'MLM']);
-                    } else {
-                      setSelectedSites(selectedSites.filter(s => s !== 'MLM'));
-                    }
-                  }}
-                >
-                  墨西哥 (MLM)
-                </Checkbox>
-                <Checkbox
-                  checked={selectedSites.includes('MLB')}
-                  onChange={(val) => {
-                    if (val) {
-                      setSelectedSites([...selectedSites, 'MLB']);
-                    } else {
-                      setSelectedSites(selectedSites.filter(s => s !== 'MLB'));
-                    }
-                  }}
-                >
-                  巴西 (MLB)
-                </Checkbox>
-                <Checkbox
-                  checked={selectedSites.includes('MLC')}
-                  onChange={(val) => {
-                    if (val) {
-                      setSelectedSites([...selectedSites, 'MLC']);
-                    } else {
-                      setSelectedSites(selectedSites.filter(s => s !== 'MLC'));
-                    }
-                  }}
-                >
-                  智利 (MLC)
-                </Checkbox>
-                <Checkbox
-                  checked={selectedSites.includes('MCO')}
-                  onChange={(val) => {
-                    if (val) {
-                      setSelectedSites([...selectedSites, 'MCO']);
-                    } else {
-                      setSelectedSites(selectedSites.filter(s => s !== 'MCO'));
-                    }
-                  }}
-                >
-                  哥伦比亚 (MCO)
-                </Checkbox>
+                {[
+                  { value: 'MLM', label: '墨西哥 (MLM)' },
+                  { value: 'MLB', label: '巴西 (MLB)' },
+                  { value: 'MLC', label: '智利 (MLC)' },
+                  { value: 'MCO', label: '哥伦比亚 (MCO)' },
+                ].map((opt) => (
+                  <Checkbox
+                    key={opt.value}
+                    checked={selectedSites.includes(opt.value)}
+                    onChange={(val) => {
+                      if (val) {
+                        setSelectedSites([...selectedSites, opt.value]);
+                      } else {
+                        setSelectedSites(selectedSites.filter((s) => s !== opt.value));
+                      }
+                    }}
+                  >
+                    {opt.label}
+                  </Checkbox>
+                ))}
               </div>
             </div>
 
@@ -1354,14 +1299,14 @@ export function ProductFinderPage() {
             </Button>
           </div>
 
-          {/* 抓取模式说明 */}
-          <div className="mt-3 p-3 rounded-lg text-xs" style={{ backgroundColor: 'rgba(59, 130, 246, 0.08)', color: 'var(--td-text-color-secondary)' }}>
-            <p className="font-medium mb-1" style={{ color: '#67c23a' }}>✓ 后端直连模式（免 VPN）</p>
-            <p>后端 Node 进程从中国直连 ML 的 highlights/products 接口抓取（无需 VPN、无需任何代理）；若填入住宅代理，则自动改走 /search 翻页拉取更多数据。抓取完成后自动导出 Excel 文件。如已配置邮箱，结果会自动发送到你的邮箱。</p>
-          </div>
         </Card>
 
-        {/* 住宅代理（可选·解锁更多数据） */}
+        <Collapsible
+          title={<span className="text-sm font-semibold">高级选项（代理 / 邮件通知 / 定时任务）</span>}
+          defaultOpen={false}
+          right={<span className="text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>非常规改动可折叠收起</span>}
+        >
+          {/* 住宅代理（可选·解锁更多数据） */}
         <Card title="住宅代理（可选·解锁更多数据）" bordered>
           <div className="space-y-3">
             <div className="text-xs" style={{ color: 'var(--td-text-color-secondary)' }}>
@@ -1497,6 +1442,8 @@ export function ProductFinderPage() {
             </div>
           </div>
         </Card>
+
+        </Collapsible>
 
         {/* 进度区域 */}
         {(isFetching || progress || result) && (
@@ -1712,19 +1659,6 @@ export function ProductFinderPage() {
           )}
         </Card>
 
-        {/* 使用说明 */}
-        <Card title="使用说明" bordered>
-          <div className="space-y-2 text-sm" style={{ color: 'var(--td-text-color-secondary)' }}>
-            <p>1. 选择目标站点（墨西哥 MLM / 巴西 MLB / 智利 MLC / 哥伦比亚 MCO），可多选</p>
-            <p>2. 设置价格上限、筛选条件（排除 ML Full / 本土、仅全新、展开子分类扩量）</p>
-            <p>3. 点击"开始抓取"按钮，系统将自动获取各分类销量前100的商品并导出 Excel</p>
-            <p>4. 配置邮箱后可自动将结果 xlsx 发送至你的邮箱；配置定时任务可每日自动运行</p>
-            <p>5. 可在"已导出文件"列表中下载历史文件</p>
-            <p className="pt-2" style={{ color: 'var(--td-text-color-placeholder)' }}>
-              ※ 注意：美客多 API 有速率限制，完整抓取可能需要数分钟。后端直连模式无需 VPN。
-            </p>
-          </div>
-        </Card>
       </div>
     </div>
   );

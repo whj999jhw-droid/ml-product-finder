@@ -15,6 +15,7 @@ import {
   MessagePlugin,
 } from 'tdesign-react';
 import type { PrimaryTableCol } from 'tdesign-react';
+import { FeatureIntro } from '../components/FeatureIntro';
 
 interface SourcingRow {
   site: string;
@@ -1021,16 +1022,11 @@ export function SourcingPage() {
   ];
 
   return (
-    <div className="flex-1 overflow-y-auto p-6">
-      <div className="max-w-7xl mx-auto space-y-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-semibold">货源匹配 &amp; 利润测算（M2）</h1>
-            <p className="text-sm mt-1" style={{ color: 'var(--td-text-color-secondary)' }}>
-              基于 M1 导出的爆款，填入 1688 货源价即可实时测算净利润 / ROI，标记「可跟卖」清单。
-              <span style={{ color: 'var(--td-text-color-placeholder)' }}>合规：只用你自己的标题/图片/定价，不复制竞品销量、评论、原图。</span>
-            </p>
-          </div>
+    <div className="flex-1 overflow-y-auto p-4">
+      <div className="max-w-7xl mx-auto space-y-4">
+        {/* 页头：标题 + 操作按钮 */}
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <h1 className="text-xl font-semibold">货源匹配 &amp; 利润测算（M2）</h1>
           <div className="flex gap-2 flex-wrap">
             <Button theme="primary" onClick={loadLatest} loading={loading}>刷新数据</Button>
             <Button theme="success" onClick={handleFullCalc} loading={fullCalcing}>
@@ -1058,6 +1054,24 @@ export function SourcingPage() {
               一键上架
             </Button>
           </div>
+        </div>
+
+        {/* 功能说明（默认折叠） */}
+        <FeatureIntro title="功能说明与使用步骤" summary="M2 是做什么的、怎么算利润、合规红线" defaultOpen={false}>
+          <p>本页（M2）承接「美客多商品抓取（M1）」导出的爆款清单：填入 1688 货源价，系统实时测算 <strong>净利润 / ROI</strong>，自动标记「可跟卖」清单，并可一键生成标题/描述/配图后上架。</p>
+          <ul className="list-disc pl-5 space-y-1">
+            <li><b>利润测算</b>：综合考虑 ML 佣金、回款手续费、物流（体积重）与税务模式（跨境直邮 0% / CBT 有 RFC 16% / CBT 无 RFC 36% / 本土店 10.5%）。</li>
+            <li><b>货源</b>：通过 1688 搜款找同款；配图只用 1688 供货商图并加水印做成你自己的图，<b style={{ color: '#E34D59' }}>绝不使用从美客多抓到的竞品图</b>。</li>
+            <li><b>合规</b>：标题/描述/定价均用你自己的内容，不复制竞品销量、评论、原图。</li>
+            <li><b>一键上架</b>：需先在「店铺管理」授权卖家 write token 店铺（见下方提示）。</li>
+          </ul>
+          <p className="pt-1 font-medium" style={{ color: 'var(--td-text-color-primary)' }}>常用操作</p>
+          <ul className="list-disc pl-5 space-y-1">
+            <li>填好货源价后点「完整测算」得到含税费/物流的净利润与 ROI。</li>
+            <li>点「自动筛选（3层）」按 ROI 阈值标记可跟卖清单。</li>
+            <li>点「一键全自动」自动生成标题+描述+配图，再「一键上架」发布。</li>
+          </ul>
+        </FeatureIntro>
 
         {/* 多店铺授权提示（一键上架需要所选店铺的 write token） */}
         {authorizedStores.length === 0 ? (
@@ -1077,7 +1091,6 @@ export function SourcingPage() {
             ✅ 已授权 {authorizedStores.length} 个店铺，上架时选择目标店铺即可一键发布。
           </div>
         )}
-        </div>
 
         <Card title={`ML 热搜词 · ${currentSite}`} bordered>
           <div className="flex flex-wrap gap-2 items-center min-h-[32px]">
