@@ -313,5 +313,23 @@ export function setOrderSyncState(
   `).run({ storeId, ...merged, updated_at: now });
 }
 
+/**
+ * 供移动端「离线补推」端点：返回 source='sync'（后台定时同步新增）的订单。
+ * sinceIso 为空时返回全部 sync 订单；否则只返回 created_at 晚于 sinceIso 的（ISO 字符串可直接字典序比较）。
+ */
+export function getSyncOrdersSince(sinceIso: string | null): any[] {
+  if (!db) return [];
+  const rows = sinceIso
+    ? db
+        .prepare(
+          "SELECT store_id, id, order_json, created_at, source FROM orders WHERE source = 'sync' AND created_at > ? ORDER BY created_at DESC"
+        )
+        .all(sinceIso)
+    : db
+        .prepare("SELECT store_id, id, order_json, created_at, source FROM orders WHERE source = 'sync' ORDER BY created_at DESC")
+        .all();
+  return rows;
+}
+
 export default db;
 export { db };

@@ -7,6 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { getAllStores, getStoreSellerInfo, storeApiGet, updateStore, Store } from './stores.js';
 import { notifyNewOrder } from './notify.js';
+import { broadcastNewOrder } from './mobilePush.js';
 import {
   getCachedOrderIds,
   upsertOrders,
@@ -306,6 +307,12 @@ export async function pollAllStores(): Promise<Array<{ storeId: string; store: s
           /* 图片补充失败不影响通知 */
         }
         const notifyResult = await notifyNewOrder(s, o);
+        // 同步广播给手机 APP（SSE 实时 + 已注册设备推送），作为独立于邮件/短信的又一通知渠道
+        try {
+          broadcastNewOrder(s, o);
+        } catch {
+          /* 移动端广播失败不影响主流程 */
+        }
         const anySuccess = notifyResult.results.some((r) => r.success);
         const anyAttempt = notifyResult.results.length > 0;
         alertLog.push({

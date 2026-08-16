@@ -716,6 +716,7 @@ import * as storeAuth from './storeAuth.js';
 import * as stores from './stores.js';
 import * as notify from './notify.js';
 import * as orders from './orders.js';
+import * as mobilePush from './mobilePush.js';
 import * as products from './products.js';
 import { getSchedule, saveSchedule, startScheduler } from './scheduler.js';
 import { startTunnel, stopTunnel, getTunnelInfo, isTunnelRunning } from './tunnel.js';
@@ -1163,6 +1164,155 @@ app.post('/api/ml/stores/:id/orders/seen', async (req, res) => {
     if (!store) return res.status(404).json({ success: false, message: '店铺不存在' });
     db.setOrderSyncState(store.id, { last_seen_at: new Date().toISOString() });
     res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+// ===================== 手机 APP 订单推送 =====================
+// 设计：服务器检测到新订单（pollAllStores 内）会立即通过下方机制推给手机 APP：
+//   1) SSE 实时流（前台常连）/api/mobile/stream —— 立即收到 new_order 事件；
+//   2) 已注册设备经 MOBILE_PUSH_WEBHOOK 网关推送（后台/被杀时唤醒）。
+// APP 收到事件后，点开通知调用 /api/mobile/orders/:storeId/:orderId 拉取完整详情
+// （电脑端详情 + 短信内容合并返回）。
+
+// SSE 实时流：手机 APP 在前台时保持此长连接，新订单立即推送
+app.get('/api/mobile/stream', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no', // 关闭 nginx 缓冲，保证实时
+  });
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  mobilePush.addSseClient(id, res);
+  res.write(`event: connected\ndata: ${JSON.stringify({ serverTime: new Date().toISOString(), tip: 'connected' })}\n\n`);
+  // 心跳保活，避免代理/运营商断开空闲连接
+  const hb = setInterval(() => {
+    try {
+      res.write(`event: ping\ndata: {}\n\n`);
+    } catch {
+      /* 忽略写入失败 */
+    }
+  }, 25000);
+  req.on('close', () => {
+    clearInterval(hb);
+    mobilePush.removeSseClient(id);
+  });
+});
+
+// 设备注册：手机 APP 上报推送令牌，供后台/被杀状态下经推送网关唤醒
+app.post('/api/mobile/devices', (req, res) => {
+  const { deviceId, platform, token, appVersion } = req.body || {};
+  if (!deviceId || !platform || !token) {
+    return res.status(400).json({ success: false, message: 'deviceId / platform / token 必填' });
+  }
+  if (!['ios', 'android', 'other'].includes(platform)) {
+    return res.status(400).json({ success: false, message: 'platform 必须是 ios / android / other' });
+  }
+  const rec = mobilePush.registerDevice({ deviceId, platform: platform as any, token, appVersion });
+  res.json({ success: true, device: rec, sseActive: mobilePush.activeSseCount() });
+});
+
+// 调试用：查看已注册设备与当前 SSE 连接数
+app.get('/api/mobile/devices', (req, res) => {
+  res.json({ success: true, sseActive: mobilePush.activeSseCount(), devices: mobilePush.getDevices() });
+});
+
+// 离线/后台补推：返回 since（ISO 时间）之后所有「后台同步新增」的订单；APP 回到前台时调用以补齐漏收的消息
+app.get('/api/mobile/orders/recent', (req, res) => {
+  try {
+    const since = (req.query.since as string) || null;
+    const rows = db.getSyncOrdersSince(since);
+    const out = rows.map((r: any) => {
+      let o: any = {};
+      try {
+        o = JSON.parse(r.order_json);
+      } catch {
+        /* 忽略损坏的订单 JSON */
+      }
+      const store = stores.getStoreRaw(r.store_id);
+      const items = o.order_items || o.items || [];
+      const total =
+        o.total && typeof o.total === 'object'
+          ? `${o.total.currency_id || ''} ${o.total.amount ?? ''}`.trim()
+          : o.paid_amount != null
+            ? `${o.currency_id || ''} ${typeof o.paid_amount === 'object' ? o.paid_amount.amount : o.paid_amount}`.trim()
+            : '';
+      return {
+        storeId: r.store_id,
+        storeName: store?.nickname || store?.site || r.store_id,
+        site: store?.site || o.site || '',
+        orderId: String(o.id),
+        dateCreated: o.date_created || r.created_at,
+        status: o.status || '',
+        total,
+        buyer: o.buyer?.nickname || o.buyer?.id || '',
+        itemCount: items.length,
+        itemTitles: items.slice(0, 3).map((it: any) => it.item?.title || it.title || ''),
+        syncSaved: r.source === 'sync',
+      };
+    });
+    res.json({ success: true, since, count: out.length, orders: out });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+// 移动端订单详情：合并「电脑端打开的订单详情」+「短信中显示的订单内容」
+app.get('/api/mobile/orders/:storeId/:orderId', async (req, res) => {
+  try {
+    const store = stores.getStoreRaw(req.params.storeId);
+    if (!store) return res.status(404).json({ success: false, message: '店铺不存在' });
+    const detail = await orders.fetchOrderDetail(store, req.params.orderId);
+    // 短信/Webhook 正文（含商品图 markdown、纯文本、邮件 HTML），即短信渠道实际展示的内容
+    const sms = await notify.buildOrderNotify(store, detail.order);
+    const o = detail.order;
+    const items = detail.itemsDetail || o.order_items || [];
+    // 扁平 summary：便于手机端不解析嵌套结构也能直接展示
+    const summary = {
+      orderId: String(o.id),
+      site: store.site,
+      storeName: store.nickname || store.site,
+      dateCreated: o.date_created || '',
+      status: o.status || '',
+      category: detail.category,
+      total:
+        o.total && typeof o.total === 'object'
+          ? { amount: o.total.amount, currency: o.total.currency_id }
+          : o.paid_amount != null
+            ? { amount: typeof o.paid_amount === 'object' ? o.paid_amount.amount : o.paid_amount, currency: o.currency_id }
+            : null,
+      buyer: {
+        nickname: o.buyer?.nickname || '',
+        id: o.buyer?.id || '',
+        email: o.buyer?.email || '',
+      },
+      shippingAddress: detail.shippingAddress || null,
+      shippingMethod: detail.shippingMethod || '',
+      buyerBilling: detail.buyerBilling || null,
+      financialSummary: detail.financialSummary || null,
+      items: items.map((it: any) => ({
+        title: it.item?.title || it.title || '未知商品',
+        quantity: it.quantity || 1,
+        unitPrice: it.unit_price || it.item?.price || null,
+        sku: it.item?.seller_sku || it.item?.seller_custom_field || '',
+        itemId: it.item?.id || '',
+        images: it.itemImages || it.item?.pictures?.map((p: any) => p?.secure_url || p?.url || p).filter(Boolean) || (it.item?.thumbnail ? [it.item.thumbnail] : []) || [],
+      })),
+    };
+    res.json({
+      success: true,
+      storeId: store.id,
+      storeName: store.nickname || store.site,
+      site: store.site,
+      // 电脑端订单详情（物流、商品图片、买家税务证件、费用汇总等，与桌面端一致）
+      desktopDetail: detail,
+      // 短信中显示的订单内容（纯文本 / markdown 图文 / 邮件 HTML）
+      smsContent: sms,
+      // 便于手机端直接展示的扁平结构
+      summary,
+    });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err?.message || String(err) });
   }
