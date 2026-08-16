@@ -416,7 +416,9 @@ export function StoreManagementPage() {
           </Button>
         </div>
         <Loading loading={loading}>
-          <Table data={stores} columns={storeColumns} rowKey="id" size="small" pagination={{ pageSize: 20 }} empty="还没有店铺，点「添加店铺」开始" />
+          <div style={{ overflowX: 'auto' }}>
+            <Table data={stores} columns={storeColumns} rowKey="id" size="small" pagination={{ pageSize: 20 }} empty="还没有店铺，点「添加店铺」开始" />
+          </div>
         </Loading>
       </Card>
 
@@ -435,10 +437,10 @@ export function StoreManagementPage() {
             <Button size="small" variant="text" onClick={loadCallbackStatus}>刷新状态</Button>
           </div>
 
-          <div className="flex items-center gap-2">
-            <span className="text-sm">回调地址：</span>
-            <Input value={cb.uri} readonly style={{ width: 480 }} />
-            <Button size="small" theme="default" variant="outline" onClick={() => copyText(cb.uri)}>复制</Button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm shrink-0">回调地址：</span>
+            <Input value={cb.uri} readonly style={{ flex: 1, minWidth: 0 }} className="min-w-0" />
+            <Button size="small" theme="default" variant="outline" onClick={() => copyText(cb.uri)} className="shrink-0">复制</Button>
           </div>
 
           <div className="text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>
@@ -471,7 +473,9 @@ export function StoreManagementPage() {
       </Card>
 
       <Card title="新订单提醒日志" bordered>
-        <Table data={alerts} columns={alertColumns} rowKey="orderId" size="small" pagination={{ pageSize: 20 }} empty="暂无提醒记录" />
+        <div style={{ overflowX: 'auto' }}>
+          <Table data={alerts} columns={alertColumns} rowKey="orderId" size="small" pagination={{ pageSize: 20 }} empty="暂无提醒记录" />
+        </div>
       </Card>
 
       <Dialog
@@ -525,10 +529,10 @@ export function StoreManagementPage() {
             )}
             <div>
               <div className="mb-1 text-sm font-medium">回调地址（复制到美客多后台 → 应用 → 重定向 URI）</div>
-              <Space>
-                <Input value={cb.uri} readonly style={{ width: 440 }} />
-                <Button theme="default" variant="outline" onClick={() => copyText(cb.uri)}>复制</Button>
-              </Space>
+              <div className="flex items-center gap-2">
+                <Input value={cb.uri} readonly style={{ flex: 1, minWidth: 0 }} className="min-w-0" />
+                <Button theme="default" variant="outline" onClick={() => copyText(cb.uri)} className="shrink-0">复制</Button>
+              </div>
             </div>
             <div className="text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>
               授权完成后本弹窗会自动关闭。若长时间未自动关闭，请确认已在美客多后台配置上面的回调地址并重新授权。

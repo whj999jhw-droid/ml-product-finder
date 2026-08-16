@@ -266,20 +266,20 @@ export function TrendsPage() {
               value={llmForm.baseUrl}
               onChange={(v: string) => setLlmForm({ ...llmForm, baseUrl: v })}
               placeholder="https://api.siliconflow.cn"
-              style={{ width: 300 }}
+              style={{ flex: '1 1 240px', minWidth: 0 }}
             />
             <Input
               value={llmForm.apiKey}
               type="password"
               onChange={(v: string) => setLlmForm({ ...llmForm, apiKey: v })}
               placeholder={llmStatus.configured ? 'Api Key（留空=不修改）' : 'Api Key'}
-              style={{ width: 260 }}
+              style={{ flex: '1 1 200px', minWidth: 0 }}
             />
             <Input
               value={llmForm.model}
               onChange={(v: string) => setLlmForm({ ...llmForm, model: v })}
               placeholder="Model，如 Qwen/Qwen2.5-7B-Instruct"
-              style={{ width: 260 }}
+              style={{ flex: '1 1 200px', minWidth: 0 }}
             />
             <Button theme="primary" onClick={handleSaveLlm} loading={llmSaving}>保存</Button>
             <Button variant="outline" onClick={handleTestLlm} loading={llmTesting}>测试连接</Button>

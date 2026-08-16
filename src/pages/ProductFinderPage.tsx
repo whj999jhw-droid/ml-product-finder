@@ -1357,7 +1357,7 @@ export function ProductFinderPage() {
                 value={proxyUrl}
                 onChange={(val: any) => setProxyUrl(val)}
                 placeholder="http://user:pass@mx.proxy.com:8000 或 socks5://..."
-                style={{ width: 380 }}
+                style={{ flex: '1 1 240px', minWidth: 0 }}
               />
               <Button theme="primary" variant="outline" size="small" onClick={handleSaveProxy} loading={proxySaving}>保存代理</Button>
               <Button size="small" onClick={handleTestProxy} loading={proxyTesting}>测试连通</Button>
@@ -1395,7 +1395,7 @@ export function ProductFinderPage() {
                 value={emailCfg.to}
                 onChange={(val: any) => setEmailCfg({ ...emailCfg, to: val })}
                 placeholder="接收结果的邮箱地址"
-                style={{ width: 300 }}
+                style={{ flex: '1 1 240px', minWidth: 0 }}
               />
             </div>
 
@@ -1628,6 +1628,7 @@ export function ProductFinderPage() {
               <p className="mt-3">暂无导出文件，点击"开始抓取"生成第一个文件</p>
             </div>
           ) : (
+            <div style={{ overflowX: 'auto' }}>
             <Table
               data={files.map((f, i) => ({
                 key: i,
@@ -1696,6 +1697,7 @@ export function ProductFinderPage() {
               bordered
               size="small"
             />
+            </div>
           )}
         </Card>
 

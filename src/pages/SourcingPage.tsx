@@ -1179,27 +1179,27 @@ export function SourcingPage() {
 
         <Card title="自动上架设置（税务 / 配图）" bordered>
           <div className="flex flex-wrap gap-6 items-end">
-            <label className="flex flex-col gap-1 text-sm">
+            <label className="flex flex-col gap-1 text-sm flex-1 min-w-0" style={{ minWidth: 220 }}>
               <span>税务模式（影响利润/筛选/导出）</span>
-              <Select value={taxMode} onChange={(v) => setTaxMode(v as string)} style={{ width: 300 }}>
+              <Select value={taxMode} onChange={(v) => setTaxMode(v as string)} style={{ width: '100%' }}>
                 <Select.Option value="direct_import">跨境自发货直邮（买家为进口商，0%）</Select.Option>
                 <Select.Option value="cbt_with_rfc">CBT 跨境店 + 有 RFC（16%）</Select.Option>
                 <Select.Option value="cbt_no_rfc">CBT 跨境店 + 无 RFC（36%）</Select.Option>
                 <Select.Option value="local_store">墨西哥本土店（10.5%）</Select.Option>
               </Select>
             </label>
-            <label className="flex flex-col gap-1 text-sm">
+            <label className="flex flex-col gap-1 text-sm flex-1 min-w-0" style={{ minWidth: 220 }}>
               <span>自动配图方式</span>
-              <Select value={autoImageMode} onChange={(v) => setAutoImageMode(v as string)} style={{ width: 260 }}>
+              <Select value={autoImageMode} onChange={(v) => setAutoImageMode(v as string)} style={{ width: '100%' }}>
                 <Select.Option value="ai">AI修图(去背景+白底+增强+水印){aiImageAvailable === false ? '（未安装）' : ''}</Select.Option>
                 <Select.Option value="watermark">1688源图 + 水印(推荐兜底)</Select.Option>
                 <Select.Option value="direct">1688源图直传</Select.Option>
                 <Select.Option value="off">关闭自动配图</Select.Option>
               </Select>
             </label>
-            <label className="flex flex-col gap-1 text-sm">
+            <label className="flex flex-col gap-1 text-sm flex-1 min-w-0" style={{ minWidth: 220 }}>
               <span>水印文字（你的店铺名）</span>
-              <Input value={watermarkText} onChange={(v) => setWatermarkText(v as string)} style={{ width: 200 }} />
+              <Input value={watermarkText} onChange={(v) => setWatermarkText(v as string)} style={{ width: '100%' }} />
             </label>
           </div>
           <p className="text-xs mt-2" style={{ color: 'var(--td-text-color-placeholder)' }}>
@@ -1231,23 +1231,23 @@ export function SourcingPage() {
 
               {searchMethod === 'onebound' && (
                 <div className="flex flex-wrap gap-4 items-end p-3 rounded" style={{ backgroundColor: 'var(--td-bg-color-secondarycontainer)' }}>
-                  <label className="flex flex-col gap-1 text-sm">
+                  <label className="flex flex-col gap-1 text-sm flex-1 min-w-0" style={{ minWidth: 220 }}>
                     <span>OneBound Key</span>
                     <Input
                       value={oneboundKey}
                       placeholder="注册即得 → console.open.onebound.cn"
                       onChange={(v) => setOneboundKey(v as string)}
-                      style={{ width: 260 }}
+                      style={{ width: '100%' }}
                     />
                   </label>
-                  <label className="flex flex-col gap-1 text-sm">
+                  <label className="flex flex-col gap-1 text-sm flex-1 min-w-0" style={{ minWidth: 220 }}>
                     <span>OneBound Secret</span>
                     <Input
                       value={oneboundSecret}
                       type="password"
                       placeholder="注册即得 → console.open.onebound.cn"
                       onChange={(v) => setOneboundSecret(v as string)}
-                      style={{ width: 260 }}
+                      style={{ width: '100%' }}
                     />
                   </label>
                   <Button theme="primary" loading={savingConfig} onClick={save1688Config}>
@@ -1281,6 +1281,7 @@ export function SourcingPage() {
           {loading ? (
             <Loading loading={true} text="加载中..." />
           ) : (
+            <div style={{ overflowX: 'auto' }}>
             <Table
               data={rows}
               columns={columns}
@@ -1291,6 +1292,7 @@ export function SourcingPage() {
               maxHeight={560}
               pagination={{ pageSize: 50, showJumper: true }}
             />
+            </div>
           )}
         </Card>
 

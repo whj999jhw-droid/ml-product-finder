@@ -408,6 +408,7 @@ export function OrdersPage() {
             </Section>
 
             <Section title={`商品明细（共${items.length}项）`}>
+              <div style={{ overflowX: 'auto' }}>
               <Table
                 data={items}
                 columns={[
@@ -463,6 +464,7 @@ export function OrdersPage() {
                 size="small"
                 pagination={items.length > 8 ? { pageSize: 8 } : undefined}
               />
+              </div>
             </Section>
 
             <Section title="支付与到手金额">
@@ -479,6 +481,7 @@ export function OrdersPage() {
               ) : null}
               {payments.length ? (
                 <>
+                  <div style={{ overflowX: 'auto' }}>
                   <Table
                     data={payments}
                     columns={[
@@ -493,6 +496,7 @@ export function OrdersPage() {
                     rowKey="id"
                     size="small"
                   />
+                  </div>
                   <div className="mt-2 text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>
                     注：CBT 跨境订单可能包含多币种/分期信息，「实得金额」以 Mercado Libre 后台结算为准。
                   </div>
@@ -548,15 +552,17 @@ export function OrdersPage() {
 function OrderTable({ rows, loading, onOpen, columns }: { rows: any[]; loading: boolean; onOpen: (id: string) => void; columns: any[] }) {
   return (
     <Loading loading={loading}>
-      <Table
-        data={rows}
-        columns={columns}
-        rowKey="id"
-        size="small"
-        pagination={rows.length > 15 ? { pageSize: 15 } : undefined}
-        onRowClick={(ctx: any) => onOpen(String(ctx.row.id))}
-        empty="该分类下暂无订单"
-      />
+      <div style={{ overflowX: 'auto' }}>
+        <Table
+          data={rows}
+          columns={columns}
+          rowKey="id"
+          size="small"
+          pagination={rows.length > 15 ? { pageSize: 15 } : undefined}
+          onRowClick={(ctx: any) => onOpen(String(ctx.row.id))}
+          empty="该分类下暂无订单"
+        />
+      </div>
     </Loading>
   );
 }

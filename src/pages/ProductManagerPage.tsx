@@ -275,7 +275,7 @@ export function ProductManagerPage() {
           <Select
             value={storeId}
             onChange={(v) => setStoreId(v as string)}
-            style={{ width: 240 }}
+            style={{ flex: '1 1 180px', minWidth: 0 }}
             placeholder="选择店铺"
             options={stores.map((s) => ({
               value: s.id,
@@ -287,7 +287,7 @@ export function ProductManagerPage() {
             onChange={(v) => setQuery(v as string)}
             onEnter={doSearch}
             placeholder="输入 SKU 或商品标题关键字"
-            style={{ width: 320 }}
+            style={{ flex: '2 1 200px', minWidth: 0 }}
             clearable
           />
           <Button theme="primary" icon={<SearchIcon />} loading={searching} onClick={doSearch}>

@@ -540,6 +540,7 @@ export function NotificationSettingsPage() {
       </div>
 
       <Card title="最近提醒记录" bordered>
+        <div style={{ overflowX: 'auto' }}>
         <Table
           data={pagedAlerts}
           columns={alertColumns}
@@ -556,6 +557,7 @@ export function NotificationSettingsPage() {
           empty="暂无提醒记录"
           loading={loading}
         />
+        </div>
       </Card>
 
       <Dialog
