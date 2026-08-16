@@ -1,0 +1,9 @@
+# 密钥（推送凭证，切勿提交）
+service-account.json
+AuthKey.p8
+AuthKey_*.p8
+.env
+
+# 依赖与运行产物
+node_modules/
+*.log

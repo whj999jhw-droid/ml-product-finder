@@ -1,0 +1,15 @@
+{
+  "name": "ml-push-gateway",
+  "version": "1.0.0",
+  "description": "ml-product-finder 手机 APP 新订单推送中转服务（FCM / APNs）",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.0",
+    "firebase-admin": "^12.0.0",
+    "apn": "^2.2.0"
+  }
+}
