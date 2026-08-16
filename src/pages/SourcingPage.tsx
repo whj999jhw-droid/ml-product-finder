@@ -337,6 +337,41 @@ export function SourcingPage() {
     NotificationPlugin.success({ title: '已采用标题', content: title });
   };
 
+  // 合规描述自动生成
+  const handleGenerateDescription = async (row: SourcingRow) => {
+    if (!row.mlTitle || row.mlTitle.trim().length < 5) {
+      MessagePlugin.warning({ content: '请先生成或填写标题（≥5 字）' });
+      return;
+    }
+    setDescGenLoading(true);
+    try {
+      const r = await fetch('/api/ml/listing/generate-description', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: row.mlTitle,
+          site: row.site,
+          sourceTitle: row.sourceTitle,
+          sourcePriceCNY: row.sourcePriceCNY,
+          categoryName: row.categoryName,
+          brand: row.brand,
+          trendKeywords,
+        }),
+      });
+      const d = await r.json();
+      if (d.success && d.description) {
+        updateRow(row.itemId, { mlDescription: d.description });
+        MessagePlugin.success({ content: '描述已生成' });
+      } else {
+        MessagePlugin.warning({ content: d.message || '生成失败' });
+      }
+    } catch (err: any) {
+      MessagePlugin.error({ content: err?.message || '生成失败' });
+    } finally {
+      setDescGenLoading(false);
+    }
+  };
+
   // 1688 免密钥关键词找同款（Playwright + 本机 Edge，best-effort）
   const openKwSearch = (row: SourcingRow) => {
     setKwRow(row);
@@ -789,21 +824,29 @@ export function SourcingPage() {
   const followableCount = rows.filter((r) => calc(r).followable).length;
 
   const columns: PrimaryTableCol<SourcingRow>[] = [
-    { colKey: 'siteName', title: '站点', width: 70 },
-    { colKey: 'categoryName', title: '分类', width: 130, ellipsis: true },
-    { colKey: 'title', title: '商品标题', width: 260, ellipsis: true },
+    { colKey: 'siteName', title: '站点', width: 50, align: 'center' },
+    { colKey: 'categoryName', title: '分类', width: 80, ellipsis: true },
+    {
+      colKey: 'title',
+      title: '商品标题',
+      width: 130,
+      ellipsis: true,
+      cell: ({ row }) => <span title={row.title}>{row.title}</span>,
+    },
     {
       colKey: 'priceUSD',
-      title: '售价USD',
-      width: 90,
+      title: '售价',
+      width: 60,
+      align: 'right',
       cell: ({ row }) => `$${(row.priceUSD || 0).toFixed(2)}`,
     },
     {
       colKey: 'sourcePriceCNY',
-      title: '货源价CNY',
-      width: 110,
+      title: '货源价',
+      width: 70,
       cell: ({ row }) => (
         <InputNumber
+          size="small"
           value={row.sourcePriceCNY}
           min={0}
           step={1}
@@ -814,10 +857,11 @@ export function SourcingPage() {
     },
     {
       colKey: 'shippingCNY',
-      title: '头程CNY',
-      width: 100,
+      title: '头程',
+      width: 65,
       cell: ({ row }) => (
         <InputNumber
+          size="small"
           value={row.shippingCNY}
           min={0}
           step={1}
@@ -829,19 +873,20 @@ export function SourcingPage() {
     {
       colKey: 'sourceLink',
       title: '货源链接',
-      width: 200,
+      width: 90,
       cell: ({ row }) => (
         <Input
           value={row.sourceLink}
-          placeholder="粘贴 1688 链接"
+          placeholder="1688链接"
           onChange={(v) => updateRow(row.itemId, { sourceLink: v as string })}
         />
       ),
     },
     {
       colKey: 'profitUSD',
-      title: '净利润USD',
-      width: 100,
+      title: '净利润',
+      width: 70,
+      align: 'right',
       cell: ({ row }) => {
         const c = calc(row);
         return (
@@ -854,7 +899,8 @@ export function SourcingPage() {
     {
       colKey: 'roi',
       title: 'ROI',
-      width: 70,
+      width: 50,
+      align: 'right',
       cell: ({ row }) => {
         const c = calc(row);
         return <span>{(c.roi * 100).toFixed(0)}%</span>;
@@ -863,20 +909,22 @@ export function SourcingPage() {
     {
       colKey: 'followable',
       title: '可跟卖',
-      width: 80,
+      width: 60,
+      align: 'center',
       cell: ({ row }) => {
         const c = calc(row);
         return c.followable ? (
-          <Tag theme="success" variant="light">可跟卖</Tag>
+          <Tag theme="success" variant="light" size="small">可</Tag>
         ) : (
-          <Tag theme="danger" variant="light">不可</Tag>
+          <Tag theme="danger" variant="light" size="small">否</Tag>
         );
       },
     },
     {
       colKey: 'fullProfit',
-      title: '完整净利率',
-      width: 110,
+      title: '净利率',
+      width: 70,
+      align: 'right',
       cell: ({ row }) => {
         const fp = fullProfits[row.itemId];
         if (!fp) return <span style={{ color: 'var(--td-text-color-placeholder)' }}>—</span>;
@@ -884,7 +932,7 @@ export function SourcingPage() {
         const label = fp.recommendation === 'green' ? '绿' : fp.recommendation === 'yellow' ? '黄' : '红';
         return (
           <span title={fp.warnings.join('\n')} style={{ color, fontWeight: 600 }}>
-            {(fp.netProfitRate * 100).toFixed(1)}%（{label}）
+            {(fp.netProfitRate * 100).toFixed(0)}%{label}
           </span>
         );
       },
@@ -892,7 +940,8 @@ export function SourcingPage() {
     {
       colKey: 'breakEven',
       title: '保本价',
-      width: 90,
+      width: 60,
+      align: 'right',
       cell: ({ row }) => {
         const fp = fullProfits[row.itemId];
         if (!fp) return <span style={{ color: 'var(--td-text-color-placeholder)' }}>—</span>;
@@ -907,85 +956,60 @@ export function SourcingPage() {
     {
       colKey: 'filter',
       title: '筛选',
-      width: 100,
+      width: 60,
+      align: 'center',
       cell: ({ row }) => {
         const fi = filterInfo[row.itemId];
         if (!fi) return <span style={{ color: 'var(--td-text-color-placeholder)' }}>—</span>;
-        if (fi.passed) return <Tag theme="success" variant="light">通过</Tag>;
-        if (fi.needsSourcePrice) return <Tag theme="warning" variant="light" title={fi.reasons.join('\n')}>缺货源价</Tag>;
+        if (fi.passed) return <Tag theme="success" variant="light" size="small">通过</Tag>;
+        if (fi.needsSourcePrice) return <Tag theme="warning" variant="light" size="small" title={fi.reasons.join('\n')}>缺价</Tag>;
         return (
-          <Tag theme="danger" variant="light" title={fi.reasons.join('\n')}>
-            {fi.stage === 'hard' ? '硬性拒绝' : '利润拒绝'}
+          <Tag theme="danger" variant="light" size="small" title={fi.reasons.join('\n')}>
+            {fi.stage === 'hard' ? '硬拒' : '利拒'}
           </Tag>
         );
       },
     },
     {
-      colKey: 'mlTitle',
-      title: '我的标题(上架用)',
-      width: 240,
+      colKey: 'listingInfo',
+      title: '上架信息',
+      width: 170,
       cell: ({ row }) => (
-        <div className="flex items-center gap-1">
-          <Input
-            value={row.mlTitle || ''}
-            placeholder="手工填 或 AI生成"
-            onChange={(v) => updateRow(row.itemId, { mlTitle: v as string })}
-          />
-          <Button size="small" theme="primary" variant="outline" onClick={() => handleGenerateTitle(row)}>
-            AI生成
-          </Button>
-        </div>
-      ),
-    },
-    {
-      colKey: 'mlDescription',
-      title: '商品描述(上架用)',
-      width: 280,
-      cell: ({ row }) => (
-        <div className="flex items-start gap-1">
-          <Input
-            value={row.mlDescription || ''}
-            placeholder="手工填 或 AI生成"
-            onChange={(v) => updateRow(row.itemId, { mlDescription: v as string })}
-          />
-          <Button
-            size="small"
-            theme="primary"
-            variant="outline"
-            loading={descGenLoading}
-            disabled={!(row.mlTitle && row.mlTitle.trim().length >= 5)}
-            onClick={async () => {
-              const r = await fetch('/api/ml/listing/generate-description', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  title: row.mlTitle,
-                  site: row.site,
-                  sourceTitle: row.sourceTitle,
-                  sourcePriceCNY: row.sourcePriceCNY,
-                  categoryName: row.categoryName,
-                  brand: row.brand,
-                  trendKeywords,
-                }),
-              });
-              const d = await r.json();
-              if (d.success && d.description) {
-                updateRow(row.itemId, { mlDescription: d.description });
-                MessagePlugin.success({ content: '描述已生成' });
-              } else {
-                MessagePlugin.warning({ content: d.message || '生成失败' });
-              }
-            }}
-          >
-            AI生成
-          </Button>
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-1">
+            <Input
+              value={row.mlTitle || ''}
+              placeholder="标题"
+              onChange={(v) => updateRow(row.itemId, { mlTitle: v as string })}
+              style={{ flex: 1 }}
+            />
+            <Button size="small" theme="primary" variant="outline" onClick={() => handleGenerateTitle(row)}>AI</Button>
+          </div>
+          <div className="flex items-center gap-1">
+            <Input
+              value={row.mlDescription || ''}
+              placeholder="描述"
+              onChange={(v) => updateRow(row.itemId, { mlDescription: v as string })}
+              style={{ flex: 1 }}
+            />
+            <Button
+              size="small"
+              theme="primary"
+              variant="outline"
+              loading={descGenLoading}
+              disabled={!(row.mlTitle && row.mlTitle.trim().length >= 5)}
+              onClick={() => handleGenerateDescription(row)}
+            >
+              AI
+            </Button>
+          </div>
         </div>
       ),
     },
     {
       colKey: 'op',
       title: '操作',
-      width: 130,
+      width: 80,
       cell: ({ row }) => (
         <div className="flex flex-col gap-1">
           <Button
@@ -996,10 +1020,10 @@ export function SourcingPage() {
             onClick={() => handleAutoSearch(row)}
             title={getMethodLabel(searchMethod)}
           >
-            {getMethodLabel(searchMethod)}
+            搜款
           </Button>
           <Button size="small" theme="default" variant="outline" onClick={() => openKwSearch(row)}>
-            1688找同款
+            找同款
           </Button>
         </div>
       ),
@@ -1007,13 +1031,14 @@ export function SourcingPage() {
     {
       colKey: 'images',
       title: '配图',
-      width: 80,
+      width: 55,
+      align: 'center',
       cell: ({ row }) => {
         const n = mlPictures[row.itemId]?.length || 0;
         return n > 0 ? (
-          <Tag theme="success" variant="light">已配 {n} 张</Tag>
+          <Tag theme="success" variant="light" size="small">{n}张</Tag>
         ) : row.sourceImages?.length ? (
-          <Tag theme="warning" variant="light">待配图</Tag>
+          <Tag theme="warning" variant="light" size="small">待配</Tag>
         ) : (
           <span style={{ color: 'var(--td-text-color-placeholder)' }}>—</span>
         );
@@ -1256,18 +1281,16 @@ export function SourcingPage() {
           {loading ? (
             <Loading loading={true} text="加载中..." />
           ) : (
-            <div style={{ overflowX: 'auto' }}>
-              <Table
-                data={rows}
-                columns={columns}
-                rowKey="itemId"
-                size="small"
-                bordered
-                tableLayout="auto"
-                maxHeight={560}
-                pagination={{ pageSize: 50, showJumper: true }}
-              />
-            </div>
+            <Table
+              data={rows}
+              columns={columns}
+              rowKey="itemId"
+              size="small"
+              bordered
+              tableLayout="fixed"
+              maxHeight={560}
+              pagination={{ pageSize: 50, showJumper: true }}
+            />
           )}
         </Card>
 
