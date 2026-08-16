@@ -291,3 +291,5 @@ client.newEventSource(request, object : EventSourceListener() {
   ```
 - SSE 需要反向代理**关闭缓冲**：nginx 加 `proxy_set_header X-Accel-Buffering no;`（代码已对响应头设置该字段，配合代理即可）。
 - 重启/部署后，轮询（`startOrderPolling`，默认每 30 分钟）检测到新订单即会触发推送。
+
+> 📘 **`MOBILE_PUSH_WEBHOOK` 怎么配、中转服务怎么写、苹果/安卓分别怎么做？** 见配套保姆级教程：**`docs/mobile-push-webhook-setup.md`**（从零讲清楚凭证、中转服务代码、环境变量设置、自检清单）。
