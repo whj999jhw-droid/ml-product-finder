@@ -243,7 +243,8 @@ export function TrendsPage() {
   const groups: TrendItem['segment'][] = ['fastest-growing', 'most-wanted', 'most-popular'];
 
   return (
-    <div className="p-6" style={{ maxWidth: 1200, margin: '0 auto' }}>
+    <div className="flex-1 overflow-y-auto p-3">
+      <div className="max-w-7xl mx-auto space-y-4">
       <Card title="AI 翻译配置（热搜词中文翻译用）" bordered>
         <Space direction="vertical" style={{ width: '100%' }}>
           <div className="flex items-center gap-2">
@@ -428,7 +429,8 @@ export function TrendsPage() {
             })}
           </Space>
         )}
-      </Card>
+        </Card>
+      </div>
     </div>
   );
 }

@@ -403,7 +403,7 @@ export function StoreManagementPage() {
   const isFixed = cb.mode === 'fixed' || cb.mode === 'env';
 
   return (
-    <div className="p-4 space-y-4" style={{ overflowY: 'auto', height: '100%' }}>
+    <div className="p-3 space-y-4" style={{ overflowY: 'auto', height: '100%' }}>
       <Card title={<span><ShopIcon /> 店铺管理（多店铺）</span>} bordered>
         <div className="mb-3 text-sm" style={{ color: 'var(--td-text-color-secondary)' }}>
           点击「添加店铺」会跳转到美客多授权页，登录并同意后即把该账号的 token 安全地存到本工具（支持备注简称、可随时停用/删除）。

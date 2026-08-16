@@ -357,7 +357,7 @@ export function NotificationSettingsPage() {
   ];
 
   return (
-    <div className="p-4 space-y-4" style={{ overflowY: 'auto', height: '100%' }}>
+    <div className="p-3 space-y-4" style={{ overflowY: 'auto', height: '100%' }}>
       {/* 总开关 + 轮询间隔 */}
       <Card title={<span><NotificationIcon /> 提醒总开关与轮询频率</span>} bordered>
         <Space direction="vertical" style={{ width: '100%' }}>

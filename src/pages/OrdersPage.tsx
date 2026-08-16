@@ -288,7 +288,7 @@ export function OrdersPage() {
   }, [detailItems, items, addr, detail?.shipments, activeSite]);
 
   return (
-    <div className="p-4 space-y-4" style={{ overflowY: 'auto', height: '100%' }}>
+    <div className="p-3 space-y-4" style={{ overflowY: 'auto', height: '100%' }}>
       <Card title={<span><ShopIcon /> 订单管理（每店铺独立）</span>} bordered>
         {stores.length === 0 ? (
           <div className="text-sm" style={{ color: 'var(--td-text-color-secondary)' }}>
