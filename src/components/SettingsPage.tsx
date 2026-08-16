@@ -270,8 +270,8 @@ export function SettingsPage({
   const customAgents = agents.filter(a => a.id !== 'default');
 
   return (
-    <div className="flex-1 overflow-y-auto p-6">
-      <div className="max-w-3xl mx-auto space-y-8">
+    <div className="flex-1 overflow-y-auto p-3">
+      <div className="max-w-5xl mx-auto space-y-6">
         {/* 页面标题 */}
         <div>
           <h1 

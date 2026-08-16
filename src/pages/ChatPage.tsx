@@ -82,7 +82,7 @@ export function ChatPage({
   return (
     <>
       {/* 消息区域 */}
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex-1 overflow-y-auto p-3">
         {showNewChatView ? (
           <NewChatView
             agents={agents}

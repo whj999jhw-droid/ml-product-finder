@@ -1047,7 +1047,7 @@ export function SourcingPage() {
   ];
 
   return (
-    <div className="flex-1 overflow-y-auto p-4">
+    <div className="flex-1 overflow-y-auto p-3">
       <div className="max-w-7xl mx-auto space-y-4">
         {/* 页头：标题 + 操作按钮 */}
         <div className="flex items-start justify-between gap-4 flex-wrap">

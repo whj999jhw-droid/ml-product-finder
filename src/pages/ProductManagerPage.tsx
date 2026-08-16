@@ -260,7 +260,7 @@ export function ProductManagerPage() {
   const addPicture = () => setEditPictures((prev) => [...prev, { url: '' }]);
 
   return (
-    <div className="p-5 max-w-[1200px] mx-auto">
+    <div className="p-3 max-w-7xl mx-auto">
       <div className="flex items-center gap-2 mb-1">
         <ShopIcon size={20} />
         <h1 className="text-xl font-semibold">商品管理</h1>

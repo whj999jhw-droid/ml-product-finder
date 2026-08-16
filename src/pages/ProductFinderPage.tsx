@@ -116,6 +116,38 @@ export function ProductFinderPage() {
   const [includeSubcategories, setIncludeSubcategories] = useState(false); // 展开子分类扩量
   const [miaoshouPackage, setMiaoshouPackage] = useState(true);    // 导出妙手素材包（ZIP 含主图），推荐导入方式
 
+  // 抓取配置本地记忆（进入页面时自动恢复最后一次配置）
+  const SCRAPE_CONFIG_KEY = 'ml-finder.scrape-config';
+  const [configRestored, setConfigRestored] = useState(false);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(SCRAPE_CONFIG_KEY);
+      if (raw) {
+        const cfg = JSON.parse(raw);
+        if (Array.isArray(cfg.selectedSites) && cfg.selectedSites.length) setSelectedSites(cfg.selectedSites);
+        if (typeof cfg.priceLimitUsd === 'number') setPriceLimitUsd(cfg.priceLimitUsd);
+        if (typeof cfg.excludeFull === 'boolean') setExcludeFull(cfg.excludeFull);
+        if (typeof cfg.excludeDomestic === 'boolean') setExcludeDomestic(cfg.excludeDomestic);
+        if (typeof cfg.onlyNew === 'boolean') setOnlyNew(cfg.onlyNew);
+        if (typeof cfg.includeSubcategories === 'boolean') setIncludeSubcategories(cfg.includeSubcategories);
+        if (typeof cfg.miaoshouPackage === 'boolean') setMiaoshouPackage(cfg.miaoshouPackage);
+        setConfigRestored(true);
+      }
+    } catch { /* ignore */ }
+  }, []);
+  const saveScrapeConfig = useCallback(() => {
+    const cfg = {
+      selectedSites,
+      priceLimitUsd,
+      excludeFull,
+      excludeDomestic,
+      onlyNew,
+      includeSubcategories,
+      miaoshouPackage,
+    };
+    try { localStorage.setItem(SCRAPE_CONFIG_KEY, JSON.stringify(cfg)); } catch { /* ignore */ }
+  }, [selectedSites, priceLimitUsd, excludeFull, excludeDomestic, onlyNew, includeSubcategories, miaoshouPackage]);
+
   // 住宅代理（可选）：配置后 /search 走翻页拉取更多数据（地理匹配 MX/BR/CL/CO 解锁量）
   const [proxyUrl, setProxyUrl] = useState('');
   const [proxyStatus, setProxyStatus] = useState<{ hasProxy: boolean; proxyUrl: string }>({ hasProxy: false, proxyUrl: '' });
@@ -702,12 +734,13 @@ export function ProductFinderPage() {
       const data = await res.json();
       if (!data.success) throw new Error(data.message || '启动抓取失败');
       setJobId(data.jobId);
+      saveScrapeConfig();
       startPolling();
     } catch (err: any) {
       NotificationPlugin.error({ title: '启动抓取失败', content: err?.message || '' });
       setIsFetching(false);
     }
-  }, [selectedSites, tokenStatus.hasToken, priceLimitUsd, excludeFull, excludeDomestic, onlyNew, includeSubcategories, miaoshouPackage, startPolling]);
+  }, [selectedSites, tokenStatus.hasToken, priceLimitUsd, excludeFull, excludeDomestic, onlyNew, includeSubcategories, miaoshouPackage, startPolling, saveScrapeConfig]);
 
   // 进入页面时若后端有正在运行的抓取任务，自动恢复进度显示（切换标签页/刷新页面后也能续显，且不影响后端执行）
   useEffect(() => {
@@ -835,8 +868,8 @@ export function ProductFinderPage() {
       : 0;
 
   return (
-    <div className="flex-1 overflow-y-auto p-4">
-      <div className="max-w-6xl mx-auto space-y-4">
+    <div className="flex-1 overflow-y-auto p-3">
+      <div className="max-w-7xl mx-auto space-y-4">
         <FeatureIntro
           title="美客多商品抓取"
           summary="每日抓取墨/巴/智/哥各品类销量前100、单价≤上限的商品"
@@ -1124,7 +1157,14 @@ export function ProductFinderPage() {
         </Card>
 
         {/* 配置卡片 */}
-        <Card title="抓取配置" bordered>
+        <Card title={(
+          <div className="flex items-center gap-2">
+            <span>抓取配置</span>
+            {configRestored && (
+              <Tag theme="success" variant="light" size="small">已恢复上次配置</Tag>
+            )}
+          </div>
+        )} bordered>
           <div className="space-y-4">
             {/* 站点选择 */}
             <div className="flex items-center gap-4">

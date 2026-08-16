@@ -163,8 +163,8 @@ export function ListingPage() {
   };
 
   return (
-    <div className="flex-1 overflow-y-auto p-6">
-      <div className="max-w-5xl mx-auto space-y-6">
+    <div className="flex-1 overflow-y-auto p-3">
+      <div className="max-w-7xl mx-auto space-y-4">
         <FeatureIntro
           title="合规上架（M3）"
           summary="基于 M1 爆款自建 Listing，红线与操作步骤"
