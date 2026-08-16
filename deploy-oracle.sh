@@ -190,6 +190,14 @@ else
 
   log "创建数据目录..."
   mkdir -p data data/exports
+
+  log "安装推送中转服务依赖 (push-gateway)..."
+  if [ -d "$APP_DIR/push-gateway" ]; then
+    (cd "$APP_DIR/push-gateway" && npm install --production=true) || warn "push-gateway 依赖安装失败（可稍后手动装，不影响主程序）"
+  else
+    warn "未检测到 $APP_DIR/push-gateway，跳过其中依赖安装"
+  fi
+
   mark_done 3
   log "步骤 3 完成"
 fi
@@ -226,6 +234,8 @@ ML_SECRET_KEY=${ML_SECRET_KEY}
 ML_REDIRECT_URI=${REDIRECT_URI}
 SESSION_SECRET=${SESSION_SECRET}
 CODEBUDDY_INTERNET_ENVIRONMENT=external
+# 手机 APP 后台推送：中转服务与本后端同机运行，走 loopback 即可（无需公网 HTTPS）
+MOBILE_PUSH_WEBHOOK=http://localhost:4000/push
 ENVEOF
     log ".env 已创建（回调地址已自动设为 ${REDIRECT_URI:-待手动配置}）"
   fi
@@ -309,6 +319,25 @@ else
   pm2 save
   mark_done 6
   log "步骤 6 完成"
+fi
+
+# ============================================================
+# 步骤 6.5: 启动手机 APP 推送中转服务（独立于主程序，可单独跳过）
+# ============================================================
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo " 启动手机 APP 推送中转服务 (push-gateway)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+# 若 .env 已存在但缺少 MOBILE_PUSH_WEBHOOK，补上（指向本机中转服务）
+if [ -f "$APP_DIR/.env" ] && ! grep -q '^MOBILE_PUSH_WEBHOOK=' "$APP_DIR/.env"; then
+  echo "MOBILE_PUSH_WEBHOOK=http://localhost:4000/push" >> "$APP_DIR/.env"
+  log "已在 .env 补加 MOBILE_PUSH_WEBHOOK=http://localhost:4000/push"
+fi
+if [ -x "$APP_DIR/start-push-gateway.sh" ]; then
+  "$APP_DIR/start-push-gateway.sh"
+else
+  warn "未找到 start-push-gateway.sh，跳过（不影响主程序）"
 fi
 
 # ---- 完成 ----

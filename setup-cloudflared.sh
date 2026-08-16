@@ -154,6 +154,16 @@ else
   warn "未找到 $APP_DIR/.env，跳过 ML_REDIRECT_URI 写入（请确认项目已部署）"
 fi
 
+# 8.1 确保 .env 含 MOBILE_PUSH_WEBHOOK（指向本机推送中转服务，loopback 即可）
+if [ -f "$APP_DIR/.env" ]; then
+  if ! grep -q '^MOBILE_PUSH_WEBHOOK=' "$APP_DIR/.env"; then
+    echo "MOBILE_PUSH_WEBHOOK=http://localhost:4000/push" >> "$APP_DIR/.env"
+    log ".env 已补加 MOBILE_PUSH_WEBHOOK=http://localhost:4000/push"
+  fi
+else
+  warn "未找到 $APP_DIR/.env，跳过 MOBILE_PUSH_WEBHOOK 写入"
+fi
+
 # === 第 9 步：等待脚本 + PM2 启动顺序固化 ===============================
 WAIT_SCRIPT="$APP_DIR/wait-tunnel-and-start.sh"
 log "生成等待脚本 $WAIT_SCRIPT ..."
@@ -233,6 +243,13 @@ if [ -d "$APP_DIR" ]; then
     err "项目启动失败，最近 30 行日志："
     pm2 logs "$PM2_NAME" --lines 30 --nostream 2>&1 || true
     exit 1
+  fi
+
+  # 9.4 启动手机 APP 推送中转服务（与主程序独立，loopback 调用）
+  if [ -x "$APP_DIR/start-push-gateway.sh" ]; then
+    "$APP_DIR/start-push-gateway.sh"
+  else
+    warn "未找到 start-push-gateway.sh，跳过推送中转服务（不影响主程序）"
   fi
 else
   warn "未找到 $APP_DIR，跳过项目重启"

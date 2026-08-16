@@ -379,4 +379,18 @@ npm start
 - 新接口已随后端 `server/index.ts` 提供，无需额外构建。
 - SSE 需反向代理**关闭缓冲**：nginx 加 `proxy_set_header X-Accel-Buffering no;`（代码已对响应头设置，配合代理即可）。
 - 重启/部署后，订单轮询（默认每 30 分钟）检测到新订单即触发推送。
-- 若启用系统推送，记得部署 `push-gateway` 并设置 `MOBILE_PUSH_WEBHOOK` 后重启后端。
+
+### 7.1 中转服务一键部署（推荐：部署到本服务器）
+项目已把 `push-gateway` 写进部署脚本，**随后端一起一键启动**，并把 `MOBILE_PUSH_WEBHOOK` 默认指向**本机** `http://localhost:4000/push`（loopback，无需公网 HTTPS）：
+- `deploy-oracle.sh`：步骤 3 自动装中转服务依赖；步骤 4 的 `.env` 自动写入 `MOBILE_PUSH_WEBHOOK`；步骤 6 后调用 `start-push-gateway.sh` 把 `ml-push-gateway` 注册到 PM2 常驻。
+- `setup-cloudflared.sh`：第 8 步确保 `.env` 含该变量；第 9.4 步启动 `ml-push-gateway`。
+
+> 这样 `MOBILE_PUSH_WEBHOOK` 就配在**本服务器**上了（你问的「能配到本服务器吗」= 可以，而且这是默认做法）。
+
+### 7.2 真正发系统通知只需放凭证
+中转服务默认只监听、不推送（缺凭证会优雅跳过，不报错）。放入凭证后即生效：
+- **安卓(FCM)**：把 Firebase 的 `service-account.json` 放到 `push-gateway/`，然后 `pm2 restart ml-push-gateway`。
+- **苹果(APNs)**：把 `AuthKey_XXXX.p8` 放到 `push-gateway/`，设 `APNS_KEY_ID`/`APNS_TEAM_ID`/`APNS_TOPIC`/`APNS_PRODUCTION` 后 `pm2 restart ml-push-gateway`。
+
+> 不放凭证也完全能用：APP 前台 SSE 实时收 + 回前台 `recent` 补推，不丢单。后台推送只是「被杀也能弹通知」的增强。
+> 部署细节见 `DEPLOY-ORACLE.md` 末尾「手机 APP 推送中转服务」附录；中转服务代码见 `push-gateway/`。

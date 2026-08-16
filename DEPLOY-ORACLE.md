@@ -592,3 +592,36 @@ cloudflared tunnel --url http://localhost:3000
 7. 生成 `wait-tunnel-and-start.sh` + 把 PM2 设为 cloudflared 之后启动 + 重启项目（`pm2 delete` 旧的避免端口冲突）
 
 > 两个脚本都支持重复运行。基础部署与隧道部署相互独立：先跑 `deploy-oracle.sh` 把网站跑起来，再跑 `setup-cloudflared.sh` 把固定域名和启动顺序固化。后续更新代码统一用 `git pull && npm run build && pm2 restart ml-finder`（隧道模式用 `pm2 delete ml-finder && pm2 start ./wait-tunnel-and-start.sh --name ml-finder && pm2 save`）。
+
+---
+
+## 附录：手机 APP 推送中转服务（push-gateway，一键随部署启动）
+
+项目要让手机 APP 在**后台/被杀**时也能弹系统通知，需要一个中转服务把新订单事件转给 FCM(安卓)/APNs(苹果)。
+这个中转服务（`push-gateway/`）已经**写进部署脚本，随主程序一起一键启动**，无需手动处理。
+
+### 部署脚本做了什么
+- `deploy-oracle.sh`：步骤 3 自动 `npm install` 中转服务依赖；步骤 4 的 `.env` 自动写入
+  `MOBILE_PUSH_WEBHOOK=http://localhost:4000/push`（指向**本服务器**的 loopback 地址，无需公网 HTTPS）；
+  步骤 6 之后调用 `start-push-gateway.sh` 把中转服务以 `ml-push-gateway` 名注册到 PM2 常驻。
+- `setup-cloudflared.sh`：第 8 步确保 `.env` 含 `MOBILE_PUSH_WEBHOOK`；第 9.4 步启动 `ml-push-gateway`。
+
+### 想真正发系统通知，还需一步（放凭证）
+中转服务默认只监听、不推送（缺凭证会优雅跳过，不报错）。放入凭证后即生效：
+1. **安卓(FCM)**：到 Firebase 后台下载 `service-account.json`，放到 `~/ml-product-finder/push-gateway/`，然后：
+   ```bash
+   pm2 restart ml-push-gateway
+   ```
+2. **苹果(APNs)**：把 `AuthKey_XXXX.p8` 放到 `~/ml-product-finder/push-gateway/`，并设环境变量
+   `APNS_KEY_ID` / `APNS_TEAM_ID` / `APNS_TOPIC` / `APNS_PRODUCTION`，再 `pm2 restart ml-push-gateway`。
+
+### 常用命令
+| 操作 | 命令 |
+|------|------|
+| 看中转服务状态 | `pm2 status`（应看到 `ml-push-gateway` online） |
+| 看日志 | `pm2 logs ml-push-gateway` |
+| 重启（放完凭证后） | `pm2 restart ml-push-gateway` |
+| 停掉（不想用后台推送） | `pm2 stop ml-push-gateway` |
+
+> 不放凭证也完全能用：APP 在前台时靠 SSE 实时收、回前台时靠 `recent` 补推，不丢单。后台推送只是「被杀也能弹通知」的增强。
+> 接口与手机端实现见 `docs/mobile-push-complete-guide.md`。
