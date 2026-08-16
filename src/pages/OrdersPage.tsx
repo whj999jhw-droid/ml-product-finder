@@ -106,6 +106,8 @@ export function OrdersPage() {
   const [ordersError, setOrdersError] = useState<Record<string, string>>({});
   const [translated, setTranslated] = useState<Record<string, string>>({});
   const [translating, setTranslating] = useState(false);
+  // 顶部「后台同步新增 X 条」提示：每店铺未读的新增（sync）订单数
+  const [newCounts, setNewCounts] = useState<Record<string, number>>({});
   const loadingStoresRef = useRef<Set<string>>(new Set());
 
   const loadStores = useCallback(async () => {
@@ -138,6 +140,7 @@ export function OrdersPage() {
       const d = await r.json();
       if (d.success) {
         setOrdersMap((m) => ({ ...m, [storeId]: { orders: d.orders || [], counts: d.counts || { total: 0, unshipped: 0, shipped: 0, cancelled: 0 }, loading: false, loaded: true } }));
+        setNewCounts((nc) => ({ ...nc, [storeId]: d.newCount || 0 }));
       } else {
         const msg = d.message || '订单拉取失败';
         MessagePlugin.error(msg);
@@ -162,6 +165,10 @@ export function OrdersPage() {
   }, [activeStore, ordersMap, loadOrders]);
 
   const openDetail = useCallback(async (orderId: string, storeId: string) => {
+    // 点击查看详情即视为已读：关闭顶部「后台同步新增 X 条」提示
+    setNewCounts((nc) => ({ ...nc, [storeId]: 0 }));
+    fetch(`/api/ml/stores/${storeId}/orders/seen`, { method: 'POST' }).catch(() => {});
+    if (!orderId) return; // 无具体订单时仅消除提示，不拉详情
     setDetail({ orderId, storeId, loading: true });
     setTranslated({});
     try {
@@ -188,6 +195,26 @@ export function OrdersPage() {
     } catch (err: any) {
       MessagePlugin.error(err?.message || '详情获取失败');
       setDetail(null);
+    }
+  }, []);
+
+  // 手动刷新某店铺订单（同步增量同步后返回最新缓存）
+  const syncOrders = useCallback(async (storeId: string) => {
+    setOrdersMap((m) => ({ ...m, [storeId]: { ...(m[storeId] || { orders: [], counts: { total: 0, unshipped: 0, shipped: 0, cancelled: 0 } }), loading: true, loaded: true } }));
+    try {
+      const r = await fetch(`/api/ml/stores/${storeId}/sync-orders`, { method: 'POST' });
+      const d = await r.json();
+      if (d.success) {
+        setOrdersMap((m) => ({ ...m, [storeId]: { orders: d.orders || [], counts: d.counts || { total: 0, unshipped: 0, shipped: 0, cancelled: 0 }, loading: false, loaded: true } }));
+        setNewCounts((nc) => ({ ...nc, [storeId]: d.newCount || 0 }));
+        MessagePlugin.success('订单已同步');
+      } else {
+        MessagePlugin.error(d.message || '同步失败');
+        setOrdersMap((m) => ({ ...m, [storeId]: { ...(m[storeId] || { orders: [] } as any), loading: false, loaded: true } }));
+      }
+    } catch (err: any) {
+      MessagePlugin.error(err?.message || '同步失败');
+      setOrdersMap((m) => ({ ...m, [storeId]: { ...(m[storeId] || { orders: [] } as any), loading: false, loaded: true } }));
     }
   }, []);
 
@@ -235,7 +262,12 @@ export function OrdersPage() {
       cell: ({ row }: any) => {
         const cat = categoryOf(row.mlStatus);
         const theme = cat === 'unshipped' ? 'warning' : cat === 'shipped' ? 'success' : cat === 'cancelled' ? 'danger' : 'default';
-        return <Tag theme={theme as any} variant="light">{STATUS_TEXT[row.mlStatus] || row.mlStatus}</Tag>;
+        return (
+          <div className="flex items-center gap-2 flex-wrap">
+            <Tag theme={theme as any} variant="light">{STATUS_TEXT[row.mlStatus] || row.mlStatus}</Tag>
+            {row.syncSaved && <Tag theme="primary" variant="light" size="small">后台同步</Tag>}
+          </div>
+        );
       },
     },
   ];
@@ -289,6 +321,19 @@ export function OrdersPage() {
 
   return (
     <div className="p-3 space-y-4" style={{ overflowY: 'auto', height: '100%' }}>
+      {newCounts[activeStore] > 0 && (
+        <div
+          className="flex items-center justify-between gap-3 rounded-lg px-4 py-3"
+          style={{ background: 'var(--td-brand-color-light)', color: 'var(--td-brand-color)' }}
+        >
+          <span className="text-sm">
+            🔔 后台定时同步新增 <b>{newCounts[activeStore]}</b> 条订单（已自动保存到本地，无需每次手动刷新）
+          </span>
+          <Button size="small" variant="text" onClick={() => openDetail(String(ordersMap[activeStore]?.orders?.[0]?.id || ''), activeStore)}>
+            查看并消除
+          </Button>
+        </div>
+      )}
       <Card title={<span><ShopIcon /> 订单管理（每店铺独立）</span>} bordered>
         {stores.length === 0 ? (
           <div className="text-sm" style={{ color: 'var(--td-text-color-secondary)' }}>
@@ -300,7 +345,7 @@ export function OrdersPage() {
               <Tabs.TabPanel key={s.id} value={s.id} label={s.nickname || s.mlUserNick || '未命名店铺'}>
                 <div className="mt-3">
                   <Space className="mb-3">
-                    <Button size="small" variant="outline" icon={<RefreshIcon />} loading={ordersMap[s.id]?.loading} onClick={() => loadOrders(s.id)}>
+                    <Button size="small" variant="outline" icon={<RefreshIcon />} loading={ordersMap[s.id]?.loading} onClick={() => syncOrders(s.id)}>
                       刷新订单
                     </Button>
                     <span className="text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>

@@ -1098,14 +1098,71 @@ app.get('/api/ml/stores/:id/orders', async (req, res) => {
   }
 });
 
-// 店铺全部订单（分页拉取各状态，分类为 未发货/已发货/已取消），供订单管理页使用
+// 店铺全部订单（优先读本地缓存即时返回，后台再增量同步保鲜），供订单管理页使用
 app.get('/api/ml/stores/:id/all-orders', async (req, res) => {
   try {
     const store = stores.getStoreRaw(req.params.id);
     if (!store) return res.status(404).json({ success: false, message: '店铺不存在' });
     // 注意：不要解构出 orders，否则会与 import * as orders 模块同名造成「暂时性死区」
-    const list = await orders.fetchAllOrdersForStore(store);
-    res.json({ success: true, orders: list.orders, counts: list.counts });
+    const cached = db.getCachedOrders(store.id);
+    const state = db.getOrderSyncState(store.id);
+    if (!cached.orders.length) {
+      // 首次进入（本地无缓存）：阻塞做一次全量同步，避免页面空白（仅首次较慢）
+      const r = await orders.syncStoreOrders(store, 'manual');
+      const fresh = db.getCachedOrders(store.id);
+      return res.json({
+        success: true,
+        orders: fresh.orders,
+        counts: fresh.counts,
+        fromCache: false,
+        newCount: orders.getNewSyncOrderCount(store.id),
+        syncedAt: db.getOrderSyncState(store.id)?.last_sync_at || null,
+        needsSync: false,
+        bootstrapped: r.fromBootstrap,
+      });
+    }
+    // 命中缓存：立即返回，后台增量同步（不阻塞页面）
+    orders.syncStoreOrders(store).catch((e) => console.error('[Orders] 后台增量同步失败:', e?.message || e));
+    res.json({
+      success: true,
+      orders: cached.orders,
+      counts: cached.counts,
+      fromCache: true,
+      newCount: orders.getNewSyncOrderCount(store.id),
+      syncedAt: state?.last_sync_at || null,
+      needsSync: false,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+// 手动刷新某店铺订单（同步增量同步后返回最新缓存，供「刷新订单」按钮即时反馈）
+app.post('/api/ml/stores/:id/sync-orders', async (req, res) => {
+  try {
+    const store = stores.getStoreRaw(req.params.id);
+    if (!store) return res.status(404).json({ success: false, message: '店铺不存在' });
+    await orders.syncStoreOrders(store, 'manual');
+    const fresh = db.getCachedOrders(store.id);
+    res.json({
+      success: true,
+      orders: fresh.orders,
+      counts: fresh.counts,
+      newCount: orders.getNewSyncOrderCount(store.id),
+      syncedAt: db.getOrderSyncState(store.id)?.last_sync_at || null,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+// 标记某店铺订单已查看（关闭顶部「后台同步新增 X 条」提示）
+app.post('/api/ml/stores/:id/orders/seen', async (req, res) => {
+  try {
+    const store = stores.getStoreRaw(req.params.id);
+    if (!store) return res.status(404).json({ success: false, message: '店铺不存在' });
+    db.setOrderSyncState(store.id, { last_seen_at: new Date().toISOString() });
+    res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err?.message || String(err) });
   }
@@ -2577,6 +2634,13 @@ function startOrderPolling() {
         if (triggered.length) console.log('[Orders] 轮询完成，触发提醒:', JSON.stringify(triggered));
       })
       .catch((e) => console.error('[Orders] 轮询出错:', e?.message || e));
+    // 后台增量同步各店铺订单到本地（首跑建游标，后续仅扫近期；定时同步新增会标记并计入顶部提示）
+    orders.syncAllStoreOrders()
+      .then((report) => {
+        const withNew = report.filter((r) => (r.newOrders || 0) > 0);
+        if (withNew.length) console.log('[Orders] 后台同步新增:', JSON.stringify(withNew));
+      })
+      .catch((e) => console.error('[Orders] 后台同步出错:', e?.message || e));
   }, intervalMs);
   const minutes = Math.round(intervalMs / 60 / 1000);
   console.log(`[Orders] 每 ${minutes} 分钟订单轮询已启动`);

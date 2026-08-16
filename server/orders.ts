@@ -7,6 +7,13 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { getAllStores, getStoreSellerInfo, storeApiGet, updateStore, Store } from './stores.js';
 import { notifyNewOrder } from './notify.js';
+import {
+  getCachedOrderIds,
+  upsertOrders,
+  getOrderSyncState,
+  setOrderSyncState,
+  countNewSyncOrders,
+} from './db.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -423,6 +430,118 @@ export async function fetchAllOrdersForStore(store: Store): Promise<{
     cancelled: orders.filter((o) => o.mlStatus === 'cancelled').length,
   };
   return { orders, counts };
+}
+
+/**
+ * 增量拉取某店铺「date_created 晚于 sinceMs」的订单并分类。
+ * 用于后台定时同步与页面手动刷新：仅扫近期订单，避免每次全量翻 1000 单。
+ * - 普通站点：按 paid/cancelled 分页 date_desc，遇到整页最新订单已早于游标即提前停。
+ * - CBT：父订单无 date_created，仍按页收集子订单，过滤出 date_created > sinceMs 的。
+ */
+export async function fetchRecentOrdersSince(store: Store, sinceMs: number): Promise<{ orders: any[] }> {
+  const isCbt = (store.site || '').toUpperCase() === 'CBT';
+  const byId = new Map<string, any>();
+
+  if (isCbt) {
+    let offset = 0;
+    for (let page = 0; page < MAX_PAGES_PER_STATUS; page++) {
+      const data = await storeApiGet(store, `/marketplace/orders/search?sort=date_desc&limit=50&offset=${offset}`);
+      const parents = data.results || [];
+      const children = await expandMarketplaceChildren(store, parents);
+      const shipStatusMap = await fetchMarketplaceShipmentStatuses(store, children);
+      for (const o of children) {
+        if (new Date(o.date_created).getTime() > sinceMs) {
+          byId.set(String(o.id), { ...o, mlStatus: classifyOrder(o, shipStatusMap.get(String(o.id))), orderStatus: o.status, shipStatus: shipStatusMap.get(String(o.id)) });
+        }
+      }
+      if (parents.length < 50) break;
+      offset += 50;
+    }
+  } else {
+    const seller = await getStoreSellerInfo(store);
+    if (!seller.id) return { orders: [] };
+    for (const st of ORDER_STATUSES) {
+      let offset = 0;
+      for (let page = 0; page < MAX_PAGES_PER_STATUS; page++) {
+        const url = `/orders/search?seller=${seller.id}&order.status=${st}&sort=date_desc&limit=50&offset=${offset}`;
+        const data = await storeApiGet(store, url);
+        const results: any[] = data.results || [];
+        // 整页最新订单都已早于游标：后续页更旧，无需再翻
+        if (results.length && new Date(results[0].date_created || 0).getTime() <= sinceMs) break;
+        for (const o of results) {
+          if (new Date(o?.date_created || 0).getTime() > sinceMs) {
+            byId.set(String(o.id), { ...o, mlStatus: classifyOrder(o), orderStatus: o.status, shipStatus: o.shipping?.status });
+          }
+        }
+        if (results.length < 50) break;
+        offset += 50;
+      }
+    }
+  }
+
+  const orders = [...byId.values()].sort(
+    (a, b) => new Date(b.date_created).getTime() - new Date(a.date_created).getTime()
+  );
+  return { orders };
+}
+
+/**
+ * 同步（拉取并持久化）某店铺订单。
+ * - 首跑（无 last_max_date）：视为历史回填，source 强制 'manual'（列表不标记），仅建立增量游标。
+ * - 后续：source 用 'sync'，真正新增的订单（DB 中此前无此 id）被标记，供列表与顶部提示使用。
+ * - 始终更新 last_max_date 增量游标（带重叠窗口），保证不漏单且下一轮只需扫近期。
+ */
+export async function syncStoreOrders(
+  store: Store,
+  sourceOverride?: 'manual' | 'sync'
+): Promise<{ newCount: number; total: number; fromBootstrap: boolean }> {
+  const state = getOrderSyncState(store.id);
+  const isBootstrap = !state?.last_max_date;
+  const effectiveSource: string = isBootstrap ? 'manual' : (sourceOverride || 'sync');
+  const sinceMs = state?.last_max_date
+    ? new Date(state.last_max_date).getTime() - ORDER_CURSOR_SLACK_MS
+    : 0;
+
+  const fetched = await fetchRecentOrdersSince(store, sinceMs);
+  const existingIds = getCachedOrderIds(store.id);
+  const newOnes = fetched.orders.filter((o: any) => !existingIds.has(String(o.id)));
+
+  upsertOrders(store.id, store.site, fetched.orders, effectiveSource);
+
+  let maxMs = sinceMs;
+  for (const o of fetched.orders) {
+    const t = new Date(o.date_created).getTime();
+    if (!isNaN(t) && t > maxMs) maxMs = t;
+  }
+  setOrderSyncState(store.id, {
+    last_sync_at: new Date().toISOString(),
+    last_max_date: maxMs > 0 ? new Date(maxMs).toISOString() : null,
+  });
+
+  return { newCount: newOnes.length, total: fetched.orders.length, fromBootstrap: isBootstrap };
+}
+
+/** 遍历所有启用店铺做增量同步（后台定时任务调用） */
+export async function syncAllStoreOrders(): Promise<
+  Array<{ storeId: string; store: string; newOrders?: number; total?: number; error?: string }>
+> {
+  const stores = getAllStores().filter((s) => s.enabled);
+  const report: Array<{ storeId: string; store: string; newOrders?: number; total?: number; error?: string }> = [];
+  for (const s of stores) {
+    try {
+      const r = await syncStoreOrders(s);
+      report.push({ storeId: s.id, store: s.nickname || s.site, newOrders: r.newCount, total: r.total });
+    } catch (e: any) {
+      report.push({ storeId: s.id, store: s.nickname || s.site, error: e?.message || String(e) });
+    }
+  }
+  return report;
+}
+
+/** 供路由统计「定时同步新增且未读」条数 */
+export function getNewSyncOrderCount(storeId: string): number {
+  const state = getOrderSyncState(storeId);
+  return countNewSyncOrders(storeId, state?.last_seen_at ?? null);
 }
 
 /** 补充订单商品图片（CBT 用 /marketplace/items，普通站点用 /items） */
