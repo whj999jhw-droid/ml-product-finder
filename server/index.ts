@@ -1186,6 +1186,16 @@ app.use('/api/mobile', (req, res, next) => {
   next();
 });
 
+// 同样放开 /api/ml：手机端订单列表 / 同步接口（stores、all-orders、sync-orders）也需跨域，
+// iOS WKWebView 不放开会直接拦截（No 'Access-Control-Allow-Origin'），导致订单拉不到。
+app.use('/api/ml', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 // SSE 实时流：手机 APP 在前台时保持此长连接，新订单立即推送
 app.get('/api/mobile/stream', (req, res) => {
   res.writeHead(200, {
