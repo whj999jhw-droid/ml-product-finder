@@ -43,12 +43,13 @@
 {
   "success": true,
   "stores": [
-    { "id": "store_uuid_1", "name": "美国店", "site": "MLM", "enabled": true, "...": "其他字段" },
-    { "id": "store_uuid_2", "name": "墨西哥店", "site": "MLM", "enabled": true }
+    { "id": "store_uuid_1", "nickname": "美国店", "site": "MLM", "enabled": true, "...": "其他字段" },
+    { "id": "store_uuid_2", "nickname": "墨西哥店", "site": "MLM", "enabled": true }
   ]
 }
 ```
 > 只取 `enabled === true` 的店铺作为 Tab。
+> ⚠️ 店铺**显示名**字段是 `nickname`（**不是** `name`）——对接时务必用 `nickname`，否则取不到店铺名。
 
 ### 2.2 某店铺全部订单 `GET /api/ml/stores/:id/all-orders`（或 `POST .../sync-orders`）
 ```json
@@ -102,7 +103,7 @@
 -- 店铺表
 CREATE TABLE IF NOT EXISTS stores (
   store_id    TEXT PRIMARY KEY,
-  name        TEXT,
+  nickname    TEXT,
   site        TEXT,
   enabled     INTEGER,
   updated_at  TEXT
