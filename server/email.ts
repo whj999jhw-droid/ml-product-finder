@@ -70,7 +70,7 @@ export function getEmailConfig(): EmailConfig {
  * 环境变量（ML_SMTP_*）优先，便于在 Render 等平台一次性配置发件人；
  * 否则回退到已保存的 ml-email.json。这样前端只需让用户填「收件邮箱」。
  */
-function resolveSmtp(): { host: string; port: number; secure: boolean; user: string; pass: string; from: string } {
+export function resolveSmtp(): { host: string; port: number; secure: boolean; user: string; pass: string; from: string } {
   return {
     host: process.env.ML_SMTP_HOST || emailConfig.host,
     port: process.env.ML_SMTP_PORT ? Number(process.env.ML_SMTP_PORT) : emailConfig.port,
@@ -97,7 +97,7 @@ function resolveFrom(smtp: { from: string; user: string }): string {
 }
 
 /** 实际收件人：UI 填写优先，其次环境变量 ML_EMAIL_TO 兜底 */
-function resolveRecipient(): string {
+export function resolveRecipient(): string {
   return emailConfig.to || process.env.ML_EMAIL_TO || '';
 }
 

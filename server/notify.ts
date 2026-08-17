@@ -7,7 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import nodemailer from 'nodemailer';
-import { getEmailConfig } from './email.js';
+import { resolveSmtp, resolveRecipient } from './email.js';
 import { ML_SITES, type MLSiteCode } from './mercadolibre.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -120,14 +120,21 @@ export function getPollIntervalMs(): number {
 }
 
 async function sendEmailAlert(subject: string, textBody: string, htmlBody?: string): Promise<{ success: boolean; message: string }> {
-  const cfg = getEmailConfig();
-  if (!cfg.enabled || !cfg.host || !cfg.user || !cfg.to) {
-    return { success: false, message: '邮件未启用或未配置（需在「邮件通知」中开启并填好 SMTP + 收件人）' };
+  // 邮件是否启用统一由 notifyConfig.emailEnabled 控制（notifyNewOrder 已判断），
+  // 这里只校验 SMTP 与收件人是否配置，保持与 sendTestEmail 一致，避免「测试能发、实际不发」。
+  const smtp = resolveSmtp();
+  const to = resolveRecipient();
+  if (!to || !smtp.host || !smtp.user) {
+    return { success: false, message: '邮件未配置（需填写收件邮箱，且服务端已配置 SMTP 发件人）' };
   }
   try {
-    const smtp = { host: cfg.host, port: cfg.port, secure: cfg.secure, user: cfg.user, pass: cfg.pass, from: cfg.from || cfg.user };
-    const transporter = nodemailer.createTransport(smtp);
-    await transporter.sendMail({ from: smtp.from, to: cfg.to, subject, text: textBody, html: htmlBody });
+    const transporter = nodemailer.createTransport({
+      host: smtp.host,
+      port: smtp.port,
+      secure: smtp.secure,
+      auth: { user: smtp.user, pass: smtp.pass },
+    });
+    await transporter.sendMail({ from: smtp.from, to, subject, text: textBody, html: htmlBody });
     return { success: true, message: '邮件已发送' };
   } catch (e: any) {
     return { success: false, message: e?.message || '发送失败' };
