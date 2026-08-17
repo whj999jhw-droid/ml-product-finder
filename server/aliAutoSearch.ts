@@ -42,7 +42,11 @@ export async function autoSearch1688ByKeyword(keyword: string): Promise<AliAutoR
     return {
       available: false,
       message:
-        '未安装 Playwright（npm install playwright），无法使用免密钥搜索。建议：① 配置 1688 开放平台密钥走 /api/ml/sourcing/1688/search（图搜更准）；② 在本机登录 1688 后手动图搜。',
+        '未安装 Playwright（Node 包）。请在后端项目目录执行：\n' +
+        '  npm install -D playwright\n' +
+        '  npx playwright install chromium\n' +
+        '注意：这是 Node 依赖，不是 pip 包，不要用 pip3 install playwright。\n' +
+        '建议：① 配置 1688 开放平台密钥走 /api/ml/sourcing/1688/search（图搜更准）；② 在本机登录 1688 后手动图搜。',
     };
   }
 

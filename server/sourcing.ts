@@ -388,21 +388,30 @@ async function search1688ByPython(params: {
   // 先检查 Python 环境
   try {
     const { execSync } = await import('child_process');
-    let pythonCmd = 'python3';
-    try { execSync('python3 --version', { stdio: 'pipe' }); } catch {
-      try { execSync('python --version', { stdio: 'pipe' }); pythonCmd = 'python'; } catch {
-        return { available: false, message: '本机未安装 Python。请安装 Python 3.9+ 后重试。' };
+    // 优先使用环境变量指定的 Python/venv 路径，便于在 PEP 668 系统上隔离安装 search1688api
+    let pythonCmd = process.env.ML_PYTHON_PATH || 'python3';
+    try { execSync(`"${pythonCmd}" --version`, { stdio: 'pipe' }); } catch {
+      pythonCmd = 'python3';
+      try { execSync('python3 --version', { stdio: 'pipe' }); } catch {
+        try { execSync('python --version', { stdio: 'pipe' }); pythonCmd = 'python'; } catch {
+          return { available: false, message: '本机未安装 Python。请安装 Python 3.9+ 后重试。' };
+        }
       }
     }
     // 检查 search1688api 是否安装
     try {
-      execSync(`${pythonCmd} -c "import search1688api"`, { stdio: 'pipe' });
+      execSync(`"${pythonCmd}" -c "import search1688api"`, { stdio: 'pipe' });
     } catch {
       return {
         available: false,
         message:
-          'search1688api 库未安装。请在运行后端的服务器上执行：\n' +
-          '  pip3 install search1688api\n' +
+          'search1688api 库未安装。Ubuntu/Debian 12+ 会提示 externally-managed-environment，推荐以下任一方式：\n' +
+          '① 创建独立 venv（最干净）：\n' +
+          '   python3 -m venv /home/ubuntu/ml-venv\n' +
+          '   /home/ubuntu/ml-venv/bin/pip install search1688api\n' +
+          '   export ML_PYTHON_PATH=/home/ubuntu/ml-venv/bin/python3  （放入 ~/.bashrc 并 source）\n' +
+          '② 强制安装到系统 Python（有破坏系统包风险）：\n' +
+          '   pip3 install search1688api --break-system-packages\n' +
           '或切换为「OneBound」方案（在页面左上方 1688 配置里选 OneBound 并填 Key/Secret）。\n' +
           '也可使用「1688 免密钥找同款（关键词）」功能，它通过 Playwright 直接搜索，无需该 Python 库。',
       };
@@ -481,7 +490,7 @@ except Exception as e:
 
     // 执行 Python 脚本（最多 30 秒）
     try {
-      execSync(`${pythonCmd} "${scriptPath}"`, { timeout: 30000, stdio: 'pipe' });
+      execSync(`"${pythonCmd}" "${scriptPath}"`, { timeout: 30000, stdio: 'pipe' });
     } catch (e: any) {
       const stderr = e.stderr?.toString() || '';
       return { available: true, message: `Python 执行失败：${stderr.slice(0, 200) || e.message}` };
