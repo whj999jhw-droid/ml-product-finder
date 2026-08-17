@@ -26,6 +26,8 @@ export interface FulfillmentDeadline {
   remainingHoursText: string;
   /** 当前 deadline 的数据来源 / 计算口径 */
   source: 'business_72h' | 'business_72h_no_holiday' | 'fallback' | null;
+  /** 计算时使用的国家码（用于调试/确认节假日口径） */
+  countryCode?: string;
 }
 
 /** 自下单起算的履约营业小时数（规则要求 72 小时） */
@@ -171,6 +173,13 @@ export function extractHandlingDeadline(
     ? 'business_72h'
     : 'business_72h_no_holiday';
 
+  // 调试日志：帮助排查「国家代码/节假日库」是否按预期工作
+  console.log(
+    `[fulfillment] order=${order?.id || 'n/a'} site=${site || order?.site || 'n/a'} ` +
+      `country=${countryCode} holidayLibAvailable=${holidayLibAvailable} ` +
+      `created=${order?.date_created} deadline=${deadline}`
+  );
+
   const now = Date.now();
   const diffMs = deadlineMs - now;
   const remainingHours = diffMs / MS_HOUR;
@@ -180,6 +189,7 @@ export function extractHandlingDeadline(
     remainingHours,
     remainingHoursText: fmtRemainingText(remainingHours),
     source,
+    countryCode,
   };
 }
 
@@ -203,6 +213,7 @@ export function recalcHandlingDeadline(order: any): FulfillmentDeadline {
     deadline,
     remainingHours,
     remainingHoursText: fmtRemainingText(remainingHours),
-    source: order?.deadlineSource || null,
+    source: order?.source || order?.deadlineSource || null,
+    countryCode: order?.countryCode || null,
   };
 }

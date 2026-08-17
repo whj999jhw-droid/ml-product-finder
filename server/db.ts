@@ -1,7 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { recalcHandlingDeadline } from './fulfillment.js';
+import { recalcHandlingDeadline, extractHandlingDeadline } from './fulfillment.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -215,7 +215,7 @@ export function createMessage(data: {
 export function getCachedOrders(storeId: string): { orders: any[]; counts: { total: number; unshipped: number; shipped: number; cancelled: number } } {
   const empty = { orders: [], counts: { total: 0, unshipped: 0, shipped: 0, cancelled: 0 } };
   if (!db) return empty;
-  const rows = db.prepare('SELECT order_json, source, handling_deadline FROM orders WHERE store_id = ? ORDER BY date_created DESC').all(storeId);
+  const rows = db.prepare('SELECT order_json, source, site, handling_deadline FROM orders WHERE store_id = ? ORDER BY date_created DESC').all(storeId);
   const orders = rows
     .map((r: any) => {
       try {
@@ -225,7 +225,12 @@ export function getCachedOrders(storeId: string): { orders: any[]; counts: { tot
         if (r.handling_deadline && !o.handlingDeadline) {
           o.handlingDeadline = r.handling_deadline;
         }
-        const fd = recalcHandlingDeadline(o);
+        let fd = recalcHandlingDeadline(o);
+        // 旧缓存没有 handlingDeadline 时，按下单时间+站点重新计算（兼容旧库数据）
+        if (!fd.deadline && o.mlStatus === 'unshipped' && o.date_created) {
+          fd = extractHandlingDeadline(o, null, r.site || o.site || '');
+          o.handlingDeadline = fd.deadline;
+        }
         o.remainingHours = fd.remainingHours;
         o.remainingHoursText = fd.remainingHoursText;
         return o;
@@ -343,11 +348,11 @@ export function getSyncOrdersSince(sinceIso: string | null): any[] {
   const rows = sinceIso
     ? db
         .prepare(
-          "SELECT store_id, id, order_json, created_at, source, handling_deadline FROM orders WHERE source = 'sync' AND created_at > ? ORDER BY created_at DESC"
+          "SELECT store_id, id, order_json, created_at, source, site, handling_deadline FROM orders WHERE source = 'sync' AND created_at > ? ORDER BY created_at DESC"
         )
         .all(sinceIso)
     : db
-        .prepare("SELECT store_id, id, order_json, created_at, source, handling_deadline FROM orders WHERE source = 'sync' ORDER BY created_at DESC")
+        .prepare("SELECT store_id, id, order_json, created_at, source, site, handling_deadline FROM orders WHERE source = 'sync' ORDER BY created_at DESC")
         .all();
   return rows.map((r: any) => {
     try {
@@ -355,7 +360,11 @@ export function getSyncOrdersSince(sinceIso: string | null): any[] {
       if (r.handling_deadline && !o.handlingDeadline) {
         o.handlingDeadline = r.handling_deadline;
       }
-      const fd = recalcHandlingDeadline(o);
+      let fd = recalcHandlingDeadline(o);
+      if (!fd.deadline && o.mlStatus === 'unshipped' && o.date_created) {
+        fd = extractHandlingDeadline(o, null, r.site || o.site || '');
+        o.handlingDeadline = fd.deadline;
+      }
       o.remainingHours = fd.remainingHours;
       o.remainingHoursText = fd.remainingHoursText;
       // 保留数据库元信息，便于调用方使用
