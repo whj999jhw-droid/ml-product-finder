@@ -602,7 +602,7 @@ cloudflared tunnel --url http://localhost:3000
 
 ### 部署脚本做了什么
 - `deploy-oracle.sh`：步骤 3 自动 `npm install` 中转服务依赖；步骤 4 的 `.env` 自动写入
-  `MOBILE_PUSH_WEBHOOK=http://localhost:4000/push`（指向**本服务器**的 loopback 地址，无需公网 HTTPS）；
+  `MOBILE_PUSH_WEBHOOK=http://localhost:4100/push`（指向**本服务器**的 loopback 地址，无需公网 HTTPS）；
   步骤 6 之后调用 `start-push-gateway.sh` 把中转服务以 `ml-push-gateway` 名注册到 PM2 常驻。
 - `setup-cloudflared.sh`：第 8 步确保 `.env` 含 `MOBILE_PUSH_WEBHOOK`；第 9.4 步启动 `ml-push-gateway`。
 

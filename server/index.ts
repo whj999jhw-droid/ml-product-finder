@@ -1176,6 +1176,16 @@ app.post('/api/ml/stores/:id/orders/seen', async (req, res) => {
 // APP 收到事件后，点开通知调用 /api/mobile/orders/:storeId/:orderId 拉取完整详情
 // （电脑端详情 + 短信内容合并返回）。
 
+// 允许跨域：手机 APP 的 WebView（file:// 源）会跨域调用本组接口，尤其 iOS WKWebView 强制 CORS。
+// 仅对 /api/mobile 放开，便于内部分发使用（接口本身未鉴权，属已知取舍）。
+app.use('/api/mobile', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 // SSE 实时流：手机 APP 在前台时保持此长连接，新订单立即推送
 app.get('/api/mobile/stream', (req, res) => {
   res.writeHead(200, {
