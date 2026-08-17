@@ -30,42 +30,78 @@ export interface FulfillmentDeadline {
   countryCode?: string;
 }
 
+/**
+ * 履约计算口径（运营约定 + 中国日历）：
+ *   - 官方红线：订单生成后 72 小时内发货并上传单号（Mercado Libre 跨境卖家政策）。
+ *   - 内部管控：按「72 个营业小时」自下单起算；周末（中国周六日）不计入、顺延；
+ *     中国法定节假日不计入、顺延。
+ *   - 日历口径：一律按「中国日历」判断工作日/周末/法定假日（中国 UTC+8，无夏令时）。
+ */
+
 /** 自下单起算的履约营业小时数（规则要求 72 小时） */
 const FULFILLMENT_BUSINESS_HOURS = 72;
 
-/** 美客多站点 → ISO 国家码（用于 date-holidays 取节假日） */
-const SITE_TO_COUNTRY: Record<string, string> = {
-  MLM: 'MX', // 墨西哥
-  MLB: 'BR', // 巴西
-  MLC: 'CL', // 智利
-  MCO: 'CO', // 哥伦比亚
-  MLA: 'AR', // 阿根廷
-  MLU: 'UY', // 乌拉圭
-  MPE: 'PE', // 秘鲁
-  MEC: 'EC', // 厄瓜多尔
-  MLV: 'VE', // 委内瑞拉
-  MLCR: 'CR', // 哥斯达黎加
-  MBO: 'BO', // 玻利维亚
-  MPA: 'PA', // 巴拿马
-  MLN: 'NI', // 尼加拉瓜
-  MRD: 'DO', // 多米尼加
-  CBT: 'MX', // 跨境：按收货国较难判定，默认墨西哥口径（仅跳过周末+可能节假日）
-  DEFAULT: 'MX',
-};
+/** 履约日历口径：中国（周末=中国周六日；节假日=中国法定节假日） */
+const FULFILLMENT_COUNTRY = 'CN';
+/** 中国时区偏移（小时），用于把美客多 UTC 时间换算到中国自然日来判工作日 */
+const FULFILLMENT_TZ_OFFSET_HOURS = 8;
+
+/**
+ * 中国调休日历补充表（date-holidays 库只覆盖「法定核心假日」，无法处理国务院调休）。
+ * 数据来自《国务院办公厅关于2026年部分节假日安排的通知》：
+ *   - CN_HOLIDAYS：调休放假延展日（含核心假日，统一列出，确保长假区间全部顺延）；
+ *   - CN_WORKDAYS：调休补班日（落在周六/周日但须上班，须当工作日消耗额度）。
+ * 每年更新一次即可；未来年份若无数据，则退化为「仅核心法定假日+周末」。
+ */
+const CN_HOLIDAYS_2026: string[] = [
+  // 元旦 1/1-1/3（1/4 补班）
+  '2026-01-01', '2026-01-02', '2026-01-03',
+  // 春节 2/15(除夕)-2/23（2/14、2/28 补班），共 9 天
+  '2026-02-15', '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19',
+  '2026-02-20', '2026-02-21', '2026-02-22', '2026-02-23',
+  // 清明 4/4-4/6
+  '2026-04-04', '2026-04-05', '2026-04-06',
+  // 劳动 5/1-5/5（5/9 补班）
+  '2026-05-01', '2026-05-02', '2026-05-03', '2026-05-04', '2026-05-05',
+  // 端午 6/19-6/21
+  '2026-06-19', '2026-06-20', '2026-06-21',
+  // 中秋 9/25-9/27
+  '2026-09-25', '2026-09-26', '2026-09-27',
+  // 国庆 10/1-10/7（9/20、10/10 补班）
+  '2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04',
+  '2026-10-05', '2026-10-06', '2026-10-07',
+];
+const CN_WORKDAYS_2026: string[] = [
+  '2026-01-04',
+  '2026-02-14', '2026-02-28',
+  '2026-05-09',
+  '2026-09-20', '2026-10-10',
+];
+
+const CN_HOLIDAYS_SET = new Set(CN_HOLIDAYS_2026);
+const CN_WORKDAYS_SET = new Set(CN_WORKDAYS_2026);
+
+/** 取某本地 Date 的 ISO 日期串（YYYY-MM-DD），按中国自然日 */
+function isoDateOf(d: Date): string {
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth() + 1;
+  const day = d.getUTCDate();
+  return `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
 
 let holidayCheckerCache: Map<string, any> = new Map();
 let holidayLibAvailable = true;
 
-function getCountryCode(site?: string): string {
-  const key = (site || 'DEFAULT').toUpperCase();
-  return SITE_TO_COUNTRY[key] ?? SITE_TO_COUNTRY.DEFAULT;
+function getCountryCode(_site?: string): string {
+  // 统一按中国日历计算，不再按站点国家
+  return FULFILLMENT_COUNTRY;
 }
 
 /**
- * 返回某国家某日期是否为节假日（基于 date-holidays）。
- * 库不可用 / 国家无数据 / 异常时一律视为「非节假日」（安全退化）。
+ * 返回某日期（已换算到中国本地）是否为中国法定节假日（基于 date-holidays）。
+ * 库不可用 / 国家无数据 / 异常时一律视为「非节假日」（安全退化，仅跳周末）。
  */
-function isHoliday(date: Date, countryCode: string): boolean {
+function isHoliday(localDate: Date, countryCode: string): boolean {
   if (!holidayLibAvailable) return false;
   try {
     let checker = holidayCheckerCache.get(countryCode);
@@ -73,13 +109,18 @@ function isHoliday(date: Date, countryCode: string): boolean {
       const Holidays = require('date-holidays');
       const hd = new Holidays(countryCode);
       checker = (d: Date) => {
-        // 用 UTC 年月日判断，避免服务器本地时区把节假日算到相邻自然日
-        const res = hd.isHoliday(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+        // d 已是中国本地时刻（toChinaLocalMs 换算过），取其年月日拼成 ISO 日期串判断。
+        // 注意：date-holidays 的 isHoliday 不接受 (年,月,日) 三个数字参数，必须传 Date/ISO 串。
+        const y = d.getUTCFullYear();
+        const m = d.getUTCMonth() + 1;
+        const day = d.getUTCDate();
+        const iso = `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        const res = hd.isHoliday(iso);
         return Array.isArray(res) ? res.length > 0 : !!res;
       };
       holidayCheckerCache.set(countryCode, checker);
     }
-    return checker(date);
+    return checker(localDate);
   } catch {
     // 库未安装 / 国家无数据：退化为「仅跳过周末」
     holidayLibAvailable = false;
@@ -88,24 +129,48 @@ function isHoliday(date: Date, countryCode: string): boolean {
   }
 }
 
-/** 该时刻（按 UTC 日）是否落在「营业时间」（周一~周五 且 非节假日） */
-function isBusinessMoment(d: Date, countryCode: string): boolean {
-  const day = d.getUTCDay(); // 0=周日 6=周六
-  if (day === 0 || day === 6) return false;
-  return !isHoliday(d, countryCode);
+/** 把 UTC 毫秒换算到中国本地毫秒（仅用于读取年/月/日/星期，不做时区转换存储） */
+function toChinaLocalMs(utcMs: number): number {
+  return utcMs + FULFILLMENT_TZ_OFFSET_HOURS * MS_HOUR;
+}
+
+/** 该 UTC 时刻（换算到中国后）是否落在「营业时间」（中国工作日，且非中国法定假日/调休假日） */
+function isBusinessMoment(utcMs: number, countryCode: string): boolean {
+  const local = new Date(toChinaLocalMs(utcMs));
+  const iso = isoDateOf(local);
+
+  // 调休补班日：落在周六/周日但须上班，按工作日处理
+  if (CN_WORKDAYS_SET.has(iso)) return true;
+
+  const day = local.getUTCDay(); // 0=周日 6=周六（中国本地星期）
+  if (day === 0 || day === 6) return false; // 中国周末
+
+  // 中国法定/调休假日（date-holidays 核心假日 或 调休补充表）
+  if (CN_HOLIDAYS_SET.has(iso)) return false;
+  return !isHoliday(local, countryCode);
 }
 
 const MS_HOUR = 3600 * 1000;
 
-/** 取某 UTC 时刻所在「UTC 自然日」的结束边界（次日 00:00 UTC，ms） */
-function endOfUtcDay(d: Date): number {
-  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1, 0, 0, 0);
+/** 取某 UTC 时刻所在「中国自然日」的结束边界（中国次日 00:00 对应的真实 UTC 毫秒） */
+function endOfChinaDay(utcMs: number): number {
+  const local = new Date(toChinaLocalMs(utcMs));
+  // 中国次日 00:00 的 UTC 值
+  const nextChinaMidnightUtc = Date.UTC(
+    local.getUTCFullYear(),
+    local.getUTCMonth(),
+    local.getUTCDate() + 1,
+    0,
+    0,
+    0
+  );
+  return nextChinaMidnightUtc - FULFILLMENT_TZ_OFFSET_HOURS * MS_HOUR;
 }
 
 /**
- * 自下单时间起，按「营业小时」累加满 totalBusinessHours 后的截止时刻（ms）。
- * 全程以 UTC 自然日为单位推进，避免服务器本地时区干扰（美客多时间为 UTC）。
- * 周末与节假日整段跳过，下一个营业日 00:00 UTC 继续累计。
+ * 自下单时间起，按「中国营业小时」累加满 totalBusinessHours 后的截止时刻（UTC ms）。
+ * 全程以「中国自然日」为单位推进：仅当该时刻落在中国工作日（周一~周五 且非法定假日）
+ * 时才消耗履约额度；中国周末与法定假日整段跳过，顺延到下一个中国工作日 00:00 继续累计。
  */
 export function computeBusinessDeadline(
   startMs: number,
@@ -120,16 +185,15 @@ export function computeBusinessDeadline(
 
   while (remaining > 0 && guard < MAX_GUARD) {
     guard++;
-    const d = new Date(cursorMs);
-    if (isBusinessMoment(d, countryCode)) {
-      // 当日（UTC）剩余可消耗的营业小时数（到次日 00:00 UTC）
-      const hoursLeftInDay = (endOfUtcDay(d) - cursorMs) / MS_HOUR;
+    if (isBusinessMoment(cursorMs, countryCode)) {
+      // 当日（中国）剩余可消耗的营业小时数（到中国次日 00:00）
+      const hoursLeftInDay = (endOfChinaDay(cursorMs) - cursorMs) / MS_HOUR;
       const consume = Math.min(remaining, hoursLeftInDay);
       remaining -= consume;
       cursorMs += consume * MS_HOUR;
     } else {
-      // 非营业时刻：跳到次日 00:00 UTC（顺延）
-      cursorMs = endOfUtcDay(d);
+      // 非营业时刻：跳到中国次日 00:00（顺延）
+      cursorMs = endOfChinaDay(cursorMs);
     }
   }
   return cursorMs;
