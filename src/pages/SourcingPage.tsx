@@ -1313,9 +1313,14 @@ export function SourcingPage() {
               </p>
               {genTitles.map((t: any, i: number) => (
                 <div key={i} className="flex items-start justify-between gap-2 p-2 border rounded">
-                  <div>
-                    <div className="font-medium">{t.title}</div>
-                    <div className="text-xs" style={{ color: t.safe ? '#00A859' : '#E37318' }}>
+                  <div className="min-w-0 flex-1">
+                    <div className="font-medium break-words">{t.title}</div>
+                    {t.zh && (
+                      <div className="text-xs mt-0.5" style={{ color: 'var(--td-text-color-placeholder)' }}>
+                        中文：{t.zh}
+                      </div>
+                    )}
+                    <div className="text-xs mt-0.5" style={{ color: t.safe ? '#00A859' : '#E37318' }}>
                       长度 {t.length} · 相似度 {(t.similarity * 100).toFixed(0)}% · {t.safe ? '安全' : '偏像，建议手动改'}
                     </div>
                   </div>

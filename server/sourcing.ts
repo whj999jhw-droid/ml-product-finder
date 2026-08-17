@@ -398,7 +398,14 @@ async function search1688ByPython(params: {
     try {
       execSync(`${pythonCmd} -c "import search1688api"`, { stdio: 'pipe' });
     } catch {
-      return { available: false, message: 'search1688api 库未安装。请运行：pip install search1688api' };
+      return {
+        available: false,
+        message:
+          'search1688api 库未安装。请在运行后端的服务器上执行：\n' +
+          '  pip3 install search1688api\n' +
+          '或切换为「OneBound」方案（在页面左上方 1688 配置里选 OneBound 并填 Key/Secret）。\n' +
+          '也可使用「1688 免密钥找同款（关键词）」功能，它通过 Playwright 直接搜索，无需该 Python 库。',
+      };
     }
 
     // 构建 Python 脚本

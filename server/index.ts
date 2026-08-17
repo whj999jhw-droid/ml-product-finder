@@ -732,6 +732,7 @@ import {
   aiGenerateTitlesBatch,
   aiGenerateDescriptionsBatch,
   getLlmConfig,
+  getLlmProviders,
   saveLlmConfig,
   translateTrendsKeywords,
   testLlmTranslation,
@@ -2328,92 +2329,163 @@ app.get('/api/ml/trends/:site', async (req, res) => {
   }
 });
 
-// 查询 LLM 配置状态（apiKey 不返回；baseUrl 仅公开服务地址，无需脱敏，必须返回完整值，
-// 否则前端 loadLlmStatus 回填表单时会把截断后的地址写回输入框，再保存即损坏配置）
+// 查询 LLM 配置状态（apiKey 不返回；baseUrl 必须返回完整值，否则前端回填会损坏配置）
 app.get('/api/ml/llm-config', (req, res) => {
-  const cfg = getLlmConfig();
+  const providers = getLlmProviders();
   res.json({
     success: true,
-    configured: !!cfg,
-    baseUrl: cfg?.baseUrl || '',
-    model: cfg?.model || '',
+    configured: providers.length > 0,
+    // 兼容旧前端字段（单平台）
+    baseUrl: providers[0]?.baseUrl || '',
+    model: providers[0]?.model || '',
+    // 新字段：多平台列表（按 failover 顺序）
+    providers: providers.map((p) => ({ name: p.name, baseUrl: p.baseUrl, model: p.model })),
   });
 });
 
-// 保存 LLM 配置文件（data/llm-config.json），环境变量优先级更高
+// 保存 LLM 多平台配置文件（data/llm-config.json），环境变量优先级更高
 app.post('/api/ml/llm-config', (req, res) => {
   try {
-    const { baseUrl, apiKey, model } = req.body || {};
-    if (!baseUrl || !model) {
-      return res.status(400).json({ success: false, message: '请提供 baseUrl、model' });
+    const body = req.body || {};
+    let providers: any[] | undefined = body.providers;
+    // 兼容旧前端单平台保存
+    if (!Array.isArray(providers) && body.baseUrl && body.model) {
+      providers = [{ name: body.name || '平台 1', baseUrl: body.baseUrl, apiKey: body.apiKey, model: body.model }];
     }
-    const existing = getLlmConfig();
-    // apiKey 留空表示不修改：已有配置则复用旧 key，首次保存必须提供
-    const finalApiKey = (apiKey && apiKey.trim()) ? apiKey.trim() : existing?.apiKey;
-    if (!finalApiKey) {
-      return res.status(400).json({ success: false, message: '首次保存必须提供 apiKey' });
+    if (!Array.isArray(providers) || providers.length === 0) {
+      return res.status(400).json({ success: false, message: '请提供至少一个平台配置' });
     }
-    const result = saveLlmConfig({ baseUrl: baseUrl.replace(/\/+$/, ''), apiKey: finalApiKey, model });
+    const result = saveLlmConfig({ providers });
     if (!result.success) {
       return res.status(400).json({ success: false, message: result.message });
     }
-    res.json({ success: true, message: 'LLM 配置已保存' });
+    res.json({ success: true, message: `LLM 配置已保存（${providers.length} 个平台）` });
   } catch (err: any) {
     res.json({ success: false, message: err?.message || '保存失败' });
   }
 });
 
-// 测试 LLM 连通性：用 translateTrendsKeywords 翻译一个样例词，验证 baseUrl/apiKey/model 是否正确
+// 测试 LLM 连通性：依次测试每个平台，返回每个平台的可达性与翻译结果
 app.post('/api/ml/llm-config/test', async (req, res) => {
-  // 允许在测试请求里临时带配置（不持久化），方便未保存时先试
-  const { baseUrl, apiKey, model } = req.body || {};
-  if (baseUrl && apiKey && model) {
-    // 先校验再临时保存；校验失败直接返回，避免把错误配置写进文件
-    const normalized = baseUrl.replace(/\/+$/, '').trim();
-    if (normalized.includes('...')) {
-      return res.json({
-        success: false,
-        message: `baseUrl 不能包含省略号 "..."，你填写的是 "${normalized}"，请填写完整地址，如 https://api.siliconflow.cn`,
-      });
-    }
-    // 临时写一遍再测（进程内生效，下一次请求仍走正式配置）
-    const saveResult = saveLlmConfig({ baseUrl: normalized, apiKey, model });
-    if (!saveResult.success) {
-      return res.json({ success: false, message: saveResult.message });
-    }
-  }
-  const cfg = getLlmConfig();
-  if (!cfg) {
-    return res.json({ success: false, message: '尚未配置 LLM（baseUrl/apiKey/model 至少一个为空）' });
-  }
-
-  // 先探测网络是否可达（不看鉴权），帮助用户区分「后端没网」和「Key/Model 错」
-  const reachability = await probeLlmReachability(cfg.baseUrl, 8000);
-  if (!reachability.ok) {
-    return res.json({
-      success: false,
-      message: `后端无法访问 LLM 服务地址：${reachability.error}。请检查本机/服务器网络、代理、DNS，或换一家可访问的厂商。`,
-      networkError: reachability.error,
-      url: reachability.url,
-      raw: '',
-    });
-  }
-
   try {
-    const diag = await testLlmTranslation('MLM');
-    if (diag.success && diag.sample) {
-      res.json({ success: true, message: '连接成功，翻译示例：' + JSON.stringify(diag.sample), sample: diag.sample, url: reachability.url });
-    } else {
-      res.json({
-        success: false,
-        message: diag.error || '已连到模型但未返回有效翻译',
-        raw: diag.raw,
-        status: reachability.status,
-        url: reachability.url,
-      });
+    const body = req.body || {};
+    let providers: any[] | undefined = body.providers;
+    // 兼容旧前端单平台测试
+    if (!Array.isArray(providers) && body.baseUrl && body.apiKey && body.model) {
+      providers = [{ name: body.name || '测试平台', baseUrl: body.baseUrl, apiKey: body.apiKey, model: body.model }];
     }
+
+    // 如果请求没带 providers，使用已保存配置
+    if (!Array.isArray(providers) || providers.length === 0) {
+      const saved = getLlmProviders();
+      if (saved.length === 0) {
+        return res.json({ success: false, message: '尚未配置 LLM' });
+      }
+      providers = saved;
+    }
+
+    const perProvider: Array<{
+      name: string;
+      baseUrl: string;
+      model: string;
+      reachable: boolean;
+      success: boolean;
+      message?: string;
+      sample?: Record<string, string>;
+      url?: string;
+    }> = [];
+
+    let firstSuccess: { sample: Record<string, string>; url: string } | null = null;
+
+    for (const p of providers) {
+      const baseUrl = (p.baseUrl || '').replace(/\/+$/, '').trim();
+      if (!baseUrl || !p.apiKey || !p.model) {
+        perProvider.push({
+          name: p.name || '未命名平台',
+          baseUrl: baseUrl || p.baseUrl || '',
+          model: p.model || '',
+          reachable: false,
+          success: false,
+          message: 'baseUrl/apiKey/model 不完整',
+        });
+        continue;
+      }
+      if (baseUrl.includes('...')) {
+        perProvider.push({
+          name: p.name || '未命名平台',
+          baseUrl,
+          model: p.model,
+          reachable: false,
+          success: false,
+          message: 'baseUrl 不能包含省略号',
+        });
+        continue;
+      }
+      const reachability = await probeLlmReachability(baseUrl, 8000);
+      if (!reachability.ok) {
+        perProvider.push({
+          name: p.name || '未命名平台',
+          baseUrl,
+          model: p.model,
+          reachable: false,
+          success: false,
+          message: `无法访问 LLM 服务：${reachability.error}`,
+          url: reachability.url,
+        });
+        continue;
+      }
+
+      try {
+        const providerCfg: any = { name: p.name || '未命名平台', baseUrl, apiKey: p.apiKey, model: p.model };
+        const diag = await testLlmTranslation('MLM', providerCfg);
+        if (diag.success && diag.sample) {
+          perProvider.push({
+            name: p.name || '未命名平台',
+            baseUrl,
+            model: p.model,
+            reachable: true,
+            success: true,
+            message: '连接成功',
+            sample: diag.sample,
+            url: reachability.url,
+          });
+          if (!firstSuccess) firstSuccess = { sample: diag.sample, url: reachability.url };
+        } else {
+          perProvider.push({
+            name: p.name || '未命名平台',
+            baseUrl,
+            model: p.model,
+            reachable: true,
+            success: false,
+            message: diag.error || '翻译测试失败',
+            url: reachability.url,
+          });
+        }
+      } catch (err: any) {
+        perProvider.push({
+          name: p.name || '未命名平台',
+          baseUrl,
+          model: p.model,
+          reachable: true,
+          success: false,
+          message: `测试异常：${err?.message || String(err)}`,
+          url: reachability.url,
+        });
+      }
+    }
+
+    const anySuccess = perProvider.some((p) => p.success);
+    res.json({
+      success: anySuccess,
+      message: anySuccess
+        ? '至少有一个平台可用，failover 已生效'
+        : '所有平台均不可用，请检查网络、Key 或 model 名称',
+      perProvider,
+      sample: firstSuccess?.sample,
+      url: firstSuccess?.url,
+    });
   } catch (err: any) {
-    res.json({ success: false, message: `连接失败：${err?.message || err}` });
+    res.json({ success: false, message: err?.message || '测试异常' });
   }
 });
 
@@ -2438,10 +2510,16 @@ app.post('/api/ml/listing/generate-title', async (req, res) => {
     });
 
     if (aiResult.titles.length > 0) {
-      // 给 AI 结果也计算相似度
-      const titlesWithSim = aiResult.titles.map((t) => {
+      // 给 AI 结果也计算相似度，并附中文翻译
+      const titlesWithSim = aiResult.titles.map((t, idx) => {
         const sim = titleGen.titleSimilarity(t, competitorTitle);
-        return { title: t, length: t.length, similarity: Math.round(sim * 100) / 100, safe: sim < 0.5 };
+        return {
+          title: t,
+          zh: aiResult.translations?.[idx] || '',
+          length: t.length,
+          similarity: Math.round(sim * 100) / 100,
+          safe: sim < 0.5,
+        };
       });
       return res.json({ success: true, titles: titlesWithSim, engine: 'ai' });
     }

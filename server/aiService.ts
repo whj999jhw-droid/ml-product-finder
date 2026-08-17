@@ -25,35 +25,96 @@ function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-interface LlmConfig {
+export interface LlmProvider {
+  /** 平台名称（仅用于展示，如「硅基流动」「DeepSeek」） */
+  name: string;
   baseUrl: string;
   apiKey: string;
   model: string;
 }
 
-function loadLlmConfigFile(): Partial<LlmConfig> | null {
+/** 旧版单配置兼容结构 */
+interface LegacyLlmConfig {
+  baseUrl?: string;
+  apiKey?: string;
+  model?: string;
+  LLM_BASE_URL?: string;
+  LLM_API_KEY?: string;
+  LLM_MODEL?: string;
+}
+
+interface LlmConfigFile {
+  providers?: LlmProvider[];
+}
+
+function normalizeBaseUrl(url: string): string {
+  return (url || '').trim().replace(/\/+$/, '');
+}
+
+function isValidProvider(p: Partial<LlmProvider>): p is LlmProvider {
+  return !!(p.baseUrl?.trim() && p.apiKey?.trim() && p.model?.trim());
+}
+
+function envProvider(): LlmProvider | null {
+  const baseUrl = normalizeBaseUrl(process.env.LLM_BASE_URL || '');
+  const apiKey = process.env.LLM_API_KEY || '';
+  const model = process.env.LLM_MODEL || '';
+  if (!baseUrl || !apiKey || !model) return null;
+  return { name: '环境变量 LLM_*', baseUrl, apiKey, model };
+}
+
+function loadLlmConfigFile(): LlmConfigFile | null {
   ensureDataDir();
   if (!fs.existsSync(LLM_CONFIG_FILE)) return null;
   try {
     const raw = fs.readFileSync(LLM_CONFIG_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-    return {
-      baseUrl: parsed.baseUrl || parsed.LLM_BASE_URL || '',
+    const parsed = JSON.parse(raw) as LegacyLlmConfig & LlmConfigFile;
+    // 新版：providers 数组
+    if (Array.isArray(parsed.providers) && parsed.providers.length > 0) {
+      const providers = parsed.providers
+        .map((p) => ({ ...p, baseUrl: normalizeBaseUrl(p.baseUrl) }))
+        .filter(isValidProvider);
+      if (providers.length) return { providers };
+    }
+    // 旧版：单条配置迁移为 providers[0]
+    const legacy: LlmProvider = {
+      name: '已保存配置',
+      baseUrl: normalizeBaseUrl(parsed.baseUrl || parsed.LLM_BASE_URL || ''),
       apiKey: parsed.apiKey || parsed.LLM_API_KEY || '',
       model: parsed.model || parsed.LLM_MODEL || '',
     };
+    if (isValidProvider(legacy)) return { providers: [legacy] };
+    return {};
   } catch {
     return null;
   }
 }
 
-export function getLlmConfig(): LlmConfig | null {
-  const fileCfg = loadLlmConfigFile() || {};
-  const baseUrl = (process.env.LLM_BASE_URL || fileCfg.baseUrl || '').replace(/\/+$/, '');
-  const apiKey = process.env.LLM_API_KEY || fileCfg.apiKey || '';
-  const model = process.env.LLM_MODEL || fileCfg.model || '';
-  if (!baseUrl || !apiKey || !model) return null;
-  return { baseUrl, apiKey, model };
+function writeLlmConfigFile(file: LlmConfigFile): void {
+  ensureDataDir();
+  fs.writeFileSync(LLM_CONFIG_FILE, JSON.stringify(file, null, 2), 'utf-8');
+}
+
+/** 返回所有可用平台（按优先级排序：环境变量 > 文件配置）。调用 llmGenerate 会自动依次尝试。 */
+export function getLlmProviders(): LlmProvider[] {
+  const providers: LlmProvider[] = [];
+  const env = envProvider();
+  if (env) providers.push(env);
+  const file = loadLlmConfigFile();
+  if (file?.providers) {
+    for (const p of file.providers) {
+      // 去重：与环境变量完全相同的配置不再重复加入
+      if (env && p.baseUrl === env.baseUrl && p.model === env.model) continue;
+      providers.push(p);
+    }
+  }
+  return providers;
+}
+
+/** 兼容旧接口：返回第一个可用平台 */
+export function getLlmConfig(): LlmProvider | null {
+  const providers = getLlmProviders();
+  return providers[0] || null;
 }
 
 export interface SaveLlmConfigResult {
@@ -61,37 +122,73 @@ export interface SaveLlmConfigResult {
   message?: string;
 }
 
-export function saveLlmConfig(cfg: Partial<LlmConfig>): SaveLlmConfigResult {
+/** 保存多平台配置。支持传入单条对象（兼容旧代码）或完整 {providers}。 */
+export function saveLlmConfig(cfg: Partial<LlmProvider> | { providers?: Partial<LlmProvider>[] }): SaveLlmConfigResult {
   ensureDataDir();
-  const baseUrl = (cfg.baseUrl || '').trim();
-  const apiKey = (cfg.apiKey || '').trim();
-  const model = (cfg.model || '').trim();
 
-  if (baseUrl) {
-    // 拒绝明显被截断/省略的 URL（如 https://...n/v1）
+  // 统一整理为 providers 数组
+  let providers: Partial<LlmProvider>[] = [];
+  if (cfg && 'providers' in cfg && Array.isArray(cfg.providers)) {
+    providers = cfg.providers;
+  } else if (cfg && ('baseUrl' in cfg || 'apiKey' in cfg || 'model' in cfg)) {
+    providers = [cfg as Partial<LlmProvider>];
+  }
+
+  const existing = loadLlmConfigFile();
+  const existingByKey = new Map<string, LlmProvider>();
+  for (const p of existing?.providers || []) {
+    existingByKey.set(`${p.baseUrl}|${p.model}`, p);
+  }
+
+  const finalProviders: LlmProvider[] = [];
+  for (let i = 0; i < providers.length; i++) {
+    const p = providers[i];
+    const baseUrl = normalizeBaseUrl(p.baseUrl || '');
+    const model = (p.model || '').trim();
+    let apiKey = (p.apiKey || '').trim();
+    // apiKey 为空：从同 baseUrl+model 的已有配置复用（允许只改地址/模型不改 key）
+    if (!apiKey) {
+      const old = existingByKey.get(`${baseUrl}|${model}`);
+      if (old) apiKey = old.apiKey;
+    }
+    if (!baseUrl || !model) {
+      return { success: false, message: `第 ${i + 1} 个平台必须填写 baseUrl 和 model` };
+    }
     if (baseUrl.includes('...')) {
       return {
         success: false,
-        message: `baseUrl 不能包含省略号 "..."，你填写的是 "${baseUrl}"，请填写完整地址，如 https://api.siliconflow.cn`,
+        message: `第 ${i + 1} 个平台的 baseUrl 不能包含省略号 "..."，请填写完整地址`,
       };
     }
     try {
       const parsed = new URL(baseUrl);
       if (!['http:', 'https:'].includes(parsed.protocol)) {
-        return { success: false, message: 'baseUrl 必须是 http:// 或 https:// 开头的地址' };
+        return { success: false, message: `第 ${i + 1} 个平台的 baseUrl 必须是 http:// 或 https:// 开头` };
       }
     } catch {
-      return { success: false, message: 'baseUrl 不是合法的 URL' };
+      return { success: false, message: `第 ${i + 1} 个平台的 baseUrl 不是合法 URL` };
     }
+    // apiKey 最终仍为空且不是已有配置：首次保存必须提供
+    if (!apiKey) {
+      const old = existingByKey.get(`${baseUrl}|${model}`);
+      if (!old) {
+        return { success: false, message: `第 ${i + 1} 个平台首次保存必须提供 apiKey` };
+      }
+      apiKey = old.apiKey;
+    }
+    finalProviders.push({
+      name: (p.name || `平台 ${i + 1}`).trim(),
+      baseUrl,
+      apiKey,
+      model,
+    });
   }
 
-  const existing = loadLlmConfigFile() || {};
-  const merged = {
-    baseUrl: baseUrl || existing.baseUrl || '',
-    apiKey: apiKey || existing.apiKey || '',
-    model: model || existing.model || '',
-  };
-  fs.writeFileSync(LLM_CONFIG_FILE, JSON.stringify(merged, null, 2));
+  if (finalProviders.length === 0) {
+    return { success: false, message: '至少保存一个有效平台' };
+  }
+
+  writeLlmConfigFile({ providers: finalProviders });
   return { success: true };
 }
 
@@ -129,17 +226,10 @@ interface OpenAICompletionResponse {
   error?: { message?: string };
 }
 
-/**
- * 调用 OpenAI 兼容 /v1/chat/completions 生成文本。
- * 保留硬超时守卫：fetch abort + Promise.race 双重保险，防止服务方流式响应挂起。
- */
-async function llmGenerate(opts: LLMOptions): Promise<string> {
-  const cfg = getLlmConfig();
-  if (!cfg) throw new Error('LLM 未配置');
-
+async function llmGenerateWithProvider(opts: LLMOptions, provider: LlmProvider): Promise<string> {
   const timeoutMs = opts.timeoutMs ?? 30000;
   const temperature = opts.temperature ?? 0.7;
-  const url = chatCompletionsUrl(cfg.baseUrl);
+  const url = chatCompletionsUrl(provider.baseUrl);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -155,10 +245,10 @@ async function llmGenerate(opts: LLMOptions): Promise<string> {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${cfg.apiKey}`,
+          'Authorization': `Bearer ${provider.apiKey}`,
         },
         body: JSON.stringify({
-          model: cfg.model,
+          model: provider.model,
           messages: [
             { role: 'system', content: opts.systemPrompt },
             { role: 'user', content: opts.prompt },
@@ -189,6 +279,37 @@ async function llmGenerate(opts: LLMOptions): Promise<string> {
     clearTimeout(timer);
     if (hardTimer) clearTimeout(hardTimer);
   }
+}
+
+/**
+ * 调用 OpenAI 兼容 /v1/chat/completions 生成文本。
+ * 多平台自动降级：依次尝试所有已配置平台，一个失败自动换下一个。
+ * 如传入 provider，则只使用该平台（用于单平台测试）。
+ */
+async function llmGenerate(opts: LLMOptions, provider?: LlmProvider): Promise<string> {
+  if (provider) {
+    const content = await llmGenerateWithProvider(opts, provider);
+    if (content) return content;
+    throw new Error(`${provider.name || provider.model}: 返回空内容`);
+  }
+
+  const providers = getLlmProviders();
+  if (!providers.length) throw new Error('LLM 未配置');
+
+  const errors: string[] = [];
+  for (const provider of providers) {
+    try {
+      const content = await llmGenerateWithProvider(opts, provider);
+      if (content) return content;
+      errors.push(`${provider.name || provider.model}: 返回空内容`);
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      errors.push(`${provider.name || provider.model}: ${msg}`);
+      // 继续尝试下一个平台
+    }
+  }
+
+  throw new Error(`所有 LLM 平台均失败：${errors.join('； ')}`);
 }
 
 // ============ JSON 解析工具 ============
@@ -351,15 +472,21 @@ export async function translateTrendsKeywords(
 
 /**
  * 诊断版翻译测试：返回原始响应，便于排查模型不返回 JSON 等问题。
+ * 可传入指定 provider 进行单平台测试；不传则使用当前全部配置（failover 模式）。
  */
-export async function testLlmTranslation(site: string = 'MLM'): Promise<{
+export async function testLlmTranslation(
+  site: string = 'MLM',
+  provider?: LlmProvider,
+): Promise<{
   success: boolean;
   sample?: Record<string, string>;
   raw?: string;
   error?: string;
 }> {
-  const cfg = getLlmConfig();
-  if (!cfg) return { success: false, error: 'LLM 未配置' };
+  if (!provider) {
+    const cfg = getLlmConfig();
+    if (!cfg) return { success: false, error: 'LLM 未配置' };
+  }
 
   const keywords = ['mochila'];
   const lang = langOfSite(site);
@@ -372,12 +499,15 @@ export async function testLlmTranslation(site: string = 'MLM'): Promise<{
 待翻译词：${JSON.stringify(keywords)}`;
 
   try {
-    const raw = await llmGenerate({
-      prompt,
-      systemPrompt: '你是一个跨境电商助手，擅长把电商搜索关键词翻译成中文选品术语。只输出 JSON，不要解释。',
-      timeoutMs: 30000,
-      jsonMode: true,
-    });
+    const raw = await llmGenerate(
+      {
+        prompt,
+        systemPrompt: '你是一个跨境电商助手，擅长把电商搜索关键词翻译成中文选品术语。只输出 JSON，不要解释。',
+        timeoutMs: 30000,
+        jsonMode: true,
+      },
+      provider,
+    );
     const map = extractJsonObject(raw) as Record<string, string> | undefined;
     if (!map) {
       return {
@@ -469,12 +599,15 @@ export interface AITitleInput {
 
 export interface AITitleResult {
   titles: string[];
+  /** 与 titles 一一对应的中文翻译（可能为空） */
+  translations?: string[];
   used: 'ai' | 'fallback';
   error?: string;
 }
 
 /**
  * AI 生成标题：基于 1688 货源信息 + 竞品要素 + ML 站点热搜词，用目标语言生成多个候选标题。
+ * 同时为每个标题提供中文翻译，方便国内运营人员理解。
  * 合规：指令明确禁止复制竞品标题，要求用自有表达重组。
  */
 export async function aiGenerateTitles(input: AITitleInput): Promise<AITitleResult> {
@@ -501,7 +634,12 @@ You write product titles in ${langName(lang)} that are:
 6. Include key specifications (size, color, material, quantity) when available
 7. Naturally incorporate 1-2 current hot-search keywords if they fit the product; do NOT force irrelevant keywords
 
-Output format: Return exactly ${count} title candidates, one per line, numbered 1) 2) 3).
+Output format: Return exactly ${count} title candidates. For EACH title, output two consecutive lines:
+1) <title in ${langName(lang)}>
+ZH: <concise Chinese translation>
+2) <title in ${langName(lang)}>
+ZH: <concise Chinese translation>
+...
 Do not include any other text, explanation, or markdown.`;
 
   const prompt = `Generate ${count} product titles in ${langName(lang)} for Mercado Libre ${input.site}.
@@ -518,32 +656,55 @@ Requirements:
 - Each title must be ≤ 60 characters
 - Prioritize the most important keywords first (product type, key spec)
 - Include 1-2 selling point words (e.g. durable, portable, multifunctional)
-- If a hot keyword strongly matches the product, include it; otherwise ignore it`;
+- If a hot keyword strongly matches the product, include it; otherwise ignore it
+- IMPORTANT: Provide a concise Chinese translation immediately below each title, prefixed with "ZH: "`;
 
   try {
     const raw = await llmGenerate({ prompt, systemPrompt, timeoutMs: 25000 });
-    const titles = parseTitleList(raw, count);
-    if (titles.length === 0) {
-      return { titles: [], used: 'fallback', error: 'AI returned no parseable titles' };
+    const parsed = parseTitleList(raw, count);
+    if (parsed.titles.length === 0) {
+      return { titles: [], translations: [], used: 'fallback', error: 'AI returned no parseable titles' };
     }
-    return { titles, used: 'ai' };
+    return { titles: parsed.titles, translations: parsed.translations, used: 'ai' };
   } catch (err: any) {
-    return { titles: [], used: 'fallback', error: err?.message || 'AI generation failed' };
+    return { titles: [], translations: [], used: 'fallback', error: err?.message || 'AI generation failed' };
   }
 }
 
-function parseTitleList(raw: string, max: number): string[] {
+interface ParsedTitleList {
+  titles: string[];
+  translations: string[];
+}
+
+function parseTitleList(raw: string, max: number): ParsedTitleList {
   const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
   const titles: string[] = [];
-  for (const line of lines) {
-    // 去掉编号前缀 "1) " "1. " "1: " 等
+  const translations: string[] = [];
+  const zhPrefixes = ['ZH:', '中文：', '中文:', '中文翻译：', '中文翻译:', '翻译：', '翻译:'];
+
+  for (let i = 0; i < lines.length && titles.length < max; i++) {
+    const line = lines[i];
+    // 判断是否为编号标题行：以数字 + )/.:/) 开头，且不是 ZH 行
+    const isTitleLine = /^\d+[\)\.\:]\s*/.test(line) && !zhPrefixes.some((pre) => line.toUpperCase().startsWith(pre.toUpperCase()));
+    if (!isTitleLine) continue;
+
     const cleaned = line.replace(/^\d+[\)\.\:]\s*/, '').replace(/^["'\s]+|["'\s]+$/g, '').trim();
-    if (cleaned && cleaned.length >= 5 && cleaned.length <= 80) {
-      titles.push(cleaned);
-      if (titles.length >= max) break;
+    if (!cleaned || cleaned.length < 5 || cleaned.length > 80) continue;
+
+    titles.push(cleaned);
+    // 看下一行是不是 ZH 翻译
+    const nextLine = lines[i + 1] || '';
+    let zh = '';
+    for (const pre of zhPrefixes) {
+      if (nextLine.toUpperCase().startsWith(pre.toUpperCase())) {
+        zh = nextLine.slice(pre.length).trim();
+        break;
+      }
     }
+    translations.push(zh);
   }
-  return titles;
+
+  return { titles, translations };
 }
 
 // ============ AI 描述生成 ============

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Card, Tabs, Tag, Button, Loading, MessagePlugin, Space, Input } from 'tdesign-react';
-import { RefreshIcon, CopyIcon, SearchIcon } from 'tdesign-icons-react';
+import { RefreshIcon, CopyIcon, SearchIcon, AddIcon, DeleteIcon, ChevronUpIcon, ChevronDownIcon } from 'tdesign-icons-react';
 
 interface TrendItem {
   keyword: string;
@@ -141,21 +141,64 @@ export function TrendsPage() {
   const items = itemsMap[activeSite] || [];
   const loading = loadingMap[activeSite];
 
-  // ===== AI 翻译配置（LLM：用于热搜词中文翻译）=====
-  const [llmForm, setLlmForm] = useState({ baseUrl: '', apiKey: '', model: '' });
-  const [llmStatus, setLlmStatus] = useState<{ configured: boolean; baseUrl: string; model: string }>({ configured: false, baseUrl: '', model: '' });
+  // ===== AI 多平台配置（LLM：热搜词翻译 / 标题 / 描述 / 订单翻译）=====
+  interface LlmProviderForm {
+    id: string;
+    name: string;
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+  }
+  const emptyProvider = (): LlmProviderForm => ({
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    name: '',
+    baseUrl: '',
+    apiKey: '',
+    model: '',
+  });
+  const [llmProviders, setLlmProviders] = useState<LlmProviderForm[]>([emptyProvider()]);
+  const [llmConfigured, setLlmConfigured] = useState(false);
   const [llmSaving, setLlmSaving] = useState(false);
   const [llmTesting, setLlmTesting] = useState(false);
-  const [llmTestDetail, setLlmTestDetail] = useState<{ message: string; raw?: string; url?: string } | null>(null);
+  const [llmTestResult, setLlmTestResult] = useState<{
+    success: boolean;
+    message: string;
+    perProvider?: Array<{
+      name: string;
+      baseUrl: string;
+      model: string;
+      reachable: boolean;
+      success: boolean;
+      message?: string;
+    }>;
+  } | null>(null);
 
   const loadLlmStatus = useCallback(async () => {
     try {
       const r = await fetch('/api/ml/llm-config');
       const d = await r.json();
-      setLlmStatus({ configured: !!d.configured, baseUrl: d.baseUrl || '', model: d.model || '' });
-      if (d.configured) {
-        // 已配置则回填表单（apiKey 不回传，留空表示不修改）
-        setLlmForm((f) => ({ ...f, baseUrl: d.baseUrl || f.baseUrl, model: d.model || f.model }));
+      setLlmConfigured(!!d.configured);
+      if (d.providers?.length) {
+        setLlmProviders(
+          d.providers.map((p: any, i: number) => ({
+            id: `${Date.now()}-${i}`,
+            name: p.name || `平台 ${i + 1}`,
+            baseUrl: p.baseUrl || '',
+            apiKey: '',
+            model: p.model || '',
+          })),
+        );
+      } else if (d.configured && d.baseUrl && d.model) {
+        // 兼容旧版单平台
+        setLlmProviders([
+          {
+            id: `${Date.now()}-0`,
+            name: '平台 1',
+            baseUrl: d.baseUrl,
+            apiKey: '',
+            model: d.model,
+          },
+        ]);
       }
     } catch {
       /* ignore */
@@ -166,26 +209,57 @@ export function TrendsPage() {
     loadLlmStatus();
   }, [loadLlmStatus]);
 
-  const handleSaveLlm = async () => {
-    if (!llmForm.baseUrl || !llmForm.model) {
-      MessagePlugin.warning('请填写 baseUrl 和 model');
-      return;
+  const addProvider = () => setLlmProviders((prev) => [...prev, emptyProvider()]);
+  const removeProvider = (idx: number) =>
+    setLlmProviders((prev) => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== idx)));
+  const moveProvider = (idx: number, direction: -1 | 1) => {
+    setLlmProviders((prev) => {
+      const target = idx + direction;
+      if (target < 0 || target >= prev.length) return prev;
+      const next = [...prev];
+      [next[idx], next[target]] = [next[target], next[idx]];
+      return next;
+    });
+  };
+  const updateProvider = (idx: number, field: keyof Omit<LlmProviderForm, 'id'>, value: string) => {
+    setLlmProviders((prev) => prev.map((p, i) => (i === idx ? { ...p, [field]: value } : p)));
+  };
+
+  const validateProviders = (providers: LlmProviderForm[]) => {
+    for (let i = 0; i < providers.length; i++) {
+      const p = providers[i];
+      if (!p.baseUrl.trim() || !p.model.trim()) {
+        return `第 ${i + 1} 个平台必须填写 baseUrl 和 model`;
+      }
+      if (!llmConfigured && !p.apiKey.trim()) {
+        return `第 ${i + 1} 个平台首次保存必须填写 apiKey`;
+      }
     }
-    // 已配置时 apiKey 留空表示不修改；未配置时后端会校验必须有 key
-    if (!llmStatus.configured && !llmForm.apiKey) {
-      MessagePlugin.warning('首次保存必须填写 apiKey');
+    return '';
+  };
+
+  const handleSaveLlm = async () => {
+    const msg = validateProviders(llmProviders);
+    if (msg) {
+      MessagePlugin.warning(msg);
       return;
     }
     setLlmSaving(true);
     try {
+      const providers = llmProviders.map((p, i) => ({
+        name: p.name.trim() || `平台 ${i + 1}`,
+        baseUrl: p.baseUrl.trim(),
+        apiKey: p.apiKey.trim(),
+        model: p.model.trim(),
+      }));
       const r = await fetch('/api/ml/llm-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(llmForm),
+        body: JSON.stringify({ providers }),
       });
       const d = await r.json();
       if (d.success) {
-        MessagePlugin.success('已保存，点「测试连接」验证；之后刷新热搜词即可显示中文');
+        MessagePlugin.success(d.message || '已保存');
         loadLlmStatus();
       } else {
         MessagePlugin.error(d.message || '保存失败');
@@ -198,16 +272,25 @@ export function TrendsPage() {
   };
 
   const handleTestLlm = async () => {
+    const msg = validateProviders(llmProviders);
+    if (msg) {
+      MessagePlugin.warning(msg);
+      return;
+    }
     setLlmTesting(true);
-    setLlmTestDetail(null);
+    setLlmTestResult(null);
     try {
+      const providers = llmProviders.map((p, i) => ({
+        name: p.name.trim() || `平台 ${i + 1}`,
+        baseUrl: p.baseUrl.trim(),
+        apiKey: p.apiKey.trim(),
+        model: p.model.trim(),
+      }));
       const r = await fetch('/api/ml/llm-config/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // 没保存过也允许带配置先试（apiKey 为空则用已保存配置）
-        body: JSON.stringify(llmForm.apiKey ? llmForm : {}),
+        body: JSON.stringify({ providers }),
       });
-      // 如果后端没有该接口（比如没重启），会返回 HTML 404，这里先捕获 HTTP 状态
       let body: any = null;
       const contentType = r.headers.get('content-type') || '';
       if (r.ok && contentType.includes('application/json')) {
@@ -216,22 +299,22 @@ export function TrendsPage() {
         const text = await r.text().catch(() => '');
         body = {
           success: false,
-          message: `后端返回异常 HTTP ${r.status} ${r.statusText}（可能是后端未重启、路由不存在或返回了 HTML 错误页）`,
+          message: `后端返回异常 HTTP ${r.status} ${r.statusText}（可能是后端未重启或路由不存在）`,
           raw: text.slice(0, 800),
         };
       }
+      setLlmTestResult(body);
       if (body.success) {
-        MessagePlugin.success('连接成功！' + (body.message || ''));
+        MessagePlugin.success(body.message || '至少有一个平台可用');
         loadLlmStatus();
       } else {
-        MessagePlugin.error(body.message || '连接失败');
-        setLlmTestDetail({ message: body.message || '连接失败', raw: body.raw || body.networkError, url: body.url });
+        MessagePlugin.error(body.message || '测试失败');
       }
     } catch (err: any) {
-      // fetch 本身抛错（网络不通、CORS、后端未启动等）
       const msg = err?.message || '测试失败';
       MessagePlugin.error(msg);
-      setLlmTestDetail({
+      setLlmTestResult({
+        success: false,
         message: `${msg}。常见原因：后端未启动、Vite 代理异常、浏览器拦截跨域请求。请按 F12 → Network 查看实际请求。`,
       });
     } finally {
@@ -245,59 +328,118 @@ export function TrendsPage() {
   return (
     <div className="flex-1 overflow-y-auto p-3">
       <div className="max-w-7xl mx-auto space-y-4">
-      <Card title="AI 翻译配置（热搜词中文翻译用）" bordered>
+      <Card title="AI 多平台配置（自动降级）" bordered>
         <Space direction="vertical" style={{ width: '100%' }}>
-          <div className="flex items-center gap-2">
-            <Tag theme={llmStatus.configured ? 'success' : 'default'} variant="light">
-              {llmStatus.configured ? '已配置' : '未配置（仅显示英文）'}
+          <div className="flex items-center gap-2 flex-wrap">
+            <Tag theme={llmConfigured ? 'success' : 'default'} variant="light">
+              {llmConfigured ? `已配置 ${llmProviders.length} 个平台` : '未配置（仅显示英文）'}
             </Tag>
-            {llmStatus.configured && (
-              <span className="text-xs" style={{ color: 'var(--td-text-color-placeholder)' }} title={`完整 baseUrl：${llmStatus.baseUrl}`}>
-                {llmStatus.baseUrl} · {llmStatus.model}
+            {llmConfigured && (
+              <span className="text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>
+                调用顺序：{llmProviders.map((p) => p.name.trim() || '未命名').join(' → ')}，一个失败自动换下一个
               </span>
             )}
           </div>
           <div className="text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>
-            填一个 OpenAI 兼容的大模型（硅基流动 / DeepSeek / 智谱 / 阿里百炼等均可）。配置后热搜词会自动补中文，AI 标题/描述生成也依赖它。详见项目 docs/llm-translation-setup.md。
-            <span style={{ color: 'var(--td-text-color-secondary)' }}> 提示：baseUrl 填到 /v1 或不带 /v1 均可，系统会自动处理。</span>
+            支持配置多个 OpenAI 兼容平台（硅基流动 / DeepSeek / 智谱 / 阿里百炼等）。系统按列表顺序调用，
+            <b>一个平台不通自动降级到下一个</b>。baseUrl 填到 /v1 或不带 /v1 均可。
           </div>
+
+          {llmProviders.map((p, idx) => (
+            <div
+              key={p.id}
+              className="p-3 rounded border"
+              style={{ backgroundColor: 'var(--td-bg-color-secondarycontainer)' }}
+            >
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-sm font-medium">平台 {idx + 1}</div>
+                <div className="flex items-center gap-1">
+                  <Button
+                    size="small"
+                    variant="outline"
+                    icon={<ChevronUpIcon />}
+                    disabled={idx === 0}
+                    onClick={() => moveProvider(idx, -1)}
+                    title="上移"
+                  />
+                  <Button
+                    size="small"
+                    variant="outline"
+                    icon={<ChevronDownIcon />}
+                    disabled={idx === llmProviders.length - 1}
+                    onClick={() => moveProvider(idx, 1)}
+                    title="下移"
+                  />
+                  <Button
+                    size="small"
+                    variant="outline"
+                    icon={<DeleteIcon />}
+                    disabled={llmProviders.length <= 1}
+                    onClick={() => removeProvider(idx)}
+                    title="删除"
+                  />
+                </div>
+              </div>
+              <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
+                <Input
+                  value={p.name}
+                  onChange={(v: string) => updateProvider(idx, 'name', v)}
+                  placeholder="平台名称（如：硅基流动）"
+                />
+                <Input
+                  value={p.baseUrl}
+                  onChange={(v: string) => updateProvider(idx, 'baseUrl', v)}
+                  placeholder="https://api.siliconflow.cn"
+                />
+                <Input
+                  value={p.apiKey}
+                  type="password"
+                  onChange={(v: string) => updateProvider(idx, 'apiKey', v)}
+                  placeholder={llmConfigured ? 'Api Key（留空=不修改）' : 'Api Key'}
+                />
+                <Input
+                  value={p.model}
+                  onChange={(v: string) => updateProvider(idx, 'model', v)}
+                  placeholder="Model，如 Qwen/Qwen2.5-7B-Instruct"
+                />
+              </div>
+            </div>
+          ))}
+
           <div className="flex flex-wrap gap-2 items-center">
-            <Input
-              value={llmForm.baseUrl}
-              onChange={(v: string) => setLlmForm({ ...llmForm, baseUrl: v })}
-              placeholder="https://api.siliconflow.cn"
-              style={{ flex: '1 1 240px', minWidth: 0 }}
-            />
-            <Input
-              value={llmForm.apiKey}
-              type="password"
-              onChange={(v: string) => setLlmForm({ ...llmForm, apiKey: v })}
-              placeholder={llmStatus.configured ? 'Api Key（留空=不修改）' : 'Api Key'}
-              style={{ flex: '1 1 200px', minWidth: 0 }}
-            />
-            <Input
-              value={llmForm.model}
-              onChange={(v: string) => setLlmForm({ ...llmForm, model: v })}
-              placeholder="Model，如 Qwen/Qwen2.5-7B-Instruct"
-              style={{ flex: '1 1 200px', minWidth: 0 }}
-            />
-            <Button theme="primary" onClick={handleSaveLlm} loading={llmSaving}>保存</Button>
-            <Button variant="outline" onClick={handleTestLlm} loading={llmTesting}>测试连接</Button>
+            <Button variant="outline" icon={<AddIcon />} onClick={addProvider}>
+              添加平台
+            </Button>
+            <Button theme="primary" onClick={handleSaveLlm} loading={llmSaving}>
+              保存配置
+            </Button>
+            <Button variant="outline" onClick={handleTestLlm} loading={llmTesting}>
+              测试连接
+            </Button>
           </div>
-          {llmTestDetail && (
+
+          {llmTestResult && (
             <div
               className="text-xs p-2 rounded"
               style={{ background: 'var(--td-bg-color-container-active)', color: 'var(--td-text-color-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
             >
-              <div style={{ color: 'var(--td-error-color)' }}>{llmTestDetail.message}</div>
-              {llmTestDetail.raw && (
-                <div className="mt-1" style={{ color: 'var(--td-text-color-placeholder)' }}>
-                  原始响应：{llmTestDetail.raw}
-                </div>
-              )}
-              {llmTestDetail.url && (
-                <div className="mt-1" style={{ color: 'var(--td-text-color-placeholder)' }}>
-                  实际请求 URL：{llmTestDetail.url}
+              <div style={{ color: llmTestResult.success ? 'var(--td-success-color)' : 'var(--td-error-color)' }}>
+                {llmTestResult.message}
+              </div>
+              {llmTestResult.perProvider?.length && (
+                <div className="mt-2 space-y-1">
+                  {llmTestResult.perProvider.map((p, i) => (
+                    <div key={i} className="flex items-center gap-2 flex-wrap">
+                      <Tag theme={p.success ? 'success' : 'danger'} variant="light" size="small">
+                        {p.success ? '可用' : '不可用'}
+                      </Tag>
+                      <span className="font-medium">{p.name}</span>
+                      <span style={{ color: 'var(--td-text-color-placeholder)' }}>
+                        {p.baseUrl} · {p.model}
+                      </span>
+                      <span>{p.message}</span>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -330,7 +472,7 @@ export function TrendsPage() {
             {SITES.find((s) => s.code === activeSite)?.name} 热搜榜
           </div>
           <div className="flex items-center gap-2">
-            {llmStatus.configured && items.length > 0 && items.some((x) => !x.translation) && (
+            {llmConfigured && items.length > 0 && items.some((x) => !x.translation) && (
               <span className="text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>
                 中文翻译补全中…
               </span>
