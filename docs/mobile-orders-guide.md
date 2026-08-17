@@ -70,7 +70,7 @@
       "syncSaved": true,                  // ★ 后台定时同步新增的订单 → 列表里显著标记
       "handlingDeadline": "2026-08-18T10:20:30.000Z",  // ★ 最晚发货时间（已发货/取消为 null）
       "remainingHours": 23.5,             // ★ 距最晚发货剩余小时（已发货/取消为 null，负值=已超时）
-      "remainingHoursText": "履约剩余：23.5 小时",  // ★ 直接渲染此文案（已发货/取消为 "—"）
+      "remainingHoursText": "23.5 小时",  // ★ 短文案（如 "23.5 小时" / "已超时 12 小时" / "—"），前端自行加「履约剩余：」标签
       "...": "美客多原始订单其余字段（以实际返回 JSON 为准）"
     }
   ],
@@ -90,8 +90,9 @@
 > - `order_items[].item.title` 是商品标题（PC 端列表也用这个）。
 > - **履约剩余（新增）**：未发货订单（含 `syncSaved` 的）会带以下三个字段，已发货/已取消则为 `null` / `—`：
 >   - `handlingDeadline`：卖家最晚发货时间（ISO 字符串，如 `"2026-08-18T10:20:30.000Z"`）；取不到时为 `null`。
->   - `remainingHours`：数字，距最晚发货还有多少小时（可能为负，负值表示已超时）；取不到时为 `null`。
->   - `remainingHoursText`：渲染好的人类可读文案，如 `"履约剩余：23.5 小时"`；已发货/已取消或无法计算时为 `"—"`。
+>   - `remainingHours`：数字，距最晚发货还有多少**营业小时**（可能为负，负值表示已超时）；取不到时为 `null`。
+>   - `remainingHoursText`：短文案，如 `"23.5 小时"` / `"已超时 12 小时"` / `"—"`（无前缀，前端展示时自行加「履约剩余：」标签）；已发货/已取消或无法计算时为 `"—"`。
+>   - **计算口径（与运营约定一致）**：自「下单时间」(`date_created`) 起 72 个营业小时；**周末与节假日不计入**（整段顺延到下一个营业日继续累计）。节假日取自 `date-holidays` 库（按站点国家，如 MLM→墨西哥）；若库不可用则退化为仅跳过周末。
 >   - 手机端**直接显示 `remainingHoursText`** 即可，无需自己算；颜色按 `remainingHours` 阈值（见第 5 节 `fulfillColor` 示例：<12h 红、<24h 橙、其余绿）。
 
 ### 2.3 订单详情 `GET /api/mobile/orders/:storeId/:orderId`
@@ -127,7 +128,7 @@ CREATE TABLE IF NOT EXISTS local_orders (
   date_created TEXT,           -- 便于排序
   handling_deadline TEXT,      -- ★ 最晚发货时间（ISO 或 NULL）
   remaining_hours  REAL,       -- ★ 距最晚发货剩余小时（NULL=已发货/取消/无法计算）
-  remaining_hours_text TEXT,   -- ★ 渲染文案，如 "履约剩余：23.5 小时"（"—"=不适用）
+  remaining_hours_text TEXT,   -- ★ 渲染短文案，如 "23.5 小时" / "—"（前端加「履约剩余：」标签）
   updated_at  TEXT,
   PRIMARY KEY (store_id, order_id)
 );
@@ -338,7 +339,7 @@ function DetailFulfill({ summary }: { summary: any }) {
 - [ ] 「全部」Tab 显示所有店铺订单；切换到店铺 Tab 只显示该店铺
 - [ ] 点「刷新」：服务器新增的订单出现在本机；本地已有订单金额/状态被更新
 - [ ] `syncSaved===true` 的订单带「后台同步」标签
-- [ ] **履约剩余**：未发货订单列表/详情显示 `remainingHoursText`（如「履约剩余：23.5 小时」），已发货/取消显示 `—`
+- [ ] **履约剩余**：未发货订单列表/详情显示「履约剩余：」+ `remainingHoursText`（如「履约剩余：23.5 小时」），已发货/取消显示 `—`
 - [ ] **履约剩余颜色**：剩余 <12h 红色、<24h 橙色、其余绿色；超时为灰色
 - [ ] 点开订单：详情接口返回 `desktopDetail/smsContent/summary` 且能渲染
 - [ ] 杀掉 APP 再进：上次同步的订单仍在（本地持久化生效）

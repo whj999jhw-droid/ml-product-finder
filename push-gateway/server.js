@@ -83,7 +83,7 @@ app.post('/push', async (req, res) => {
     // 未发货订单把「履约剩余」带进通知正文，强调发货紧迫感
     const fulfillSuffix =
       event.remainingHoursText && event.remainingHoursText !== '—'
-        ? ` | ⏰ ${event.remainingHoursText}`
+        ? ` | ⏰ 履约剩余 ${event.remainingHoursText}`
         : '';
     const body = `${event.storeName || ''} | ${event.total || ''} | 买家:${event.buyer || ''}${fulfillSuffix}`;
 

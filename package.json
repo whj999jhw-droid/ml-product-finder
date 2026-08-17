@@ -14,7 +14,9 @@
     "electron:build": "node build-electron.mjs",
     "electron:dist": "node build-electron.mjs"
   },
-  "dependencies": {},
+  "dependencies": {
+    "date-holidays": "^3.35.0"
+  },
   "devDependencies": {
     "@tdesign-react/aigc": "^0.1.0-alpha.1",
     "@tdesign-react/chat": "^1.0.2",

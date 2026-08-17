@@ -144,36 +144,35 @@ async function fetchMarketplaceShipmentStatuses(store: Store, orders: any[]): Pr
 }
 
 /** 批量为订单取物流详情并计算履约截止时间（仅针对未发货订单，避免浪费 API） */
+/**
+ * 计算各未发货订单的履约截止时间（按「72 营业小时 + 跳过周末/节假日」规则）。
+ * 注：新规则只依赖「下单时间 + 站点国家」，无需再逐单调用物流接口，
+ * 因此这里直接计算，省去大量 shipments API 请求。
+ */
 async function fetchShipmentDeadlines(store: Store, orders: any[]): Promise<Map<string, FulfillmentDeadline>> {
   const map = new Map<string, FulfillmentDeadline>();
-  // 已发货/已取消无需计算发货截止
-  const pending = orders.filter((o) => {
+  for (const o of orders) {
     const cat = classifyOrder(o, o.shipping?.status);
-    return cat === 'unshipped' && o.shipping?.id;
-  });
-  if (!pending.length) return map;
-
-  const isCbt = (store.site || '').toUpperCase() === 'CBT';
-  await mapLimit(pending, 5, async (o: any) => {
-    try {
-      const shipId = String(o.shipping.id);
-      const path = isCbt ? `/marketplace/shipments/${shipId}` : `/shipments/${shipId}`;
-      const cached = getCache(shipCache, shipId);
-      const ship = cached || (await storeApiGet(store, path));
-      if (!cached) setCache(shipCache, shipId, ship);
-      const fd = extractHandlingDeadline(o, ship, store.site);
-      map.set(String(o.id), fd);
-    } catch {
-      /* 物流端点可能限流或无权限，忽略，后续用兜底估算 */
+    if (cat === 'unshipped') {
+      map.set(String(o.id), extractHandlingDeadline(o, null, store.site));
     }
-  });
+  }
   return map;
 }
 
-/** 将履约截止时间字段附加到订单对象 */
+/** 将履约截止时间字段附加到订单对象（仅未发货订单需要） */
 function attachFulfillmentDeadline(order: any, fd?: FulfillmentDeadline): any {
-  const site = order.site || '';
-  const fallback = fd || extractHandlingDeadline(order, null, site);
+  const cat = classifyOrder(order, order.shipping?.status);
+  if (cat !== 'unshipped') {
+    // 已发货/已取消：不展示履约剩余
+    return {
+      ...order,
+      handlingDeadline: null,
+      remainingHours: null,
+      remainingHoursText: '—',
+    };
+  }
+  const fallback = fd || extractHandlingDeadline(order, null, order.site || '');
   return {
     ...order,
     handlingDeadline: fallback.deadline,
@@ -797,7 +796,7 @@ export async function fetchOrderDetail(store: Store, orderId: string): Promise<{
   }
 
   const financialSummary = computeFinancialSummary(order, shipmentCosts);
-  const fulfillment = extractHandlingDeadline({ ...order, site: store.site }, shipments[0], store.site);
+  const fulfillment = extractHandlingDeadline(order, null, store.site);
 
   return { order, shipments, itemsDetail, category, shippingAddress, shippingMethod, buyerBilling, financialSummary, fulfillment };
 }
