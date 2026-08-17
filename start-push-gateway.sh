@@ -3,7 +3,7 @@
 # start-push-gateway.sh —— 安装并启动手机 APP 推送中转服务（push-gateway）
 #
 # 作用：把 push-gateway 作为 pm2 常驻进程拉起来，供后端经
-#       MOBILE_PUSH_WEBHOOK=http://localhost:4000/push 调用，从而实现
+#       MOBILE_PUSH_WEBHOOK=http://localhost:4100/push 调用，从而实现
 #       「APP 在后台/被杀时也能弹系统通知」。
 #
 # 幂等：可重复运行。缺 node_modules 会自动装；已有进程会先删再起。
@@ -31,12 +31,20 @@ if [ ! -d node_modules ]; then
   npm install --production=true
 fi
 
+# 端口冲突检测（默认 4100，避免与别的业务撞端口）
+GW_PORT="${PORT:-4100}"
+if (exec 3<>/dev/tcp/127.0.0.1/$GW_PORT) >/dev/null 2>&1; then
+  warn "端口 $GW_PORT 已被占用，请先释放，或指定其他端口后重试："
+  warn "  PORT=4200 ./start-push-gateway.sh"
+  exit 1
+fi
+
 # 先删旧的再起，避免重复进程
 pm2 delete ml-push-gateway 2>/dev/null || true
 pm2 start server.js --name ml-push-gateway
 pm2 save 2>/dev/null || true
 
-log "push-gateway 已启动 ✅ (pm2 名称: ml-push-gateway, 监听端口: ${PORT:-4000})"
+log "push-gateway 已启动 ✅ (pm2 名称: ml-push-gateway, 监听端口: ${GW_PORT})"
 log "查看日志: pm2 logs ml-push-gateway"
 echo ""
 echo "  ┌──────────────────────────────────────────────────────────────┐"

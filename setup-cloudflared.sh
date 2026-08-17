@@ -157,8 +157,8 @@ fi
 # 8.1 确保 .env 含 MOBILE_PUSH_WEBHOOK（指向本机推送中转服务，loopback 即可）
 if [ -f "$APP_DIR/.env" ]; then
   if ! grep -q '^MOBILE_PUSH_WEBHOOK=' "$APP_DIR/.env"; then
-    echo "MOBILE_PUSH_WEBHOOK=http://localhost:4000/push" >> "$APP_DIR/.env"
-    log ".env 已补加 MOBILE_PUSH_WEBHOOK=http://localhost:4000/push"
+    echo "MOBILE_PUSH_WEBHOOK=http://localhost:4100/push" >> "$APP_DIR/.env"
+    log ".env 已补加 MOBILE_PUSH_WEBHOOK=http://localhost:4100/push"
   fi
 else
   warn "未找到 $APP_DIR/.env，跳过 MOBILE_PUSH_WEBHOOK 写入"

@@ -72,7 +72,7 @@ npm install                        # 拉到新依赖时执行（通常已装）
 
 脚本会自动做这些（你不用手动做）：
 1. 安装 push-gateway 的依赖；
-2. 在 `.env` 写入 `MOBILE_PUSH_WEBHOOK=http://localhost:4000/push`；
+2. 在 `.env` 写入 `MOBILE_PUSH_WEBHOOK=http://localhost:4100/push`；
 3. 用 PM2 常驻启动 `ml-finder`（后端）和 `ml-push-gateway`（推送中转）。
 
 > ⚠️ **注意**：脚本可重复运行。如果之前已经部署过，**先停掉旧进程再跑**，避免重复：
@@ -107,7 +107,7 @@ pm2 status
 curl -s https://ml.w999w.dpdns.org/api/mobile/devices
 
 # 推送中转服务（GET 应返回 405，说明服务在）
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:4000/push
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:4100/push
 ```
 
 > ✅ 后端返回 JSON、中转返回 `405` = 两个都活着，部署成功。
@@ -166,9 +166,11 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:4000/push
 
 ## ⚠️ 部署侧 · 重点注意事项
 
-1. **`MOBILE_PUSH_WEBHOOK` 指向本机 `http://localhost:4000/push`，不要用域名、不用 https。**
+1. **`MOBILE_PUSH_WEBHOOK` 指向本机 `http://localhost:4100/push`，不要用域名、不用 https。**
    后端 → 中转是同机 localhost 调用（HTTP 即可）；中转 → FCM/APNs 由 SDK 内部走 Google/Apple 自己的 HTTPS，
-   **不经过你的公网地址**。所以这一步**不需要公网证书**。改这个变量后必须重跑部署脚本或重启后端才生效。
+   **不经过你的公网地址**。所以这一步**不需要公网证书**。
+   **也不需要开防火墙**：push-gateway 进程只监听本机回环地址 `127.0.0.1:4100`，外网根本连不进来，
+   防火墙规则对它无影响（也无需放行 4100 端口）。改这个变量后必须重跑部署脚本或重启后端才生效。
 
 2. **改了 `.env` / 部署脚本，必须重启相关进程**（`pm2 restart ml-finder` 或重跑脚本），否则不生效。
 
@@ -508,7 +510,7 @@ let task = URLSession.shared.dataTask(with: url) { data, resp, err in
 **部署侧（站长）先确认：**
 - [ ] `pm2 status` 里 `ml-finder` 与 `ml-push-gateway` 都 `online`
 - [ ] `curl https://ml.w999w.dpdns.org/api/mobile/devices` 返回 JSON
-- [ ] `curl -o /dev/null -w "%{http_code}" http://localhost:4000/push` 返回 `405`
+- [ ] `curl -o /dev/null -w "%{http_code}" http://localhost:4100/push` 返回 `405`
 - [ ] （要系统推送）`push-gateway/` 放了 `service-account.json` 或 `AuthKey_*.p8` 且已 `pm2 restart ml-push-gateway`
 
 **APP 侧（开发者）逐项验证：**

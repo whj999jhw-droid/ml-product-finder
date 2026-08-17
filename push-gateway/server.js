@@ -134,8 +134,9 @@ async function sendApns(token, title, body, data) {
   return { sent: response.sent.length, failed };
 }
 
-const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`\n推送中转服务已启动： http://localhost:${PORT}/push`);
-  console.log('请把该地址（需为公网 HTTPS）配置到后端的 MOBILE_PUSH_WEBHOOK 环境变量。\n');
+const PORT = process.env.PORT || 4100;
+const HOST = '127.0.0.1'; // 仅监听本机 loopback：外部无法访问，无需开放防火墙；后端经 MOBILE_PUSH_WEBHOOK=http://localhost:4100/push 调用
+app.listen(PORT, HOST, () => {
+  console.log(`\n推送中转服务已启动： http://${HOST}:${PORT}/push`);
+  console.log('该地址仅本机可访问（后端经 MOBILE_PUSH_WEBHOOK 调用），无需公网 HTTPS、无需开放防火墙。\n');
 });
