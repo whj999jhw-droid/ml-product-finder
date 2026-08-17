@@ -68,6 +68,9 @@
       "currency_id": "MXN",
       "shipping": { "status": "ready_to_ship", "...": "..." },
       "syncSaved": true,                  // ★ 后台定时同步新增的订单 → 列表里显著标记
+      "handlingDeadline": "2026-08-18T10:20:30.000Z",  // ★ 最晚发货时间（已发货/取消为 null）
+      "remainingHours": 23.5,             // ★ 距最晚发货剩余小时（已发货/取消为 null，负值=已超时）
+      "remainingHoursText": "履约剩余：23.5 小时",  // ★ 直接渲染此文案（已发货/取消为 "—"）
       "...": "美客多原始订单其余字段（以实际返回 JSON 为准）"
     }
   ],
@@ -85,12 +88,17 @@
 > - `counts` 是后端按 `mlStatus` 统计的分类计数，手机端可直接用来显示 Tab 角标 / 全部页的分组统计。
 > - 金额兼容：`total_amount` 直接数字；若缺失，则取 `order.total.amount`。建议金额字段本地统一换算存储。
 > - `order_items[].item.title` 是商品标题（PC 端列表也用这个）。
+> - **履约剩余（新增）**：未发货订单（含 `syncSaved` 的）会带以下三个字段，已发货/已取消则为 `null` / `—`：
+>   - `handlingDeadline`：卖家最晚发货时间（ISO 字符串，如 `"2026-08-18T10:20:30.000Z"`）；取不到时为 `null`。
+>   - `remainingHours`：数字，距最晚发货还有多少小时（可能为负，负值表示已超时）；取不到时为 `null`。
+>   - `remainingHoursText`：渲染好的人类可读文案，如 `"履约剩余：23.5 小时"`；已发货/已取消或无法计算时为 `"—"`。
+>   - 手机端**直接显示 `remainingHoursText`** 即可，无需自己算；颜色按 `remainingHours` 阈值（见第 5 节 `fulfillColor` 示例：<12h 红、<24h 橙、其余绿）。
 
 ### 2.3 订单详情 `GET /api/mobile/orders/:storeId/:orderId`
 返回 `{ "success": true, "detail": { "desktopDetail": {...}, "smsContent": {...}, "summary": {...} } }`：
 - `desktopDetail`：与电脑端弹窗完全一致的完整详情（物流轨迹、商品图片、买家税务证件、费用汇总等）。
 - `smsContent`：短信实际展示的内容（纯文本 / markdown 图文 / 邮件 HTML）。
-- `summary`：手机端直接渲染的扁平结构（订单号、买家、金额、状态、商品列表等）。
+- `summary`：手机端直接渲染的扁平结构（订单号、买家、金额、状态、商品列表等），同样含 `handlingDeadline` / `remainingHours` / `remainingHoursText` 三个履约剩余字段（详情页基本信息区展示）。
 
 > 点开任意订单看详情时，调这个接口即可，无需手机端自己拼装。
 
@@ -117,6 +125,9 @@ CREATE TABLE IF NOT EXISTS local_orders (
   ml_status   TEXT,            -- unshipped/shipped/cancelled/other（用于分类与 counts 重建）
   sync_saved  INTEGER,         -- 1=后台同步新增
   date_created TEXT,           -- 便于排序
+  handling_deadline TEXT,      -- ★ 最晚发货时间（ISO 或 NULL）
+  remaining_hours  REAL,       -- ★ 距最晚发货剩余小时（NULL=已发货/取消/无法计算）
+  remaining_hours_text TEXT,   -- ★ 渲染文案，如 "履约剩余：23.5 小时"（"—"=不适用）
   updated_at  TEXT,
   PRIMARY KEY (store_id, order_id)
 );
@@ -179,7 +190,9 @@ const db = await SQLite.openDatabaseAsync('app.db');
 await db.execAsync(`
   CREATE TABLE IF NOT EXISTS local_orders (
     store_id TEXT NOT NULL, order_id TEXT NOT NULL, order_json TEXT,
-    ml_status TEXT, sync_saved INTEGER, date_created TEXT, updated_at TEXT,
+    ml_status TEXT, sync_saved INTEGER, date_created TEXT,
+    handling_deadline TEXT, remaining_hours REAL, remaining_hours_text TEXT,
+    updated_at TEXT,
     PRIMARY KEY (store_id, order_id)
   );
 `);
@@ -187,13 +200,19 @@ await db.execAsync(`
 async function upsertOrders(storeId: string, orders: any[]) {
   for (const o of orders) {
     await db.runAsync(
-      `INSERT INTO local_orders (store_id, order_id, order_json, ml_status, sync_saved, date_created, updated_at)
-       VALUES (?,?,?,?,?,?,?)
+      `INSERT INTO local_orders (
+         store_id, order_id, order_json, ml_status, sync_saved, date_created,
+         handling_deadline, remaining_hours, remaining_hours_text, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(store_id, order_id) DO UPDATE SET
          order_json=excluded.order_json, ml_status=excluded.ml_status,
-         sync_saved=excluded.sync_saved, date_created=excluded.date_created, updated_at=excluded.updated_at`,
+         sync_saved=excluded.sync_saved, date_created=excluded.date_created,
+         handling_deadline=excluded.handling_deadline, remaining_hours=excluded.remaining_hours,
+         remaining_hours_text=excluded.remaining_hours_text, updated_at=excluded.updated_at`,
       [storeId, String(o.id), JSON.stringify(o), o.mlStatus || 'other',
-       o.syncSaved ? 1 : 0, o.date_created || '', new Date().toISOString()]
+       o.syncSaved ? 1 : 0, o.date_created || '',
+       o.handlingDeadline || null, o.remainingHours ?? null, o.remainingHoursText || '—',
+       new Date().toISOString()]
     );
   }
 }
@@ -250,6 +269,51 @@ async function openOrder(storeId: string, orderId: string) {
   const resp = await fetch(`${BASE}/api/mobile/orders/${storeId}/${orderId}`).then(r => r.json());
   navigateToDetail(resp.detail);   // desktopDetail / smsContent / summary 直接渲染
 }
+
+// ---------- ★ 履约剩余：列表卡片 / 详情渲染 ----------
+/** 根据 remainingHours 算颜色（与 PC 端一致）：<12h 红、<24h 橙、其余绿；已发货/取消/超时灰 */
+export function fulfillColor(remainingHours: number | null): string {
+  if (remainingHours == null) return '#9e9e9e';        // 已发货/已取消/无法计算
+  if (remainingHours < 0) return '#9e9e9e';             // 已超时
+  if (remainingHours < 12) return '#e34d59';            // 紧迫：红
+  if (remainingHours < 24) return '#ed7b2f';            // 提醒：橙
+  return '#2ba471';                                     // 充足：绿
+}
+
+/** 从本地行渲染履约剩余标签（优先用后端算好的文案） */
+function renderFulfill(row: any) {
+  const text = row.remaining_hours_text || '—';
+  if (text === '—') return null;   // 已发货/取消不显示
+  return (
+    <Text style={{ color: fulfillColor(row.remaining_hours), fontSize: 12 }}>
+      ⏰ {text}
+    </Text>
+  );
+}
+
+// 列表卡片示例（在每张订单卡片的状态行下方加一行履约剩余）
+function OrderCard({ row }: { row: any }) {
+  return (
+    <View style={cardStyle}>
+      <Text>订单 {row.order_id} · {(row.order_json && JSON.parse(row.order_json).buyer?.nickname) || ''}</Text>
+      <Text>{(row.order_json && JSON.parse(row.order_json).currency_id) || ''} ...</Text>
+      {renderFulfill(row)}
+      {row.sync_saved === 1 && <Tag>后台同步</Tag>}
+    </View>
+  );
+}
+
+// 详情页示例（取 summary.handlingDeadline / remainingHoursText）
+function DetailFulfill({ summary }: { summary: any }) {
+  if (!summary || summary.remainingHoursText === '—') return null;
+  return (
+    <View style={rowStyle}>
+      <Text style={{ color: fulfillColor(summary.remainingHours) }}>
+        履约剩余：{summary.remainingHoursText}
+      </Text>
+    </View>
+  );
+}
 ```
 
 ---
@@ -274,6 +338,8 @@ async function openOrder(storeId: string, orderId: string) {
 - [ ] 「全部」Tab 显示所有店铺订单；切换到店铺 Tab 只显示该店铺
 - [ ] 点「刷新」：服务器新增的订单出现在本机；本地已有订单金额/状态被更新
 - [ ] `syncSaved===true` 的订单带「后台同步」标签
+- [ ] **履约剩余**：未发货订单列表/详情显示 `remainingHoursText`（如「履约剩余：23.5 小时」），已发货/取消显示 `—`
+- [ ] **履约剩余颜色**：剩余 <12h 红色、<24h 橙色、其余绿色；超时为灰色
 - [ ] 点开订单：详情接口返回 `desktopDetail/smsContent/summary` 且能渲染
 - [ ] 杀掉 APP 再进：上次同步的订单仍在（本地持久化生效）
 - [ ] （可选）SSE 收到 `new_order` 后对应 Tab 出现红点；回前台 `recent` 补齐

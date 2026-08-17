@@ -80,7 +80,12 @@ app.post('/push', async (req, res) => {
 
     // 通知栏标题/正文（直接用后端 new_order 事件的字段）
     const title = `🔔 新订单 ${event.orderId || ''}`;
-    const body = `${event.storeName || ''} | ${event.total || ''} | 买家:${event.buyer || ''}`;
+    // 未发货订单把「履约剩余」带进通知正文，强调发货紧迫感
+    const fulfillSuffix =
+      event.remainingHoursText && event.remainingHoursText !== '—'
+        ? ` | ⏰ ${event.remainingHoursText}`
+        : '';
+    const body = `${event.storeName || ''} | ${event.total || ''} | 买家:${event.buyer || ''}${fulfillSuffix}`;
 
     // 点开通知后跳转订单详情所需的参数（后端详情接口用 storeId + orderId）
     const data = {

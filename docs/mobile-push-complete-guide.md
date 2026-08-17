@@ -266,8 +266,13 @@ APP 在前台时建立一条长连接（EventSource / OkHttp SSE / URLSession）
   "buyer": "comprador_xxx",
   "itemCount": 2,
   "itemTitles": ["商品标题1", "商品标题2"],
+  "handlingDeadline": "2026-08-18T10:00:00.000Z",  // 最晚发货时间（已发货/取消为 null）
+  "remainingHours": 23.5,                           // 距最晚发货剩余小时（已发货/取消为 null，负值=超时）
+  "remainingHoursText": "履约剩余：23.5 小时",        // 直接渲染此文案（已发货/取消为 "—"）
   "serverTime": "2026-08-16T10:00:01.000Z"
 }
+
+> **履约剩余（新增）**：`new_order` 事件已带 `handlingDeadline / remainingHours / remainingHoursText` 三个字段。推送网关（`push-gateway/server.js`）会把这些拼进**系统通知正文**（未发货订单显示「⏰ 履约剩余：X 小时」），APP 在「消息中心」卡片里也应直接渲染 `remainingHoursText`（已发货/取消为 `—`，不显示）。
 ```
 
 **断线重连：** 用 EventSource 自动重连；重连成功后调用 3.4 的 `recent` 接口用上次最新时间补齐漏收。
