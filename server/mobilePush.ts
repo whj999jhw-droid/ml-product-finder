@@ -108,6 +108,9 @@ export function buildNewOrderEvent(store: { id?: string; nickname?: string; site
     buyer: order.buyer?.nickname || order.buyer?.id || '',
     itemCount: items.length,
     itemTitles: items.slice(0, 3).map((it: any) => it.item?.title || it.title || ''),
+    handlingDeadline: order.handlingDeadline || null,
+    remainingHours: order.remainingHours ?? null,
+    remainingHoursText: order.remainingHoursText || '—',
     serverTime: new Date().toISOString(),
   };
 }

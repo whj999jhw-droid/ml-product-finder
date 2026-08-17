@@ -18,6 +18,13 @@ interface StoreOrders {
   loaded: boolean;
 }
 
+interface FulfillmentDeadline {
+  deadline: string | null;
+  remainingHours: number | null;
+  remainingHoursText: string;
+  source: 'estimated_handling_limit' | 'lead_time_handling' | 'fallback' | null;
+}
+
 const STATUS_TEXT: Record<string, string> = {
   unshipped: '待发货',
   paid: '待发货',
@@ -85,6 +92,15 @@ function categoryOf(status: string): 'unshipped' | 'shipped' | 'cancelled' | 'ot
   return 'other';
 }
 
+function renderRemainingHours(row: any): ReactNode {
+  const cat = categoryOf(row.mlStatus);
+  if (cat !== 'unshipped') return <span style={{ color: 'var(--td-text-color-secondary)' }}>—</span>;
+  const remaining = row.remainingHours;
+  if (remaining == null) return <span style={{ color: 'var(--td-text-color-secondary)' }}>—</span>;
+  const color = remaining < 12 ? 'var(--td-error-color)' : remaining < 24 ? 'var(--td-warning-color)' : 'var(--td-success-color)';
+  return <span style={{ color, fontWeight: 500 }}>履约剩余：{row.remainingHoursText}</span>;
+}
+
 export function OrdersPage() {
   const [stores, setStores] = useState<StoreRow[]>([]);
   const [activeStore, setActiveStore] = useState('');
@@ -101,6 +117,7 @@ export function OrdersPage() {
     shippingMethod?: string;
     buyerBilling?: { docType: string; docNumber: string; name: string; additionalInfo: any } | null;
     financialSummary?: { productTotal: number; marketplaceFee: number; shippingCost: number; netTotal: number; currency: string };
+    fulfillment?: FulfillmentDeadline;
     loading: boolean;
   } | null>(null);
   const [ordersError, setOrdersError] = useState<Record<string, string>>({});
@@ -186,6 +203,7 @@ export function OrdersPage() {
           shippingMethod: d.shippingMethod,
           buyerBilling: d.buyerBilling,
           financialSummary: d.financialSummary,
+          fulfillment: d.fulfillment,
           loading: false,
         });
       } else {
@@ -254,6 +272,12 @@ export function OrdersPage() {
       title: '金额',
       width: 130,
       cell: ({ row }: any) => `${row.currency_id || ''} ${(row.total_amount ?? 0).toFixed(2)}`,
+    },
+    {
+      colKey: 'remaining',
+      title: '履约剩余',
+      width: 150,
+      cell: ({ row }: any) => renderRemainingHours(row),
     },
     {
       colKey: 'status',
@@ -434,6 +458,26 @@ export function OrdersPage() {
                 <KV k="关闭/发货时间" v={fmtDate(detailItems.date_closed || detailItems.date_last_updated)} />
                 <KV k="订单总额" v={`${detailItems.currency_id || ''} ${(detailItems.total_amount ?? 0).toFixed(2)}`} />
                 <KV k="买家已付" v={`${detailItems.currency_id || ''} ${(detailItems.paid_amount ?? 0).toFixed(2)}`} />
+                {detail?.fulfillment && categoryOf(detail?.category || detailItems.status) === 'unshipped' && (
+                  <KV
+                    k="履约剩余"
+                    v={
+                      <span
+                        style={{
+                          color:
+                            (detail.fulfillment.remainingHours ?? 0) < 12
+                              ? 'var(--td-error-color)'
+                              : (detail.fulfillment.remainingHours ?? 0) < 24
+                              ? 'var(--td-warning-color)'
+                              : 'var(--td-success-color)',
+                          fontWeight: 500,
+                        }}
+                      >
+                        {detail.fulfillment.remainingHoursText}
+                      </span>
+                    }
+                  />
+                )}
               </div>
             </Section>
 

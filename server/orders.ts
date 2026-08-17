@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 import { getAllStores, getStoreSellerInfo, storeApiGet, updateStore, Store } from './stores.js';
 import { notifyNewOrder } from './notify.js';
 import { broadcastNewOrder } from './mobilePush.js';
+import { extractHandlingDeadline, FulfillmentDeadline } from './fulfillment.js';
 import {
   getCachedOrderIds,
   upsertOrders,
@@ -140,6 +141,45 @@ async function fetchMarketplaceShipmentStatuses(store: Store, orders: any[]): Pr
     }
   });
   return map;
+}
+
+/** 批量为订单取物流详情并计算履约截止时间（仅针对未发货订单，避免浪费 API） */
+async function fetchShipmentDeadlines(store: Store, orders: any[]): Promise<Map<string, FulfillmentDeadline>> {
+  const map = new Map<string, FulfillmentDeadline>();
+  // 已发货/已取消无需计算发货截止
+  const pending = orders.filter((o) => {
+    const cat = classifyOrder(o, o.shipping?.status);
+    return cat === 'unshipped' && o.shipping?.id;
+  });
+  if (!pending.length) return map;
+
+  const isCbt = (store.site || '').toUpperCase() === 'CBT';
+  await mapLimit(pending, 5, async (o: any) => {
+    try {
+      const shipId = String(o.shipping.id);
+      const path = isCbt ? `/marketplace/shipments/${shipId}` : `/shipments/${shipId}`;
+      const cached = getCache(shipCache, shipId);
+      const ship = cached || (await storeApiGet(store, path));
+      if (!cached) setCache(shipCache, shipId, ship);
+      const fd = extractHandlingDeadline(o, ship, store.site);
+      map.set(String(o.id), fd);
+    } catch {
+      /* 物流端点可能限流或无权限，忽略，后续用兜底估算 */
+    }
+  });
+  return map;
+}
+
+/** 将履约截止时间字段附加到订单对象 */
+function attachFulfillmentDeadline(order: any, fd?: FulfillmentDeadline): any {
+  const site = order.site || '';
+  const fallback = fd || extractHandlingDeadline(order, null, site);
+  return {
+    ...order,
+    handlingDeadline: fallback.deadline,
+    remainingHours: fallback.remainingHours,
+    remainingHoursText: fallback.remainingHoursText,
+  };
 }
 
 /**
@@ -385,10 +425,19 @@ export async function fetchAllOrdersForStore(store: Store): Promise<{
       const children = await expandMarketplaceChildren(store, parents);
       // 批量查询每个子订单的真实物流状态，用于正确区分已发货/未发货
       const shipStatusMap = await fetchMarketplaceShipmentStatuses(store, children);
+      // 为未发货订单取真实发货截止时间
+      const deadlineMap = await fetchShipmentDeadlines(store, children.map((o: any) => ({ ...o, site: store.site })));
       for (const o of children) {
         const shipStatus = shipStatusMap.get(String(o.id));
         const category = classifyOrder(o, shipStatus);
-        byId.set(String(o.id), { ...o, mlStatus: category, orderStatus: o.status, shipStatus });
+        const fd = deadlineMap.get(String(o.id));
+        const enriched = attachFulfillmentDeadline({ ...o, site: store.site }, fd);
+        byId.set(String(o.id), {
+          ...enriched,
+          mlStatus: category,
+          orderStatus: o.status,
+          shipStatus,
+        });
       }
       if (parents.length < 50) break;
       offset += 50;
@@ -419,11 +468,20 @@ export async function fetchAllOrdersForStore(store: Store): Promise<{
       const results: any[] = data.results || [];
       for (const o of results) {
         const category = classifyOrder(o);
-        byId.set(String(o.id), { ...o, mlStatus: category, orderStatus: o.status, shipStatus: o.shipping?.status });
+        byId.set(String(o.id), { ...o, site: store.site, mlStatus: category, orderStatus: o.status, shipStatus: o.shipping?.status });
       }
       if (results.length < 50) break;
       offset += 50;
     }
+  }
+
+  // 为未发货订单取真实发货截止时间（已发货/已取消用兜底估算即可）
+  const allOrders = [...byId.values()];
+  const deadlineMap = await fetchShipmentDeadlines(store, allOrders);
+  for (const o of allOrders) {
+    const fd = deadlineMap.get(String(o.id));
+    const enriched = attachFulfillmentDeadline(o, fd);
+    byId.set(String(o.id), enriched);
   }
 
   const orders = [...byId.values()].sort(
@@ -456,9 +514,13 @@ export async function fetchRecentOrdersSince(store: Store, sinceMs: number): Pro
       const parents = data.results || [];
       const children = await expandMarketplaceChildren(store, parents);
       const shipStatusMap = await fetchMarketplaceShipmentStatuses(store, children);
+      const deadlineMap = await fetchShipmentDeadlines(store, children.map((o: any) => ({ ...o, site: store.site })));
       for (const o of children) {
         if (new Date(o.date_created).getTime() > sinceMs) {
-          byId.set(String(o.id), { ...o, mlStatus: classifyOrder(o, shipStatusMap.get(String(o.id))), orderStatus: o.status, shipStatus: shipStatusMap.get(String(o.id)) });
+          const shipStatus = shipStatusMap.get(String(o.id));
+          const fd = deadlineMap.get(String(o.id));
+          const enriched = attachFulfillmentDeadline({ ...o, site: store.site }, fd);
+          byId.set(String(o.id), { ...enriched, mlStatus: classifyOrder(o, shipStatus), orderStatus: o.status, shipStatus });
         }
       }
       if (parents.length < 50) break;
@@ -477,12 +539,20 @@ export async function fetchRecentOrdersSince(store: Store, sinceMs: number): Pro
         if (results.length && new Date(results[0].date_created || 0).getTime() <= sinceMs) break;
         for (const o of results) {
           if (new Date(o?.date_created || 0).getTime() > sinceMs) {
-            byId.set(String(o.id), { ...o, mlStatus: classifyOrder(o), orderStatus: o.status, shipStatus: o.shipping?.status });
+            byId.set(String(o.id), { ...o, site: store.site, mlStatus: classifyOrder(o), orderStatus: o.status, shipStatus: o.shipping?.status });
           }
         }
         if (results.length < 50) break;
         offset += 50;
       }
+    }
+    // 为未发货订单取真实发货截止时间
+    const allOrders = [...byId.values()];
+    const deadlineMap = await fetchShipmentDeadlines(store, allOrders);
+    for (const o of allOrders) {
+      const fd = deadlineMap.get(String(o.id));
+      const enriched = attachFulfillmentDeadline(o, fd);
+      byId.set(String(o.id), enriched);
     }
   }
 
@@ -637,6 +707,7 @@ export async function fetchOrderDetail(store: Store, orderId: string): Promise<{
   shippingMethod?: string;
   buyerBilling?: { docType: string; docNumber: string; name: string; additionalInfo: any } | null;
   financialSummary?: { productTotal: number; marketplaceFee: number; shippingCost: number; netTotal: number; currency: string };
+  fulfillment?: FulfillmentDeadline;
 }> {
   const isCbt = (store.site || '').toUpperCase() === 'CBT';
   let buyerBilling: any = null;
@@ -726,8 +797,9 @@ export async function fetchOrderDetail(store: Store, orderId: string): Promise<{
   }
 
   const financialSummary = computeFinancialSummary(order, shipmentCosts);
+  const fulfillment = extractHandlingDeadline({ ...order, site: store.site }, shipments[0], store.site);
 
-  return { order, shipments, itemsDetail, category, shippingAddress, shippingMethod, buyerBilling, financialSummary };
+  return { order, shipments, itemsDetail, category, shippingAddress, shippingMethod, buyerBilling, financialSummary, fulfillment };
 }
 
 /** 订单状态 → 中文分类标签（以 mlStatus 为准） */

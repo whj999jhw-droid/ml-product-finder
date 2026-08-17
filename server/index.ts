@@ -1272,6 +1272,9 @@ app.get('/api/mobile/orders/recent', (req, res) => {
         itemCount: items.length,
         itemTitles: items.slice(0, 3).map((it: any) => it.item?.title || it.title || ''),
         syncSaved: r.source === 'sync',
+        handlingDeadline: o.handlingDeadline || null,
+        remainingHours: o.remainingHours ?? null,
+        remainingHoursText: o.remainingHoursText || '—',
       };
     });
     res.json({ success: true, since, count: out.length, orders: out });
@@ -1313,6 +1316,9 @@ app.get('/api/mobile/orders/:storeId/:orderId', async (req, res) => {
       shippingMethod: detail.shippingMethod || '',
       buyerBilling: detail.buyerBilling || null,
       financialSummary: detail.financialSummary || null,
+      handlingDeadline: detail.fulfillment?.deadline || null,
+      remainingHours: detail.fulfillment?.remainingHours ?? null,
+      remainingHoursText: detail.fulfillment?.remainingHoursText || '—',
       items: items.map((it: any) => ({
         title: it.item?.title || it.title || '未知商品',
         quantity: it.quantity || 1,

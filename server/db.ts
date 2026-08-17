@@ -1,6 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import { recalcHandlingDeadline } from './fulfillment.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -111,6 +112,7 @@ CREATE TABLE IF NOT EXISTS orders (
   date_created TEXT,
   buyer_nickname TEXT,
   item_title TEXT,
+  handling_deadline TEXT,
   source TEXT DEFAULT 'manual',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -130,6 +132,16 @@ CREATE TABLE IF NOT EXISTS order_sync_state (
   updated_at TEXT NOT NULL
 );
 `);
+    // 兼容旧数据库：若 orders 表缺少 handling_deadline 列则补加
+    try {
+      const cols = db.prepare("PRAGMA table_info(orders)").all() as { name: string }[];
+      if (!cols.find((c) => c.name === 'handling_deadline')) {
+        db.exec("ALTER TABLE orders ADD COLUMN handling_deadline TEXT");
+        console.log('[DB] orders.handling_deadline 列已添加');
+      }
+    } catch (e: any) {
+      console.warn('[DB] 检查/补加 handling_deadline 列失败:', e?.message || String(e));
+    }
     console.log(`[DB] SQLite initialized at ${DB_PATH}`);
   } catch (e: any) {
     console.warn('[DB] SQLite 不可用（已跳过本地数据库功能）:', e?.message || String(e));
@@ -203,12 +215,19 @@ export function createMessage(data: {
 export function getCachedOrders(storeId: string): { orders: any[]; counts: { total: number; unshipped: number; shipped: number; cancelled: number } } {
   const empty = { orders: [], counts: { total: 0, unshipped: 0, shipped: 0, cancelled: 0 } };
   if (!db) return empty;
-  const rows = db.prepare('SELECT order_json, source FROM orders WHERE store_id = ? ORDER BY date_created DESC').all(storeId);
+  const rows = db.prepare('SELECT order_json, source, handling_deadline FROM orders WHERE store_id = ? ORDER BY date_created DESC').all(storeId);
   const orders = rows
     .map((r: any) => {
       try {
         const o = JSON.parse(r.order_json);
         o.syncSaved = r.source === 'sync'; // 后台定时同步新增的订单，列表里显著标记
+        // 兼容旧数据：DB 列或 JSON 中可能没有履约截止时间
+        if (r.handling_deadline && !o.handlingDeadline) {
+          o.handlingDeadline = r.handling_deadline;
+        }
+        const fd = recalcHandlingDeadline(o);
+        o.remainingHours = fd.remainingHours;
+        o.remainingHoursText = fd.remainingHoursText;
         return o;
       } catch {
         return null;
@@ -244,8 +263,8 @@ export function upsertOrders(storeId: string, site: string, orders: any[], sourc
   if (!db) return;
   const now = new Date().toISOString();
   const stmt = db.prepare(`
-    INSERT INTO orders (id, store_id, site, order_json, ml_status, order_status, ship_status, total_amount, currency_id, date_created, buyer_nickname, item_title, source, created_at, updated_at)
-    VALUES (@id, @storeId, @site, @json, @ml, @os, @ss, @total, @cur, @date, @buyer, @title, @source, @now, @now)
+    INSERT INTO orders (id, store_id, site, order_json, ml_status, order_status, ship_status, total_amount, currency_id, date_created, buyer_nickname, item_title, handling_deadline, source, created_at, updated_at)
+    VALUES (@id, @storeId, @site, @json, @ml, @os, @ss, @total, @cur, @date, @buyer, @title, @deadline, @source, @now, @now)
     ON CONFLICT(id, store_id) DO UPDATE SET
       order_json = excluded.order_json,
       ml_status = excluded.ml_status,
@@ -256,6 +275,7 @@ export function upsertOrders(storeId: string, site: string, orders: any[], sourc
       date_created = excluded.date_created,
       buyer_nickname = excluded.buyer_nickname,
       item_title = excluded.item_title,
+      handling_deadline = excluded.handling_deadline,
       updated_at = excluded.updated_at
   `);
   const tx = db.transaction((items: any[]) => {
@@ -277,6 +297,7 @@ export function upsertOrders(storeId: string, site: string, orders: any[], sourc
         date: o.date_created || '',
         buyer: o.buyer?.nickname || o.buyer?.email || '',
         title: o.order_items?.[0]?.item?.title || '',
+        deadline: o.handlingDeadline || null,
         source,
         now,
       });
@@ -322,13 +343,27 @@ export function getSyncOrdersSince(sinceIso: string | null): any[] {
   const rows = sinceIso
     ? db
         .prepare(
-          "SELECT store_id, id, order_json, created_at, source FROM orders WHERE source = 'sync' AND created_at > ? ORDER BY created_at DESC"
+          "SELECT store_id, id, order_json, created_at, source, handling_deadline FROM orders WHERE source = 'sync' AND created_at > ? ORDER BY created_at DESC"
         )
         .all(sinceIso)
     : db
-        .prepare("SELECT store_id, id, order_json, created_at, source FROM orders WHERE source = 'sync' ORDER BY created_at DESC")
+        .prepare("SELECT store_id, id, order_json, created_at, source, handling_deadline FROM orders WHERE source = 'sync' ORDER BY created_at DESC")
         .all();
-  return rows;
+  return rows.map((r: any) => {
+    try {
+      const o = JSON.parse(r.order_json);
+      if (r.handling_deadline && !o.handlingDeadline) {
+        o.handlingDeadline = r.handling_deadline;
+      }
+      const fd = recalcHandlingDeadline(o);
+      o.remainingHours = fd.remainingHours;
+      o.remainingHoursText = fd.remainingHoursText;
+      // 保留数据库元信息，便于调用方使用
+      return { ...r, order_json: JSON.stringify(o), ...o };
+    } catch {
+      return null;
+    }
+  }).filter(Boolean);
 }
 
 export default db;
