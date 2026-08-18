@@ -1464,6 +1464,54 @@ export async function searchProductsByCategory(
 }
 
 /**
+ * 带 highlights 兜底的搜索。
+ * 当官方 /search 被云服务器 IP 封锁（403）时，回退到 /highlights 品类 Best Sellers
+ * （服务器 IP 可访问），返回与 /search results 同构的 item 数组，并在每条上标记
+ * `_fromHighlights`，供上层选品 scanner 放宽「近30天新品」时间门槛（热门≠新品）。
+ */
+export async function searchWithHighlightsFallback(
+  siteId: string,
+  categoryId: string,
+  limit: number = 50,
+  offset: number = 0,
+  accessTokenOverride?: string
+): Promise<{ items: any[]; fromHighlights: boolean }> {
+  const search = await searchProductsByCategory(siteId, categoryId, limit, offset, accessTokenOverride);
+  if (search.length) return { items: search, fromHighlights: false };
+
+  // /search 被封锁 → 用 Best Sellers 兜底（热门商品，服务器 IP 可访问 /highlights）
+  console.log(`[ML Search] /search 无结果(${categoryId})，回退 highlights 兜底`);
+  try {
+    const highlights = await fetchHighlightsByCategory(siteId, categoryId);
+    const productIds = highlights
+      .filter((h: any) => h.type === 'PRODUCT' || h.type === 'ITEM')
+      .slice(0, Math.min(limit, 15))
+      .map((h: any) => h.id);
+    const items: any[] = [];
+    const baseDelay = 300;
+    for (let i = 0; i < productIds.length; i++) {
+      try {
+        const productItems = await fetchProductItems(productIds[i], 5);
+        for (const it of productItems) {
+          // highlights 货源缺上架时间则近似为近 7 天（热门≈近期热销），避免被时间过滤清掉
+          if (!it.start_time && !it.date_created) {
+            it.start_time = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+          }
+          items.push({ ...it, _fromHighlights: true });
+        }
+      } catch {
+        /* 单个 product 失败忽略 */
+      }
+      if (i < productIds.length - 1) await new Promise((r) => setTimeout(r, baseDelay));
+    }
+    return { items, fromHighlights: true };
+  } catch (e: any) {
+    console.warn(`[ML Search] highlights 兜底失败 (${categoryId}): ${e?.message?.slice(0, 80)}`);
+    return { items: [], fromHighlights: true };
+  }
+}
+
+/**
  * 获取站点 web 域名
  */
 function getSiteDomain(siteId: string): string {

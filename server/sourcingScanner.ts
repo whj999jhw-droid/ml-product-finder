@@ -5,7 +5,7 @@
  *       不依赖付费数据服务，后续可接入 LinkFox/蓝鲸增强。
  */
 import {
-  searchProductsByCategory,
+  searchWithHighlightsFallback,
   fetchProductDetails,
   fetchProductItems,
   getExchangeRate,
@@ -182,7 +182,7 @@ export async function scanNewRisingProducts(
   const limitPerCategory = opts.limitPerCategory ?? 50;
   const minDailySales = opts.minDailySales ?? 0.5;
   const onProgress = opts.onProgress;
-  const scanTimeoutMs = opts.scanTimeoutMs ?? 5 * 60 * 1000;
+  const scanTimeoutMs = opts.scanTimeoutMs ?? 15 * 60 * 1000;
 
   const report = (msg: string, extra?: Partial<ScanProgress>) => {
     console.log(`[SourcingScanner] ${msg}`);
@@ -213,12 +213,23 @@ export async function scanNewRisingProducts(
         const cat = categories[idx];
         report(`[${site}] 扫描分类 ${idx + 1}/${categories.length}: ${cat.name}`, { totalScanned });
         try {
-          const results = await searchProductsByCategory(site, cat.id, limitPerCategory, 0, scanToken);
+          const res = await searchWithHighlightsFallback(site, cat.id, limitPerCategory, 0, scanToken);
+          const results = res.items;
+          const fromHighlights = res.fromHighlights;
           totalScanned += results.length;
-          report(`[${site}/${cat.name}] 获取 ${results.length} 个结果`, { totalScanned });
+          report(`[${site}/${cat.name}] 获取 ${results.length} 个结果${fromHighlights ? '（highlights 兜底）' : ''}`, { totalScanned });
           for (const item of results) {
             const c = normalizeItem(site, item, cat.name, rates);
             if (!c) continue;
+            // highlights 兜底的货源是「长期热门」，没有「近30天新品」概念，
+            // 放宽时间与日均销量门槛，仅保留：有销量、价格区间、全新，避免被时间过滤全清掉
+            if (item._fromHighlights) {
+              if (c.soldQuantity < minSold) continue;
+              if (c.priceUsd < minPriceUsd || c.priceUsd > maxPriceUsd) continue;
+              if (c.condition && c.condition !== 'new') continue;
+              all.push(c);
+              continue;
+            }
             // 过滤：近 N 天、有销量、价格区间
             if (new Date(c.listingDate) < cutoff) continue;
             if (c.soldQuantity < minSold) continue;
