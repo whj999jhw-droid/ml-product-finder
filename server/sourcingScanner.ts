@@ -227,14 +227,12 @@ export async function scanNewRisingProducts(
             // 且 /products/{id}/items 返回的 item 常缺少 sold_quantity/condition，
             // 因此放宽过滤：价格>0、能上 Best Sellers 默认有销量、condition 为空默认可通过
             if (item._fromHighlights) {
-              const effSold = c.soldQuantity > 0 ? c.soldQuantity : 1; // Best Sellers 默认有销量
-              const effCondition = c.condition || 'new';
-              if (effSold < minSold) { reasons['sold'] = (reasons['sold'] || 0) + 1; continue; }
-              // highlights 是官方 Best Sellers，价格分布广；仅排除价格未转换成功或明显离谱的商品
+              // highlights 是官方 Best Sellers，/products/{id}/items 返回的 item
+              // 常缺少 sold_quantity/condition，且价格分布广。这里只排除价格未转换成功的商品，
+              // 让后端 1688 匹配 + 五维评分去淘汰，避免扫描阶段把候选全部刷掉。
               if (c.priceUsd <= 0) { reasons['price_zero'] = (reasons['price_zero'] || 0) + 1; continue; }
-              if (c.priceUsd < 1 || c.priceUsd > 200) { reasons['price_range'] = (reasons['price_range'] || 0) + 1; continue; }
-              if (effCondition !== 'new') { reasons['condition'] = (reasons['condition'] || 0) + 1; continue; }
-              // 修正日均销量，避免 daysListed 过大导致 dailySales 极低
+              const effSold = c.soldQuantity > 0 ? c.soldQuantity : 1;
+              const effCondition = c.condition || 'new';
               const corrected = { ...c, soldQuantity: effSold, condition: effCondition, dailySales: effSold / Math.max(1, c.daysListed) };
               all.push(corrected);
               continue;

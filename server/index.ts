@@ -19,6 +19,7 @@ import {
   getSourcingRun,
   getLatestSourcingRun,
   createSourcingRun,
+  cleanupStaleSourcingRuns,
   createPublishJob,
 } from './db.js';
 import { getAllStores } from './stores.js';
@@ -2136,6 +2137,8 @@ app.post('/api/ml/sourcing/run', async (req, res) => {
   const opts = req.body || {};
   const runId = uuidv4();
   try {
+    // 清理卡死的旧 running 记录，避免前端轮询到 stale 状态
+    cleanupStaleSourcingRuns(30);
     // 同步创建运行记录：若 DB 未初始化会立即报错并返回给前端
     createSourcingRun(runId);
     // 异步执行，不等待

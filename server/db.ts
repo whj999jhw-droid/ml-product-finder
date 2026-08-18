@@ -532,6 +532,19 @@ export function getLatestSourcingRun(): any {
   return db.prepare('SELECT * FROM sourcing_runs ORDER BY started_at DESC LIMIT 1').get();
 }
 
+/**
+ * 清理卡死的运行记录：把 status=running 且超过 30 分钟未完成的标记为 failed。
+ * 避免旧卡死记录被 getLatestSourcingRun 轮询到，导致前端一直显示「进行中」。
+ */
+export function cleanupStaleSourcingRuns(maxAgeMinutes: number = 30): number {
+  if (!db) return 0;
+  const cutoff = new Date(Date.now() - maxAgeMinutes * 60 * 1000).toISOString();
+  const result = db.prepare("UPDATE sourcing_runs SET status='failed', finished_at=?, message='运行超时或被新扫描覆盖' WHERE status='running' AND started_at < ?").run(new Date().toISOString(), cutoff);
+  const count = result.changes || 0;
+  if (count > 0) console.log(`[DB] 清理 ${count} 条卡死的 sourcing_runs 记录`);
+  return count;
+}
+
 export function insertCandidate(data: any): number {
   if (!db) return 0;
   const now = new Date().toISOString();
