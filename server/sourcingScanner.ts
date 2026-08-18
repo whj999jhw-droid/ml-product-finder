@@ -136,13 +136,14 @@ function parseDate(d: any): Date | null {
 }
 
 function normalizeItem(site: string, item: any, categoryName: string, rates: Record<string, number>): RawCandidate | null {
-  const priceLocal = typeof item.price === 'number' ? item.price : 0;
-  const currency = item.currency_id || (site === 'MLM' ? 'MXN' : site === 'MLB' ? 'BRL' : site === 'MLC' ? 'CLP' : 'COP');
+  // /products/{id}/items 返回的 price 可能是字符串，做健壮解析
+  const priceLocal = typeof item.price === 'number' ? item.price : parseFloat(String(item.price || '').replace(/[^0-9.]/g, '')) || 0;
+  const currency = item.currency_id || item.currency || (site === 'MLM' ? 'MXN' : site === 'MLB' ? 'BRL' : site === 'MLC' ? 'CLP' : 'COP');
   const priceUsd = toUsd(priceLocal, currency, rates);
   const listingDate = parseDate(item.start_time || item.date_created);
   if (!listingDate) return null;
   const daysListed = Math.max(1, Math.floor((Date.now() - listingDate.getTime()) / (24 * 60 * 60 * 1000)));
-  const sold = typeof item.sold_quantity === 'number' ? item.sold_quantity : 0;
+  const sold = typeof item.sold_quantity === 'number' ? item.sold_quantity : parseInt(String(item.sold_quantity || '0'), 10) || 0;
   return {
     site,
     itemId: String(item.id || ''),
@@ -150,7 +151,7 @@ function normalizeItem(site: string, item: any, categoryName: string, rates: Rec
     priceUsd,
     currency,
     soldQuantity: sold,
-    availableQuantity: typeof item.available_quantity === 'number' ? item.available_quantity : 0,
+    availableQuantity: typeof item.available_quantity === 'number' ? item.available_quantity : parseInt(String(item.available_quantity || '0'), 10) || 0,
     categoryId: item.category_id || '',
     categoryName,
     permalink: item.permalink || '',

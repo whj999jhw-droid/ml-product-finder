@@ -1497,6 +1497,8 @@ export async function searchWithHighlightsFallback(
           if (!it.start_time && !it.date_created) {
             it.start_time = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
           }
+          // 补上 category_id，否则 normalizeItem 无法识别分类
+          if (!it.category_id) it.category_id = categoryId;
           items.push({ ...it, _fromHighlights: true });
         }
       } catch {

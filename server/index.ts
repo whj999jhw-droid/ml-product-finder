@@ -2154,6 +2154,9 @@ app.post('/api/ml/sourcing/run', async (req, res) => {
 
 // 查询运行历史/详情
 app.get('/api/ml/sourcing/runs/:id', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   const run = getSourcingRun(req.params.id);
   if (!run) return res.status(404).json({ success: false, message: '运行记录不存在' });
   res.json({ success: true, run });
@@ -2161,6 +2164,9 @@ app.get('/api/ml/sourcing/runs/:id', async (req, res) => {
 
 // 查询最近一次运行状态（供前端进度面板轮询）
 app.get('/api/ml/sourcing/runs/latest', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   const run = getLatestSourcingRun();
   if (!run) return res.json({ success: true, run: null });
   res.json({ success: true, run });

@@ -109,7 +109,11 @@ export function CandidatesPage() {
 
   const fetchLatestRun = async () => {
     try {
-      const res = await fetch('/api/ml/sourcing/runs/latest');
+      // 强制绕过浏览器/代理缓存，避免轮询拿到旧状态
+      const res = await fetch(`/api/ml/sourcing/runs/latest?_t=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+      });
       const data = await res.json();
       if (data.success) {
         setLatestRun(data.run);
@@ -129,7 +133,9 @@ export function CandidatesPage() {
       fetchLatestRun();
     }, 3000);
     return () => clearInterval(timer);
-  }, [status]);
+    // 轮询不应依赖 status；status 只是表格筛选条件
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!latestRun || latestRun.status !== 'running') {
