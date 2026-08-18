@@ -24,6 +24,7 @@ async function initDatabase() {
     const mod: any = await import('better-sqlite3');
     db = new mod.default(DB_PATH);
     db.pragma('journal_mode = WAL');
+    console.log(`[DB] 已连接 SQLite: ${DB_PATH}`);
     db.exec(`
 -- ============ Chat 会话 / 消息（Agent SDK 聊天功能） ============
 CREATE TABLE IF NOT EXISTS sessions (
@@ -240,10 +241,11 @@ CREATE INDEX IF NOT EXISTS idx_publish_jobs_status ON publish_jobs(status);
     }
     console.log(`[DB] SQLite initialized at ${DB_PATH}`);
   } catch (e: any) {
-    console.warn('[DB] SQLite 不可用（已跳过本地数据库功能）:', e?.message || String(e));
+    console.error('[DB] SQLite 不可用（已跳过本地数据库功能）:', e?.message || String(e));
+    console.error('[DB] 后续依赖本地数据库的功能（AI 选品运行记录、候选列表、订单缓存等）将无法写入！');
   }
 }
-initDatabase();
+await initDatabase();
 
 // ============ Chat 数据访问函数 ============
 export function getAllSessions() {
@@ -474,7 +476,7 @@ export function getSyncOrdersSince(sinceIso: string | null): any[] {
 // ============ AI 选品与自动核价数据访问 ============
 
 export function createSourcingRun(id: string): void {
-  if (!db) return;
+  if (!db) throw new Error('SQLite 数据库未初始化，无法创建选品运行记录');
   db.prepare(`INSERT INTO sourcing_runs (id, status, started_at) VALUES (?, 'running', datetime('now'))`).run(id);
 }
 

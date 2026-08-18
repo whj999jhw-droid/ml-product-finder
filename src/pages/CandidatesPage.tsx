@@ -193,8 +193,20 @@ export function CandidatesPage() {
         body: JSON.stringify({ maxCandidatesToSource: 20, targetNetRate: 0.15 }),
       });
       const data = await res.json();
-      if (data.success) {
+      if (data.success && data.runId) {
         MessagePlugin.success('选品流水线已启动');
+        // 立即显示一个本地运行状态，避免轮询空窗期
+        setLatestRun({
+          id: data.runId,
+          status: 'running',
+          started_at: new Date().toISOString(),
+          total_scanned: 0,
+          total_matched: 0,
+          total_scored: 0,
+          total_approved: 0,
+          total_rejected: 0,
+          message: '正在初始化...',
+        } as SourcingRun);
         fetchLatestRun();
       } else {
         MessagePlugin.error(data.message || '启动失败');

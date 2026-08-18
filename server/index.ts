@@ -2133,12 +2133,19 @@ app.post('/api/ml/sourcing/trigger', async (req, res) => {
 // 手动触发选品流水线（异步执行，立即返回 runId）
 app.post('/api/ml/sourcing/run', async (req, res) => {
   const opts = req.body || {};
-  // 立即返回 runId，实际工作在后台执行
-  const promise = runSourcingPipeline(opts);
-  promise
-    .then((r) => console.log(`[Sourcing] 流水线完成 runId=${r.runId}: ${r.totalApproved}/${r.totalScored} 通过`))
-    .catch((e) => console.error('[Sourcing] 流水线异常:', e));
-  res.json({ success: true, message: '选品流水线已启动', started: true });
+  const runId = uuidv4();
+  try {
+    // 同步创建运行记录：若 DB 未初始化会立即报错并返回给前端
+    createSourcingRun(runId);
+    // 异步执行，不等待
+    runSourcingPipeline({ ...opts, runId })
+      .then((r) => console.log(`[Sourcing] 流水线完成 runId=${r.runId}: ${r.totalApproved}/${r.totalScored} 通过`))
+      .catch((e) => console.error('[Sourcing] 流水线异常:', e));
+    res.json({ success: true, message: '选品流水线已启动', runId });
+  } catch (e: any) {
+    console.error('[Sourcing] 启动失败:', e);
+    res.status(500).json({ success: false, message: `启动失败: ${e?.message || String(e)}` });
+  }
 });
 
 // 查询运行历史/详情

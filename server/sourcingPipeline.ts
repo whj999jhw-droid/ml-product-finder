@@ -18,9 +18,11 @@ import {
   updateSourcingRun,
   insertCandidate,
   getCandidateById,
+  getSourcingRun,
 } from './db.js';
 
 export interface PipelineOptions extends ScannerOptions {
+  runId?: string; // 外部传入 runId（如从 API 端点预创建），不传则内部生成
   targetNetRate?: number; // 目标净利率，默认 0.15
   maxCandidatesToSource?: number; // 最多对多少个候选查 1688，控制成本，默认 30
   minScoreThreshold?: number; // 覆盖 scoring.SCORE_THRESHOLD
@@ -52,12 +54,19 @@ export interface SourcedCandidate {
  * 注意：1688 查询按候选收费（时间和积分），用 maxCandidatesToSource 控制。
  */
 export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<PipelineResult> {
-  const runId = uuidv4();
+  const runId = opts.runId || uuidv4();
   const targetNetRate = opts.targetNetRate ?? 0.15;
   const maxCandidatesToSource = opts.maxCandidatesToSource ?? 30;
   const minScore = opts.minScoreThreshold ?? 0.6;
 
-  createSourcingRun(runId);
+  // run 记录应由调用方（API 端点）预先创建，这里兜底创建
+  try {
+    const existing = getSourcingRun(runId);
+    if (!existing) createSourcingRun(runId);
+  } catch (e: any) {
+    console.error(`[SourcingPipeline] 创建运行记录失败 runId=${runId}:`, e?.message || String(e));
+    throw e;
+  }
   const errors: string[] = [];
 
   try {
