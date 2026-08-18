@@ -21,6 +21,7 @@ import {
 } from './db.js';
 import { getAllStores } from './stores.js';
 import { publishCandidate } from './publishFromCandidate.js';
+import { configure1688AK, check1688Config } from './ali1688Skill.js';
 
 const execAsync = promisify(exec);
 
@@ -2228,6 +2229,29 @@ app.post('/api/ml/candidates/:id/publish', async (req, res) => {
     res.json({ success: true, result });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err?.message || '上架失败' });
+  }
+});
+
+// 1688-shopkeeper AK 配置（可视化配置入口）
+app.get('/api/ml/ali1688/config', async (req, res) => {
+  try {
+    const check = await check1688Config();
+    res.json({ success: true, configured: check.ok, message: check.message });
+  } catch (err: any) {
+    res.status(500).json({ success: false, configured: false, message: err?.message || '检查失败' });
+  }
+});
+
+app.post('/api/ml/ali1688/config', async (req, res) => {
+  try {
+    const { ak } = req.body || {};
+    if (!ak || typeof ak !== 'string' || ak.trim().length < 8) {
+      return res.status(400).json({ success: false, message: 'AK 无效，请粘贴完整密钥' });
+    }
+    const result = await configure1688AK(ak.trim());
+    res.json({ success: result.ok, message: result.message });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || '保存失败' });
   }
 });
 

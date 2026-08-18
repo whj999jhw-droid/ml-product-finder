@@ -68,6 +68,54 @@ export function CandidatesPage() {
   const [publishRow, setPublishRow] = useState<Candidate | null>(null);
   const [publishing, setPublishing] = useState(false);
   const [useCbtCategory, setUseCbtCategory] = useState(true);
+  const [akDialogOpen, setAkDialogOpen] = useState(false);
+  const [akValue, setAkValue] = useState('');
+  const [akSaving, setAkSaving] = useState(false);
+  const [akStatus, setAkStatus] = useState<{ configured?: boolean; message?: string }>({});
+
+  const fetchAkStatus = async () => {
+    try {
+      const res = await fetch('/api/ml/ali1688/config');
+      const data = await res.json();
+      setAkStatus({ configured: data?.configured, message: data?.message || '' });
+    } catch {
+      setAkStatus({ configured: false, message: '无法检测 AK 状态' });
+    }
+  };
+
+  useEffect(() => {
+    fetchRows();
+    fetchStores();
+    fetchAkStatus();
+  }, [status]);
+
+  const handleSaveAk = async () => {
+    if (!akValue.trim()) {
+      MessagePlugin.warning('请输入 AK');
+      return;
+    }
+    setAkSaving(true);
+    try {
+      const res = await fetch('/api/ml/ali1688/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ak: akValue.trim() }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        MessagePlugin.success('AK 已保存');
+        setAkDialogOpen(false);
+        setAkValue('');
+        fetchAkStatus();
+      } else {
+        MessagePlugin.error(data.message || '保存失败');
+      }
+    } catch (e: any) {
+      MessagePlugin.error(e?.message || '网络错误');
+    } finally {
+      setAkSaving(false);
+    }
+  };
 
   const fetchRows = async () => {
     setLoading(true);
@@ -97,11 +145,6 @@ export function CandidatesPage() {
       /* ignore */
     }
   };
-
-  useEffect(() => {
-    fetchRows();
-    fetchStores();
-  }, [status]);
 
   const handleRun = async () => {
     setRunning(true);
@@ -303,6 +346,13 @@ export function CandidatesPage() {
             <Button variant="outline" onClick={fetchRows}>
               刷新
             </Button>
+            <Button
+              variant="outline"
+              theme={akStatus.configured ? 'success' : 'default'}
+              onClick={() => setAkDialogOpen(true)}
+            >
+              {akStatus.configured ? '1688 AK 已配置' : '配置 1688 AK'}
+            </Button>
           </Space>
           <Select
             value={status}
@@ -367,6 +417,32 @@ export function CandidatesPage() {
           <div className="flex items-center gap-2">
             <Switch value={useCbtCategory} onChange={(v) => setUseCbtCategory(v as boolean)} />
             <span>使用 CBT 类目前缀（上架失败可关闭）</span>
+          </div>
+        </div>
+      </Dialog>
+
+      <Dialog
+        visible={akDialogOpen}
+        onClose={() => setAkDialogOpen(false)}
+        header="配置 1688 AK"
+        onConfirm={handleSaveAk}
+        confirmLoading={akSaving}
+      >
+        <div className="space-y-4">
+          <p>
+            请将 1688 AI 版 App 里获取到的 AK 粘贴到下方。
+            <span className="text-red-500">AK 仅保存在服务器本地，不会上传到第三方。</span>
+          </p>
+          <input
+            type="text"
+            value={akValue}
+            onChange={(e) => setAkValue(e.target.value)}
+            placeholder="例如：ak_xxxxxxxxxxxxxxxx"
+            className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <div className="text-xs text-gray-500">
+            当前状态：{akStatus.configured ? '已配置' : '未配置'}
+            {akStatus.message ? `（${akStatus.message}）` : ''}
           </div>
         </div>
       </Dialog>
