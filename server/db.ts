@@ -149,8 +149,16 @@ CREATE TABLE IF NOT EXISTS sourcing_runs (
   error TEXT
 );
 
--- 兼容老数据库：补充 message 字段
-try { db.exec('ALTER TABLE sourcing_runs ADD COLUMN message TEXT'); } catch { /* 已存在则忽略 */ }
+-- 兼容老数据库：补充 sourcing_runs.message 字段（旧表可能早于该列创建）
+try {
+  const runCols = db.prepare("PRAGMA table_info(sourcing_runs)").all() as { name: string }[];
+  if (!runCols.find((c) => c.name === 'message')) {
+    db.exec('ALTER TABLE sourcing_runs ADD COLUMN message TEXT');
+    console.log('[DB] sourcing_runs.message 列已添加');
+  }
+} catch (e: any) {
+  console.warn('[DB] 检查/补加 sourcing_runs.message 列失败:', e?.message || String(e));
+}
 
 -- 候选商品：ML 竞品 + 1688 货源 + 利润测算 + 五维评分 + 审核状态
 CREATE TABLE IF NOT EXISTS candidates (
@@ -504,7 +512,13 @@ export function updateSourcingRun(
     }
   }
   if (fields.length === 0) return;
-  db.prepare(`UPDATE sourcing_runs SET ${fields.join(', ')} WHERE id = @id`).run(params);
+  const sql = `UPDATE sourcing_runs SET ${fields.join(', ')} WHERE id = @id`;
+  try {
+    db.prepare(sql).run(params);
+  } catch (e: any) {
+    console.error('[DB] updateSourcingRun 失败:', e?.message || String(e), '| SQL:', sql, '| params:', params);
+    // 进度更新失败不应中断选品流水线
+  }
 }
 
 export function getSourcingRun(id: string): any {
