@@ -93,6 +93,9 @@ export function CandidatesPage() {
   const [akSaving, setAkSaving] = useState(false);
   const [akStatus, setAkStatus] = useState<{ configured?: boolean; message?: string }>({});
   const [latestRun, setLatestRun] = useState<SourcingRun | null>(null);
+  const [runStartTime, setRunStartTime] = useState<number | null>(null);
+  const [elapsedText, setElapsedText] = useState('');
+  const [runPollError, setRunPollError] = useState<string | null>(null);
 
   const fetchAkStatus = async () => {
     try {
@@ -110,9 +113,10 @@ export function CandidatesPage() {
       const data = await res.json();
       if (data.success) {
         setLatestRun(data.run);
+        setRunPollError(null);
       }
-    } catch {
-      /* ignore */
+    } catch (e: any) {
+      setRunPollError(`轮询状态失败: ${e?.message || '网络错误'}`);
     }
   };
 
@@ -126,6 +130,25 @@ export function CandidatesPage() {
     }, 3000);
     return () => clearInterval(timer);
   }, [status]);
+
+  useEffect(() => {
+    if (!latestRun || latestRun.status !== 'running') {
+      setElapsedText('');
+      return;
+    }
+    const start = runStartTime || new Date(latestRun.started_at).getTime() || Date.now();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const update = () => {
+      const sec = Math.floor((Date.now() - start) / 1000);
+      const m = Math.floor(sec / 60);
+      const s = sec % 60;
+      const h = Math.floor(m / 60);
+      setElapsedText(h > 0 ? `${pad(h)}:${pad(m % 60)}:${pad(s)}` : `${pad(m)}:${pad(s)}`);
+    };
+    update();
+    const timer = setInterval(update, 1000);
+    return () => clearInterval(timer);
+  }, [latestRun, runStartTime]);
 
   const handleSaveAk = async () => {
     if (!akValue.trim()) {
@@ -195,6 +218,10 @@ export function CandidatesPage() {
       const data = await res.json();
       if (data.success && data.runId) {
         MessagePlugin.success('选品流水线已启动');
+        const now = Date.now();
+        setRunStartTime(now);
+        setElapsedText('00:00');
+        setRunPollError(null);
         // 立即显示一个本地运行状态，避免轮询空窗期
         setLatestRun({
           id: data.runId,
@@ -391,12 +418,28 @@ export function CandidatesPage() {
       return <div className="text-sm text-gray-500">暂无运行记录，点击「立即扫描选品」开始</div>;
     }
     const s = runStatusMap[latestRun.status] || { label: latestRun.status, theme: 'default' };
+    const elapsedSec = elapsedText
+      ? Math.floor(
+          (Date.now() -
+            (runStartTime || new Date(latestRun.started_at).getTime() || Date.now())) /
+            1000
+        )
+      : 0;
+    const isStuck = latestRun.status === 'running' && elapsedSec > 120;
     return (
       <div className="space-y-2">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <Tag theme={s.theme}>{s.label}</Tag>
           <span className="text-sm text-gray-600">{latestRun.message || ''}</span>
           {latestRun.status === 'running' && <Loading size="small" loading />}
+          {elapsedText && (
+            <span className="text-xs text-gray-500">已运行 {elapsedText}</span>
+          )}
+          {isStuck && (
+            <span className="text-xs text-orange-600 bg-orange-50 px-2 py-0.5 rounded">
+              运行时间较长，可能卡在 ML/1688 网络请求，请检查服务器日志
+            </span>
+          )}
         </div>
         <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
           <div>
@@ -420,6 +463,9 @@ export function CandidatesPage() {
             <div className="font-medium text-red-600">{latestRun.total_rejected || 0}</div>
           </div>
         </div>
+        {runPollError && (
+          <div className="text-xs text-red-600 bg-red-50 p-2 rounded">{runPollError}</div>
+        )}
         {latestRun.error && (
           <div className="text-xs text-red-600 bg-red-50 p-2 rounded">{latestRun.error}</div>
         )}

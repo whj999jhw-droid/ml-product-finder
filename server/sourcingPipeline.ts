@@ -70,10 +70,19 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
   const errors: string[] = [];
 
   try {
-    // 1) 扫描 ML 新品
+    // 1) 扫描 ML 新品（把扫描器内部进度同步到 run 记录，方便前端查看）
     console.log(`[SourcingPipeline] 开始扫描 runId=${runId}`);
     updateSourcingRun(runId, { message: '正在扫描 Mercado Libre 新品...' });
-    const scan = await scanNewRisingProducts(opts);
+    const scan = await scanNewRisingProducts({
+      ...opts,
+      onProgress: (p) => {
+        updateSourcingRun(runId, {
+          message: p.message,
+          ...(p.totalScanned !== undefined ? { total_scanned: p.totalScanned } : {}),
+          ...(p.totalMatched !== undefined ? { total_matched: p.totalMatched } : {}),
+        });
+      },
+    });
     const rawCandidates = scan.candidates.slice(0, maxCandidatesToSource * 2);
     // 从扫描结果里取回用于详情补全的店铺 token（自动刷新），供后续 enrich 复用
     const scanToken = (scan as any).scanToken as string | undefined;

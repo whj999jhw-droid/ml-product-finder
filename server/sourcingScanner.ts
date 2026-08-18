@@ -35,6 +35,12 @@ async function resolveScanToken(): Promise<{ token: string; storeNick: string } 
   }
 }
 
+export interface ScanProgress {
+  message: string;
+  totalScanned?: number;
+  totalMatched?: number;
+}
+
 export interface ScannerOptions {
   sites?: string[]; // 默认 MLM / MLB / MLC / MCO
   categories?: { id: string; name: string }[]; // 为空时按站点内置分类扫
@@ -44,6 +50,8 @@ export interface ScannerOptions {
   minPriceUsd?: number; // 最低售价 USD，默认 5
   limitPerCategory?: number; // 每个分类拉取数，默认 50
   minDailySales?: number; // 日均销量门槛，默认 0.5
+  onProgress?: (p: ScanProgress) => void; // 进度回调
+  scanTimeoutMs?: number; // 整体扫描超时，默认 5 分钟
 }
 
 export interface RawCandidate {
@@ -173,59 +181,83 @@ export async function scanNewRisingProducts(
   const minPriceUsd = opts.minPriceUsd ?? 5;
   const limitPerCategory = opts.limitPerCategory ?? 50;
   const minDailySales = opts.minDailySales ?? 0.5;
+  const onProgress = opts.onProgress;
+  const scanTimeoutMs = opts.scanTimeoutMs ?? 5 * 60 * 1000;
 
-  const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000);
-  const rates: Record<string, number> = {};
-  const currencies = ['MXN', 'BRL', 'CLP', 'COP', 'USD'];
-  await Promise.all(currencies.map(async (c) => { rates[c] = await getExchangeRate(c); }));
+  const report = (msg: string, extra?: Partial<ScanProgress>) => {
+    console.log(`[SourcingScanner] ${msg}`);
+    onProgress?.({ message: msg, ...extra });
+  };
 
-  // 解析店铺 token（自动刷新），用于带鉴权地扫描，避免全局 token 过期导致 0 结果
-  const scanAuth = await resolveScanToken();
-  const scanToken = scanAuth?.token;
+  const doScan = async (): Promise<{ candidates: RawCandidate[]; totalScanned: number; errors: string[]; scanToken?: string }> => {
+    report('正在获取汇率...');
+    const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000);
+    const rates: Record<string, number> = {};
+    const currencies = ['MXN', 'BRL', 'CLP', 'COP', 'USD'];
+    await Promise.all(currencies.map(async (c) => { rates[c] = await getExchangeRate(c); }));
 
-  const all: RawCandidate[] = [];
-  const errors: string[] = [];
-  let totalScanned = 0;
+    // 解析店铺 token（自动刷新），用于带鉴权地扫描，避免全局 token 过期导致 0 结果
+    report('正在校验/刷新店铺 Token...');
+    const scanAuth = await resolveScanToken();
+    const scanToken = scanAuth?.token;
+    report(scanToken ? `Token 就绪（店铺：${scanAuth?.storeNick}）` : 'Token 就绪（回退全局 token）');
 
-  for (const site of sites) {
-    const categories = opts.categories?.length ? opts.categories : (DEFAULT_CATEGORIES[site] || []);
-    for (const cat of categories) {
-      try {
-        const results = await searchProductsByCategory(site, cat.id, limitPerCategory, 0, scanToken);
-        totalScanned += results.length;
-        for (const item of results) {
-          const c = normalizeItem(site, item, cat.name, rates);
-          if (!c) continue;
-          // 过滤：近 N 天、有销量、价格区间
-          if (new Date(c.listingDate) < cutoff) continue;
-          if (c.soldQuantity < minSold) continue;
-          if (c.priceUsd < minPriceUsd || c.priceUsd > maxPriceUsd) continue;
-          if (c.dailySales < minDailySales) continue;
-          // 仅 new（避免二手/翻新品）
-          if (c.condition && c.condition !== 'new') continue;
-          all.push(c);
+    const all: RawCandidate[] = [];
+    const errors: string[] = [];
+    let totalScanned = 0;
+
+    for (const site of sites) {
+      const categories = opts.categories?.length ? opts.categories : (DEFAULT_CATEGORIES[site] || []);
+      report(`开始扫描站点 ${site}，共 ${categories.length} 个分类...`, { totalScanned });
+      for (let idx = 0; idx < categories.length; idx++) {
+        const cat = categories[idx];
+        report(`[${site}] 扫描分类 ${idx + 1}/${categories.length}: ${cat.name}`, { totalScanned });
+        try {
+          const results = await searchProductsByCategory(site, cat.id, limitPerCategory, 0, scanToken);
+          totalScanned += results.length;
+          report(`[${site}/${cat.name}] 获取 ${results.length} 个结果`, { totalScanned });
+          for (const item of results) {
+            const c = normalizeItem(site, item, cat.name, rates);
+            if (!c) continue;
+            // 过滤：近 N 天、有销量、价格区间
+            if (new Date(c.listingDate) < cutoff) continue;
+            if (c.soldQuantity < minSold) continue;
+            if (c.priceUsd < minPriceUsd || c.priceUsd > maxPriceUsd) continue;
+            if (c.dailySales < minDailySales) continue;
+            // 仅 new（避免二手/翻新品）
+            if (c.condition && c.condition !== 'new') continue;
+            all.push(c);
+          }
+        } catch (err: any) {
+          const msg = `[${site}/${cat.id}] ${err?.message || String(err)}`.slice(0, 200);
+          console.warn('[SourcingScanner]', msg);
+          errors.push(msg);
         }
-      } catch (err: any) {
-        const msg = `[${site}/${cat.id}] ${err?.message || String(err)}`.slice(0, 200);
-        console.warn('[SourcingScanner]', msg);
-        errors.push(msg);
+        // 分类间限速，降低被封概率
+        await sleep(600);
       }
-      // 分类间限速，降低被封概率
-      await sleep(600);
     }
-  }
 
-  // 按 itemId 去重，保留第一次出现（站点/分类优先级由调用顺序决定）
-  const seen = new Set<string>();
-  const unique = all.filter((c) => {
-    if (seen.has(c.itemId)) return false;
-    seen.add(c.itemId);
-    return true;
-  });
+    // 按 itemId 去重，保留第一次出现（站点/分类优先级由调用顺序决定）
+    const seen = new Set<string>();
+    const unique = all.filter((c) => {
+      if (seen.has(c.itemId)) return false;
+      seen.add(c.itemId);
+      return true;
+    });
 
-  // 按日均销量降序
-  unique.sort((a, b) => b.dailySales - a.dailySales);
-  return { candidates: unique, totalScanned, errors, scanToken: scanToken || undefined };
+    // 按日均销量降序
+    unique.sort((a, b) => b.dailySales - a.dailySales);
+    report(`扫描完成：${totalScanned} 个商品，${unique.length} 个通过过滤`);
+    return { candidates: unique, totalScanned, errors, scanToken: scanToken || undefined };
+  };
+
+  return Promise.race([
+    doScan(),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`扫描超时（>${scanTimeoutMs / 1000}s），请检查网络或 ML 接口可达性`)), scanTimeoutMs)
+    ),
+  ]);
 }
 
 /**

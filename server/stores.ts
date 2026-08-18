@@ -110,6 +110,19 @@ export function deleteStore(id: string): boolean {
   return false;
 }
 
+/** fetch with timeout (ms) */
+async function fetchWithTimeout(url: string, init: RequestInit & { timeoutMs?: number } = {}): Promise<Response> {
+  const { timeoutMs = 20000, ...rest } = init;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, { ...rest, signal: controller.signal });
+    return resp;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** 确保 token 有效，过期则用 refresh_token 续期 */
 export async function ensureStoreToken(store: Store): Promise<string> {
   if (store.accessToken && store.expiresAt && store.expiresAt > Date.now() + 5 * 60 * 1000) {
@@ -122,10 +135,11 @@ export async function ensureStoreToken(store: Store): Promise<string> {
     client_secret: getMlSecretKeyRaw(),
     refresh_token: store.refreshToken,
   });
-  const resp = await fetch(`${getMlApiBase()}/oauth/token`, {
+  const resp = await fetchWithTimeout(`${getMlApiBase()}/oauth/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
+    timeoutMs: 20000,
   });
   const data = await resp.json();
   if (!resp.ok || !data.access_token) {
