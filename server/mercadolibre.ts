@@ -1337,7 +1337,7 @@ export async function getCategories(siteId: string): Promise<Array<{ id: string;
  * 策略2: 官方 API + access_token 查询参数
  * 策略3: ML 网站搜索页面抓取
  */
-async function searchProductsByCategory(
+export async function searchProductsByCategory(
   siteId: string,
   categoryId: string,
   limit: number = 50,
@@ -1494,7 +1494,7 @@ async function fetchHighlightsByCategory(siteId: string, categoryId: string): Pr
  * 获取 catalog product 详情（标题、图片、属性含重量/尺寸）
  * 对瞬时 403 做有限重试，避免个别请求抖动导致整行缺失
  */
-async function fetchProductDetails(productId: string): Promise<any> {
+export async function fetchProductDetails(productId: string): Promise<any> {
   let lastErr: any = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -1514,7 +1514,7 @@ async function fetchProductDetails(productId: string): Promise<any> {
 /**
  * 获取 catalog product 下的 marketplace items（价格、卖家、物流等）
  */
-async function fetchProductItems(productId: string, limit: number = 10): Promise<any[]> {
+export async function fetchProductItems(productId: string, limit: number = 10): Promise<any[]> {
   try {
     const data = await httpsGet(`${getApiBase()}/products/${productId}/items?limit=${limit}`);
     return data?.results || [];

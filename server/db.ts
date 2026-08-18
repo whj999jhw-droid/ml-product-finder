@@ -131,6 +131,98 @@ CREATE TABLE IF NOT EXISTS order_sync_state (
   last_seen_at TEXT,
   updated_at TEXT NOT NULL
 );
+
+-- ============ AI 选品与自动核价 ============
+-- 选品运行日志：每次夜间定时扫描一条记录
+CREATE TABLE IF NOT EXISTS sourcing_runs (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL DEFAULT 'running',
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at TEXT,
+  total_scanned INTEGER DEFAULT 0,
+  total_matched INTEGER DEFAULT 0,
+  total_scored INTEGER DEFAULT 0,
+  total_approved INTEGER DEFAULT 0,
+  total_rejected INTEGER DEFAULT 0,
+  error TEXT
+);
+
+-- 候选商品：ML 竞品 + 1688 货源 + 利润测算 + 五维评分 + 审核状态
+CREATE TABLE IF NOT EXISTS candidates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  site TEXT NOT NULL,
+  ml_item_id TEXT NOT NULL,
+  ml_title TEXT,
+  ml_price_usd REAL,
+  ml_currency TEXT,
+  ml_sold_quantity INTEGER DEFAULT 0,
+  ml_category_id TEXT,
+  ml_category_name TEXT,
+  ml_permalink TEXT,
+  ml_thumbnail TEXT,
+  ml_seller_id TEXT,
+  ml_listing_date TEXT,
+  source_title TEXT,
+  source_image_url TEXT,
+  ali1688_product_id TEXT,
+  ali1688_title TEXT,
+  ali1688_price_cny REAL,
+  ali1688_shipping_cny REAL DEFAULT 0,
+  ali1688_url TEXT,
+  ali1688_supplier TEXT,
+  ali1688_image_url TEXT,
+  length_cm REAL,
+  width_cm REAL,
+  height_cm REAL,
+  weight_kg REAL,
+  -- 利润测算结果（USD）
+  listing_price_usd REAL,
+  profit_net_usd REAL,
+  profit_rate REAL,
+  roi REAL,
+  break_even_price REAL,
+  cost_breakdown_json TEXT,
+  -- 五维评分（0~1）
+  score_demand REAL,
+  score_competition REAL,
+  score_profit REAL,
+  score_logistics REAL,
+  score_compliance REAL,
+  score_total REAL,
+  -- 审核工作流
+  status TEXT NOT NULL DEFAULT 'pending',
+  reject_reason TEXT,
+  reviewed_at TEXT,
+  published_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_candidates_run ON candidates(run_id);
+CREATE INDEX IF NOT EXISTS idx_candidates_status ON candidates(status);
+CREATE INDEX IF NOT EXISTS idx_candidates_site ON candidates(site);
+CREATE INDEX IF NOT EXISTS idx_candidates_score ON candidates(score_total);
+CREATE INDEX IF NOT EXISTS idx_candidates_item ON candidates(ml_item_id);
+
+-- 上架任务：一个候选商品可发布到多个店铺
+CREATE TABLE IF NOT EXISTS publish_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  candidate_id INTEGER NOT NULL,
+  store_id TEXT NOT NULL,
+  site TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  ml_item_id TEXT,
+  ml_permalink TEXT,
+  error TEXT,
+  payload_json TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_publish_jobs_candidate ON publish_jobs(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_publish_jobs_status ON publish_jobs(status);
 `);
     // 兼容旧数据库：若 orders 表缺少 handling_deadline 列则补加
     try {
@@ -373,6 +465,141 @@ export function getSyncOrdersSince(sinceIso: string | null): any[] {
       return null;
     }
   }).filter(Boolean);
+}
+
+// ============ AI 选品与自动核价数据访问 ============
+
+export function createSourcingRun(id: string): void {
+  if (!db) return;
+  db.prepare(`INSERT INTO sourcing_runs (id, status, started_at) VALUES (?, 'running', datetime('now'))`).run(id);
+}
+
+export function updateSourcingRun(
+  id: string,
+  patch: {
+    status?: string;
+    finished_at?: string;
+    total_scanned?: number;
+    total_matched?: number;
+    total_scored?: number;
+    total_approved?: number;
+    total_rejected?: number;
+    error?: string;
+  }
+): void {
+  if (!db) return;
+  const fields: string[] = [];
+  const params: any = { id };
+  for (const [k, v] of Object.entries(patch)) {
+    if (v !== undefined) {
+      fields.push(`${k} = @${k}`);
+      params[k] = v;
+    }
+  }
+  if (fields.length === 0) return;
+  db.prepare(`UPDATE sourcing_runs SET ${fields.join(', ')} WHERE id = @id`).run(params);
+}
+
+export function getSourcingRun(id: string): any {
+  if (!db) return null;
+  return db.prepare('SELECT * FROM sourcing_runs WHERE id = ?').get(id);
+}
+
+export function insertCandidate(data: any): number {
+  if (!db) return 0;
+  const now = new Date().toISOString();
+  const cols = Object.keys(data).filter((k) => data[k] !== undefined);
+  const placeholders = cols.map((k) => `@${k}`).join(', ');
+  const stmt = db.prepare(
+    `INSERT INTO candidates (${cols.join(', ')}, created_at, updated_at) VALUES (${placeholders}, @now, @now)`
+  );
+  const result = stmt.run({ ...data, now });
+  return Number(result.lastInsertRowid) || 0;
+}
+
+export function getCandidates(opts?: {
+  status?: string;
+  runId?: string;
+  site?: string;
+  minScore?: number;
+  limit?: number;
+  offset?: number;
+  orderBy?: string;
+}): { rows: any[]; total: number } {
+  if (!db) return { rows: [], total: 0 };
+  const where: string[] = [];
+  const params: any = {};
+  if (opts?.status) { where.push('status = @status'); params.status = opts.status; }
+  if (opts?.runId) { where.push('run_id = @runId'); params.runId = opts.runId; }
+  if (opts?.site) { where.push('site = @site'); params.site = opts.site; }
+  if (opts?.minScore !== undefined) { where.push('score_total >= @minScore'); params.minScore = opts.minScore; }
+
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const totalRow = db.prepare(`SELECT COUNT(*) AS c FROM candidates ${whereSql}`).get(params);
+  const total = totalRow?.c || 0;
+
+  const order = opts?.orderBy || 'score_total DESC, created_at DESC';
+  const limit = opts?.limit ?? 50;
+  const offset = opts?.offset ?? 0;
+  const rows = db.prepare(
+    `SELECT * FROM candidates ${whereSql} ORDER BY ${order} LIMIT @limit OFFSET @offset`
+  ).all({ ...params, limit, offset });
+
+  return { rows, total };
+}
+
+export function getCandidateById(id: number): any {
+  if (!db) return null;
+  return db.prepare('SELECT * FROM candidates WHERE id = ?').get(id);
+}
+
+export function updateCandidateStatus(
+  id: number,
+  status: string,
+  extra?: { reject_reason?: string; reviewed_at?: string; published_at?: string }
+): void {
+  if (!db) return;
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE candidates
+    SET status = @status, reject_reason = @reject_reason, reviewed_at = @reviewed_at,
+        published_at = @published_at, updated_at = @now
+    WHERE id = @id
+  `).run({ id, status, reject_reason: extra?.reject_reason ?? null, reviewed_at: extra?.reviewed_at ?? null, published_at: extra?.published_at ?? null, now });
+}
+
+export function createPublishJob(data: { candidate_id: number; store_id: string; site: string; payload_json?: string }): number {
+  if (!db) return 0;
+  const now = new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT INTO publish_jobs (candidate_id, store_id, site, status, payload_json, created_at, updated_at)
+    VALUES (@candidate_id, @store_id, @site, 'pending', @payload_json, @now, @now)
+  `);
+  const result = stmt.run({ ...data, payload_json: data.payload_json ?? null, now });
+  return Number(result.lastInsertRowid) || 0;
+}
+
+export function updatePublishJob(
+  id: number,
+  patch: { status?: string; ml_item_id?: string; ml_permalink?: string; error?: string; payload_json?: string }
+): void {
+  if (!db) return;
+  const now = new Date().toISOString();
+  const fields: string[] = [];
+  const params: any = { id, now };
+  for (const [k, v] of Object.entries(patch)) {
+    if (v !== undefined) {
+      fields.push(`${k} = @${k}`);
+      params[k] = v;
+    }
+  }
+  if (fields.length === 0) return;
+  db.prepare(`UPDATE publish_jobs SET ${fields.join(', ')}, updated_at = @now WHERE id = @id`).run(params);
+}
+
+export function getPublishJobsByCandidate(candidateId: number): any[] {
+  if (!db) return [];
+  return db.prepare('SELECT * FROM publish_jobs WHERE candidate_id = ? ORDER BY created_at DESC').all(candidateId);
 }
 
 export default db;

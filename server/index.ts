@@ -11,6 +11,16 @@ import http from "http";
 import * as db from "./db.js";
 import session from 'express-session';
 import authRouter, { requireAuth } from './auth.js';
+import { runSourcingPipeline } from './sourcingPipeline.js';
+import {
+  getCandidates,
+  getCandidateById,
+  updateCandidateStatus,
+  getSourcingRun,
+  createPublishJob,
+} from './db.js';
+import { getAllStores } from './stores.js';
+import { publishCandidate } from './publishFromCandidate.js';
 
 const execAsync = promisify(exec);
 
@@ -2106,6 +2116,121 @@ app.post('/api/ml/trigger', async (req, res) => {
   res.json({ success: true, message: '已触发后台抓取' });
 });
 
+// 外部触发选品流水线（供 cron-job.org 等夜间唤醒免费版 Render 并触发 AI 选品核价）
+// 与 /api/ml/sourcing/run 区别：本端点轻量返回，专为外部心跳/唤醒设计
+app.post('/api/ml/sourcing/trigger', async (req, res) => {
+  const opts = req.body || {};
+  console.log(`[Sourcing Trigger] 收到外部触发请求`);
+  runSourcingPipeline(opts)
+    .then((r) => console.log(`[Sourcing Trigger] 完成: ${r.totalApproved}/${r.totalScored} 候选通过`))
+    .catch((e) => console.error('[Sourcing Trigger] 失败:', e));
+  res.json({ success: true, message: '已触发后台选品流水线' });
+});
+
+// ============ AI 选品与自动核价 ============
+// 手动触发选品流水线（异步执行，立即返回 runId）
+app.post('/api/ml/sourcing/run', async (req, res) => {
+  const opts = req.body || {};
+  // 立即返回 runId，实际工作在后台执行
+  const promise = runSourcingPipeline(opts);
+  promise
+    .then((r) => console.log(`[Sourcing] 流水线完成 runId=${r.runId}: ${r.totalApproved}/${r.totalScored} 通过`))
+    .catch((e) => console.error('[Sourcing] 流水线异常:', e));
+  res.json({ success: true, message: '选品流水线已启动', started: true });
+});
+
+// 查询运行历史/详情
+app.get('/api/ml/sourcing/runs/:id', async (req, res) => {
+  const run = getSourcingRun(req.params.id);
+  if (!run) return res.status(404).json({ success: false, message: '运行记录不存在' });
+  res.json({ success: true, run });
+});
+
+// 候选列表（支持分页 + 状态过滤）
+app.get('/api/ml/candidates', async (req, res) => {
+  const status = req.query.status as string | undefined;
+  const site = req.query.site as string | undefined;
+  const runId = req.query.runId as string | undefined;
+  const minScore = req.query.minScore ? Number(req.query.minScore) : undefined;
+  const limit = req.query.limit ? Number(req.query.limit) : 50;
+  const offset = req.query.offset ? Number(req.query.offset) : 0;
+  const { rows, total } = getCandidates({ status, site, runId, minScore, limit, offset });
+  res.json({ success: true, rows, total, limit, offset });
+});
+
+// 单个候选详情
+app.get('/api/ml/candidates/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ success: false, message: 'ID 无效' });
+  const row = getCandidateById(id);
+  if (!row) return res.status(404).json({ success: false, message: '候选不存在' });
+  res.json({ success: true, row });
+});
+
+// 审核通过
+app.post('/api/ml/candidates/:id/approve', async (req, res) => {
+  const id = Number(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ success: false, message: 'ID 无效' });
+  updateCandidateStatus(id, 'approved', { reviewed_at: new Date().toISOString() });
+  res.json({ success: true, message: '已通过' });
+});
+
+// 审核拒绝
+app.post('/api/ml/candidates/:id/reject', async (req, res) => {
+  const id = Number(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ success: false, message: 'ID 无效' });
+  const reason = (req.body?.reason as string) || '';
+  updateCandidateStatus(id, 'rejected', { reject_reason: reason, reviewed_at: new Date().toISOString() });
+  res.json({ success: true, message: '已拒绝' });
+});
+
+// 一键上架（到指定或全部店铺）
+app.post('/api/ml/candidates/:id/publish', async (req, res) => {
+  const id = Number(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ success: false, message: 'ID 无效' });
+  const row = getCandidateById(id);
+  if (!row) return res.status(404).json({ success: false, message: '候选不存在' });
+
+  try {
+    // 重建 RawCandidate 最小结构
+    const candidate = {
+      site: row.site,
+      itemId: row.ml_item_id,
+      title: row.ml_title,
+      priceUsd: row.ml_price_usd,
+      currency: row.ml_currency,
+      soldQuantity: row.ml_sold_quantity,
+      categoryId: row.ml_category_id,
+      categoryName: row.ml_category_name,
+      permalink: row.ml_permalink,
+      thumbnail: row.ml_thumbnail,
+      sellerId: row.ml_seller_id ? Number(row.ml_seller_id) : undefined,
+      sellerCountry: '',
+      listingDate: row.ml_listing_date,
+      condition: 'new',
+      daysListed: 1,
+      dailySales: 0,
+      rawItem: {},
+      weightKg: row.weight_kg,
+      lengthCm: row.length_cm,
+      widthCm: row.width_cm,
+      heightCm: row.height_cm,
+    };
+    const result = await publishCandidate({
+      candidate: candidate as any,
+      candidateDbId: id,
+      listingPriceUsd: row.listing_price_usd,
+      sourceImageUrl: row.ali1688_image_url,
+      brand: 'Generic',
+      storeIds: req.body?.storeIds,
+      useCbtCategory: req.body?.useCbtCategory ?? true,
+    });
+    res.json({ success: true, result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || '上架失败' });
+  }
+});
+
 // ============ M2：货源匹配 + 利润测算 ============
 // 取 CNY→USD 汇率（用于利润测算）
 app.get('/api/ml/sourcing/rate', async (req, res) => {
@@ -2918,9 +3043,17 @@ http.createServer(app).listen(PORT, () => {
 ╚════════════════════════════════════════════╝
   `);
 
-// 启动定时调度循环（按 /api/ml/schedule 配置在设定时间自动抓取）
-startScheduler(() => runExportJob(lastRunSites, lastRunOptions));
-console.log('[Scheduler] 定时调度已启动');
+// 启动定时调度循环（按 /api/ml/schedule 配置在设定时间自动运行各任务）
+//   - export:   白天抓取并导出商品（默认 09:00）
+//   - sourcing: 夜间 AI 选品核价流水线，早上可在「AI 选品」页审核（默认 03:00）
+startScheduler({
+  export: () => runExportJob(lastRunSites, lastRunOptions),
+  sourcing: () =>
+    runSourcingPipeline({})
+      .then((r) => console.log(`[Sourcing] 定时流水线完成: runId=${r.runId} ${r.totalApproved}/${r.totalScored} 候选通过`))
+      .catch((e) => console.error('[Sourcing] 定时流水线异常:', e)),
+});
+console.log('[Scheduler] 定时调度已启动（export + sourcing）');
 
 // 启动 token 自动续期（启动预热 + 每 30 分钟保活，依赖 ML_APP_ID/ML_SECRET_KEY）
 initAutoRenew();

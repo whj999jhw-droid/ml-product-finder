@@ -18,6 +18,7 @@ interface SidebarProps {
   isNotificationsPage?: boolean;
   isTrendsPage?: boolean;
   isProductAdminPage?: boolean;
+  isCandidatesPage?: boolean;
   isMobile?: boolean;
   sidebarOpen: boolean;
   agents: Agent[];
@@ -34,6 +35,7 @@ interface SidebarProps {
   onOpenNotifications?: () => void;
   onOpenTrends?: () => void;
   onOpenProductAdmin?: () => void;
+  onOpenCandidates?: () => void;
 }
 
 export function Sidebar({
@@ -48,6 +50,7 @@ export function Sidebar({
   isNotificationsPage,
   isTrendsPage,
   isProductAdminPage,
+  isCandidatesPage,
   isMobile,
   sidebarOpen,
   agents,
@@ -64,6 +67,7 @@ export function Sidebar({
   onOpenNotifications,
   onOpenTrends,
   onOpenProductAdmin,
+  onOpenCandidates,
 }: SidebarProps) {
   return (
     <aside 
@@ -119,6 +123,15 @@ export function Sidebar({
           theme={isSourcingPage ? 'primary' : 'default'}
         >
           货源与利润
+        </Button>
+        <Button 
+          icon={<ShoppingBag size={16} />}
+          onClick={onOpenCandidates}
+          block
+          variant={isCandidatesPage ? 'outline' : 'text'}
+          theme={isCandidatesPage ? 'primary' : 'default'}
+        >
+          AI 选品
         </Button>
         <Button 
           icon={<ShoppingBag size={16} />}

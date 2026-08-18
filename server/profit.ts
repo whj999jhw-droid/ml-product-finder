@@ -348,6 +348,54 @@ export async function batchCalculateProfit(inputs: ProductInput[]): Promise<Prof
   return results;
 }
 
+/**
+ * 按目标净利率反推建议售价（USD）。
+ * 公式：price × (1 − targetNetRate) = 固定成本合计（采购+头程+物流）
+ *       即 price = fixedCost / (1 − targetNetRate)
+ * @param targetNetRate 目标净利润率，如 0.20 表示 20%
+ */
+export async function reverseEngineerPrice(
+  input: Omit<ProductInput, 'listingPriceUsd'>,
+  targetNetRate: number
+): Promise<number> {
+  const site = (input.site || 'MLM').toUpperCase();
+  const rates = getSiteRates()[site] || DEFAULT_SITE_RATES.MLM;
+  const cnyUsd = input.cnyUsd ?? (await getCnyUsd());
+
+  const weightKg = input.weightKg || 0;
+  const volumeWeightKg =
+    input.lengthCm && input.widthCm && input.heightCm
+      ? (input.lengthCm * input.widthCm * input.heightCm) / VOLUME_DIVISOR
+      : 0;
+  const chargeableWeightKg = Math.max(weightKg, volumeWeightKg) || weightKg || 0.3;
+
+  const taxMode: TaxMode = input.taxMode ?? 'direct_import';
+  const taxRate = site === 'MLM' ? MX_TAX_MODE_RATES[taxMode] ?? 0 : rates.taxRate;
+  const adAcosRate = input.adAcosRate ?? 0.05;
+
+  const logisticsFee = rates.logisticsBaseUsd + rates.logisticsPerKgUsd * chargeableWeightKg;
+  const firstLegCny =
+    input.firstLegShippingCny != null && input.firstLegShippingCny > 0
+      ? input.firstLegShippingCny
+      : rates.firstLegPerKgCny * chargeableWeightKg;
+  const firstLegFee = firstLegCny * cnyUsd;
+  const purchaseCost = (input.purchaseCostCny || 0) * cnyUsd;
+
+  const fixedCost = logisticsFee + firstLegFee + purchaseCost;
+  const variableRate =
+    rates.commissionRate +
+    rates.pagoFeeRate +
+    taxRate +
+    adAcosRate +
+    rates.returnRate * rates.returnLossFactor +
+    rates.exchangeLossRate +
+    rates.withdrawalFeeRate +
+    targetNetRate;
+
+  if (variableRate >= 1) return Infinity;
+  return round2(fixedCost / (1 - variableRate));
+}
+
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }

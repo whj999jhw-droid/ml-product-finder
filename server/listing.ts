@@ -13,6 +13,7 @@
  */
 import { getAccessToken } from './mercadolibre.js';
 import { checkBannedWords } from './bannedWords.js';
+import { getStoreRaw, ensureStoreToken } from './stores.js';
 
 export interface ListingDraft {
   site: string; // MLM / MLB / MLC / MCO
@@ -96,8 +97,13 @@ async function resolvePictureId(url: string, token: string): Promise<string | un
 }
 
 export async function createListing(draft: ListingDraft, tokenOverride?: string): Promise<{ itemId: string; permalink: string }> {
-  // 多店铺：优先用传入的店铺 token；否则回退全局 token
-  const token = tokenOverride || getAccessToken();
+  // 多店铺：优先用传入的店铺 token；其次按 draft.storeId 取对应店铺 token；最后回退全局 token
+  let token = tokenOverride;
+  if (!token && draft.storeId) {
+    const store = getStoreRaw(draft.storeId);
+    if (store) token = await ensureStoreToken(store);
+  }
+  if (!token) token = getAccessToken();
   if (!token) {
     throw new Error('未获取到卖家 write token，请先在「店铺管理」中添加并授权店铺（需含 write scope），或先在设置页完成全局授权');
   }
