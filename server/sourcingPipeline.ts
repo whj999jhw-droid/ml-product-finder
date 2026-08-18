@@ -66,6 +66,8 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
     updateSourcingRun(runId, { message: '正在扫描 Mercado Libre 新品...' });
     const scan = await scanNewRisingProducts(opts);
     const rawCandidates = scan.candidates.slice(0, maxCandidatesToSource * 2);
+    // 从扫描结果里取回用于详情补全的店铺 token（自动刷新），供后续 enrich 复用
+    const scanToken = (scan as any).scanToken as string | undefined;
     console.log(`[SourcingPipeline] 扫描完成：${scan.totalScanned} 个，过滤后 ${rawCandidates.length} 个`);
 
     updateSourcingRun(runId, {
@@ -96,7 +98,7 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
         total_rejected: totalRejected,
       });
       try {
-        const result = await processOneCandidate(runId, raw, targetNetRate, minScore);
+        const result = await processOneCandidate(runId, raw, targetNetRate, minScore, scanToken);
         totalScored++;
         if (result) {
           totalApproved++;
@@ -147,10 +149,11 @@ async function processOneCandidate(
   runId: string,
   raw: RawCandidate,
   targetNetRate: number,
-  minScore: number
+  minScore: number,
+  scanToken?: string
 ): Promise<SourcedCandidate | null> {
   // 2.1 补充详情（重量/尺寸/图片）
-  const enriched = await enrichCandidate(raw);
+  const enriched = await enrichCandidate(raw, scanToken);
 
   // 2.2 1688 找货源（用简化标题，去掉站点无关词）
   const searchQuery = build1688SearchQuery(enriched.title);

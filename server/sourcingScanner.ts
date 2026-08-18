@@ -10,6 +10,30 @@ import {
   fetchProductItems,
   getExchangeRate,
 } from './mercadolibre.js';
+import { getAllStores, ensureStoreToken } from './stores.js';
+
+/**
+ * 解析一个用于扫描的店铺 token。
+ * 优先使用「已启用 + 已授权」的店铺 token（可自动刷新，免去手动维护全局 ML_ACCESS_TOKEN）；
+ * 找不到任何店铺时回退到全局 token（可能为空，搜索会受限）。
+ */
+async function resolveScanToken(): Promise<{ token: string; storeNick: string } | null> {
+  const stores = getAllStores().filter((s) => s.enabled && s.accessToken);
+  if (stores.length === 0) {
+    console.warn('[SourcingScanner] 未找到已授权的店铺，扫描将使用全局 ML_ACCESS_TOKEN（可能为空/过期）');
+    return null;
+  }
+  // 优先用 CBT 跨境店铺（搜索跨站点通用），否则取第一个
+  const chosen = stores.find((s) => s.site === 'CBT') || stores[0];
+  try {
+    const token = await ensureStoreToken(chosen);
+    console.log(`[SourcingScanner] 使用店铺「${chosen.nickname || chosen.site}」的 token 扫描（自动刷新）`);
+    return { token, storeNick: chosen.nickname || chosen.site };
+  } catch (e: any) {
+    console.warn(`[SourcingScanner] 店铺 token 刷新失败(${chosen.nickname}): ${e?.message?.slice(0, 120)}，回退全局 token`);
+    return null;
+  }
+}
 
 export interface ScannerOptions {
   sites?: string[]; // 默认 MLM / MLB / MLC / MCO
@@ -141,7 +165,7 @@ function normalizeItem(site: string, item: any, categoryName: string, rates: Rec
  */
 export async function scanNewRisingProducts(
   opts: ScannerOptions = {}
-): Promise<{ candidates: RawCandidate[]; totalScanned: number; errors: string[] }> {
+): Promise<{ candidates: RawCandidate[]; totalScanned: number; errors: string[]; scanToken?: string }> {
   const sites = opts.sites || DEFAULT_SITES;
   const maxAgeDays = opts.maxAgeDays ?? 30;
   const minSold = opts.minSold ?? 1;
@@ -155,6 +179,10 @@ export async function scanNewRisingProducts(
   const currencies = ['MXN', 'BRL', 'CLP', 'COP', 'USD'];
   await Promise.all(currencies.map(async (c) => { rates[c] = await getExchangeRate(c); }));
 
+  // 解析店铺 token（自动刷新），用于带鉴权地扫描，避免全局 token 过期导致 0 结果
+  const scanAuth = await resolveScanToken();
+  const scanToken = scanAuth?.token;
+
   const all: RawCandidate[] = [];
   const errors: string[] = [];
   let totalScanned = 0;
@@ -163,7 +191,7 @@ export async function scanNewRisingProducts(
     const categories = opts.categories?.length ? opts.categories : (DEFAULT_CATEGORIES[site] || []);
     for (const cat of categories) {
       try {
-        const results = await searchProductsByCategory(site, cat.id, limitPerCategory, 0);
+        const results = await searchProductsByCategory(site, cat.id, limitPerCategory, 0, scanToken);
         totalScanned += results.length;
         for (const item of results) {
           const c = normalizeItem(site, item, cat.name, rates);
@@ -197,14 +225,14 @@ export async function scanNewRisingProducts(
 
   // 按日均销量降序
   unique.sort((a, b) => b.dailySales - a.dailySales);
-  return { candidates: unique, totalScanned, errors };
+  return { candidates: unique, totalScanned, errors, scanToken: scanToken || undefined };
 }
 
 /**
  * 补充候选商品的详情：重量/尺寸/品牌/图片等。
  * 优先从 product 详情取，缺失时回退 item attributes。
  */
-export async function enrichCandidate(item: RawCandidate): Promise<RawCandidate & {
+export async function enrichCandidate(item: RawCandidate, accessTokenOverride?: string): Promise<RawCandidate & {
   weightKg?: number;
   lengthCm?: number;
   widthCm?: number;
@@ -219,8 +247,8 @@ export async function enrichCandidate(item: RawCandidate): Promise<RawCandidate 
     // item.rawItem 里可能有 catalog_product_id
     const catalogId = item.rawItem?.catalog_product_id || item.rawItem?.catalog_product_id_suspended;
     if (catalogId) {
-      product = await fetchProductDetails(catalogId);
-      items = await fetchProductItems(catalogId, 5);
+      product = await fetchProductDetails(catalogId, accessTokenOverride);
+      items = await fetchProductItems(catalogId, 5, accessTokenOverride);
     } else {
       // 非 catalog item，直接从 item attributes 补
       items = [item.rawItem];

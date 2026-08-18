@@ -1341,8 +1341,13 @@ export async function searchProductsByCategory(
   siteId: string,
   categoryId: string,
   limit: number = 50,
-  offset: number = 0
+  offset: number = 0,
+  accessTokenOverride?: string
 ): Promise<any[]> {
+  // 若传入店铺 token，则用它做鉴权（可自动刷新，免去手动维护全局 token）
+  const authH = accessTokenOverride ? { Authorization: `Bearer ${accessTokenOverride}` } : {};
+  // 有覆盖 token 时，不要因单次 403 就判死整轮 /search（403 更可能是 token/scope 问题，由上层重试）
+  const allowBlockFlag = !accessTokenOverride;
   // 若已确认 /search 被封锁，先判断是否因"当前代理"而封锁：
   // 仅当触发封锁时的代理与当前代理一致时，才跳过 search（避免无代理时反复 403）；
   // 一旦更换/清除代理（searchBlockedProxy 不匹配），重置标记，重新尝试 search。
@@ -1356,7 +1361,7 @@ export async function searchProductsByCategory(
   // 策略1: 官方 API + Bearer token (httpsGet 自动添加 Authorization header)
   const apiUrl = `${getApiBase()}/sites/${siteId}/search?category=${categoryId}&limit=${limit}&offset=${offset}`;
   try {
-    const data = await httpsGet(apiUrl);
+    const data = await httpsGet(apiUrl, authH);
     if (data?.results && data.results.length > 0) {
       return data.results;
     }
@@ -1374,7 +1379,7 @@ export async function searchProductsByCategory(
       console.log(`[ML Search] 429 限速，等待 5 秒后重试策略1 (${categoryId})...`);
       await new Promise((r) => setTimeout(r, 5000));
       try {
-        const data = await httpsGet(apiUrl);
+        const data = await httpsGet(apiUrl, authH);
         if (data?.results && data.results.length > 0) {
           console.log(`[ML Search] 策略1重试成功 (${categoryId})`);
           return data.results;
@@ -1386,7 +1391,7 @@ export async function searchProductsByCategory(
     }
 
     // 策略1b: 如果 403，尝试添加 q 参数（某些 ML 端点可能要求 q 参数）
-    if (err1Msg.includes('403') && mlAccessToken) {
+    if (err1Msg.includes('403') && mlAccessToken && allowBlockFlag) {
       // 确认 /search 被全局封锁，后续分类跳过 search 直接走兜底
       searchConfirmedBlocked = true;
       searchBlockedProxy = mlProxyUrl || '';
@@ -1396,7 +1401,7 @@ export async function searchProductsByCategory(
       try {
         // 使用通用搜索词 + category 过滤
         const apiUrlWithQ = `${getApiBase()}/sites/${siteId}/search?q=${encodeURIComponent(' ')}&category=${categoryId}&limit=${limit}&offset=${offset}`;
-        const data1b = await httpsGet(apiUrlWithQ);
+        const data1b = await httpsGet(apiUrlWithQ, authH);
         if (data1b?.results && data1b.results.length > 0) {
           console.log(`[ML Search] 策略1b(q参数)成功 (${categoryId}): ${data1b.results.length} 个结果`);
           return data1b.results;
@@ -1407,11 +1412,12 @@ export async function searchProductsByCategory(
     }
 
     // 策略2: 官方 API + access_token 作为查询参数（仅在非 429 错误时尝试）
-    if (mlAccessToken && !err1Msg.includes('429')) {
+    const effToken = accessTokenOverride || mlAccessToken;
+    if (effToken && !err1Msg.includes('429')) {
       await new Promise((r) => setTimeout(r, 1500));
       try {
-        const urlWithToken = `${apiUrl}&access_token=${encodeURIComponent(mlAccessToken)}`;
-        const data2 = await httpsGet(urlWithToken);
+        const urlWithToken = `${apiUrl}&access_token=${encodeURIComponent(effToken)}`;
+        const data2 = await httpsGet(urlWithToken, authH);
         if (data2?.results && data2.results.length > 0) {
           console.log(`[ML Search] 策略2成功 (${categoryId})`);
           return data2.results;
@@ -1425,8 +1431,8 @@ export async function searchProductsByCategory(
           console.log(`[ML Search] 策略2也403，尝试策略2b: q+token (${categoryId})...`);
           await new Promise((r) => setTimeout(r, 1000));
           try {
-            const urlWithQToken = `${getApiBase()}/sites/${siteId}/search?q=${encodeURIComponent(' ')}&category=${categoryId}&limit=${limit}&offset=${offset}&access_token=${encodeURIComponent(mlAccessToken)}`;
-            const data2b = await httpsGet(urlWithQToken);
+            const urlWithQToken = `${getApiBase()}/sites/${siteId}/search?q=${encodeURIComponent(' ')}&category=${categoryId}&limit=${limit}&offset=${offset}&access_token=${encodeURIComponent(effToken)}`;
+            const data2b = await httpsGet(urlWithQToken, authH);
             if (data2b?.results && data2b.results.length > 0) {
               console.log(`[ML Search] 策略2b成功 (${categoryId}): ${data2b.results.length} 个结果`);
               return data2b.results;
@@ -1494,11 +1500,12 @@ async function fetchHighlightsByCategory(siteId: string, categoryId: string): Pr
  * 获取 catalog product 详情（标题、图片、属性含重量/尺寸）
  * 对瞬时 403 做有限重试，避免个别请求抖动导致整行缺失
  */
-export async function fetchProductDetails(productId: string): Promise<any> {
+export async function fetchProductDetails(productId: string, accessTokenOverride?: string): Promise<any> {
+  const authH = accessTokenOverride ? { Authorization: `Bearer ${accessTokenOverride}` } : {};
   let lastErr: any = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await httpsGet(`${getApiBase()}/products/${productId}`);
+      return await httpsGet(`${getApiBase()}/products/${productId}`, authH);
     } catch (err: any) {
       lastErr = err;
       const msg = err?.message || String(err);
@@ -1514,9 +1521,10 @@ export async function fetchProductDetails(productId: string): Promise<any> {
 /**
  * 获取 catalog product 下的 marketplace items（价格、卖家、物流等）
  */
-export async function fetchProductItems(productId: string, limit: number = 10): Promise<any[]> {
+export async function fetchProductItems(productId: string, limit: number = 10, accessTokenOverride?: string): Promise<any[]> {
+  const authH = accessTokenOverride ? { Authorization: `Bearer ${accessTokenOverride}` } : {};
   try {
-    const data = await httpsGet(`${getApiBase()}/products/${productId}/items?limit=${limit}`);
+    const data = await httpsGet(`${getApiBase()}/products/${productId}/items?limit=${limit}`, authH);
     return data?.results || [];
   } catch (err: any) {
     console.warn(`[ML Products] 获取 product items 失败 ${productId}: ${err.message?.slice(0, 80)}`);
