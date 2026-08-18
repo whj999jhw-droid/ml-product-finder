@@ -63,19 +63,38 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
   try {
     // 1) 扫描 ML 新品
     console.log(`[SourcingPipeline] 开始扫描 runId=${runId}`);
+    updateSourcingRun(runId, { message: '正在扫描 Mercado Libre 新品...' });
     const scan = await scanNewRisingProducts(opts);
     const rawCandidates = scan.candidates.slice(0, maxCandidatesToSource * 2);
     console.log(`[SourcingPipeline] 扫描完成：${scan.totalScanned} 个，过滤后 ${rawCandidates.length} 个`);
 
-    updateSourcingRun(runId, { total_scanned: scan.totalScanned, total_matched: rawCandidates.length });
+    updateSourcingRun(runId, {
+      total_scanned: scan.totalScanned,
+      total_matched: rawCandidates.length,
+      message: rawCandidates.length
+        ? `扫描完成：${scan.totalScanned} 个商品，${rawCandidates.length} 个进入 1688 匹配`
+        : `扫描完成：${scan.totalScanned} 个商品，无符合过滤条件的候选（请检查 ML 访问令牌 / 代理 / 站点过滤）`,
+    });
+
+    if (rawCandidates.length === 0) {
+      updateSourcingRun(runId, { status: 'done', finished_at: new Date().toISOString() });
+      return { runId, status: 'done', totalScanned: scan.totalScanned, totalMatched: 0, totalScored: 0, totalApproved: 0, totalRejected: 0, errors: scan.errors };
+    }
 
     let totalScored = 0;
     let totalApproved = 0;
     let totalRejected = 0;
 
     // 2) 逐个查 1688 + 利润 + 评分 + 入库
-    for (let i = 0; i < Math.min(rawCandidates.length, maxCandidatesToSource); i++) {
+    const totalToProcess = Math.min(rawCandidates.length, maxCandidatesToSource);
+    for (let i = 0; i < totalToProcess; i++) {
       const raw = rawCandidates[i];
+      updateSourcingRun(runId, {
+        message: `正在匹配 1688：第 ${i + 1}/${totalToProcess} 个（${raw.title.slice(0, 30)}）`,
+        total_scored: totalScored,
+        total_approved: totalApproved,
+        total_rejected: totalRejected,
+      });
       try {
         const result = await processOneCandidate(runId, raw, targetNetRate, minScore);
         totalScored++;
@@ -99,6 +118,7 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
       total_scored: totalScored,
       total_approved: totalApproved,
       total_rejected: totalRejected,
+      message: `选品完成：扫描 ${scan.totalScanned} 个，入库 ${totalApproved} 个`,
       error: errors.length ? errors.join('; ') : null,
     });
 
@@ -114,7 +134,7 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
     };
   } catch (err: any) {
     const msg = err?.message || String(err);
-    updateSourcingRun(runId, { status: 'failed', finished_at: new Date().toISOString(), error: msg });
+    updateSourcingRun(runId, { status: 'failed', finished_at: new Date().toISOString(), message: `流水线失败：${msg}`, error: msg });
     return { runId, status: 'failed', totalScanned: 0, totalMatched: 0, totalScored: 0, totalApproved: 0, totalRejected: 0, errors: [msg] };
   }
 }

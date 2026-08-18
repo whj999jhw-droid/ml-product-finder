@@ -50,6 +50,26 @@ interface Store {
   enabled: boolean;
 }
 
+interface SourcingRun {
+  id: string;
+  status: 'running' | 'done' | 'failed';
+  started_at: string;
+  finished_at?: string;
+  total_scanned: number;
+  total_matched: number;
+  total_scored: number;
+  total_approved: number;
+  total_rejected: number;
+  message?: string;
+  error?: string;
+}
+
+const runStatusMap: Record<string, { label: string; theme: any }> = {
+  running: { label: '进行中', theme: 'warning' },
+  done: { label: '已完成', theme: 'success' },
+  failed: { label: '失败', theme: 'danger' },
+};
+
 const statusMap: Record<string, { label: string; theme: any }> = {
   pending: { label: '待审核', theme: 'warning' },
   approved: { label: '已通过', theme: 'success' },
@@ -72,6 +92,7 @@ export function CandidatesPage() {
   const [akValue, setAkValue] = useState('');
   const [akSaving, setAkSaving] = useState(false);
   const [akStatus, setAkStatus] = useState<{ configured?: boolean; message?: string }>({});
+  const [latestRun, setLatestRun] = useState<SourcingRun | null>(null);
 
   const fetchAkStatus = async () => {
     try {
@@ -83,10 +104,27 @@ export function CandidatesPage() {
     }
   };
 
+  const fetchLatestRun = async () => {
+    try {
+      const res = await fetch('/api/ml/sourcing/runs/latest');
+      const data = await res.json();
+      if (data.success) {
+        setLatestRun(data.run);
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+
   useEffect(() => {
     fetchRows();
     fetchStores();
     fetchAkStatus();
+    fetchLatestRun();
+    const timer = setInterval(() => {
+      fetchLatestRun();
+    }, 3000);
+    return () => clearInterval(timer);
   }, [status]);
 
   const handleSaveAk = async () => {
@@ -156,7 +194,8 @@ export function CandidatesPage() {
       });
       const data = await res.json();
       if (data.success) {
-        MessagePlugin.success('选品流水线已启动，请稍后刷新列表');
+        MessagePlugin.success('选品流水线已启动');
+        fetchLatestRun();
       } else {
         MessagePlugin.error(data.message || '启动失败');
       }
@@ -335,8 +374,53 @@ export function CandidatesPage() {
     },
   ];
 
+  const renderRunStatus = () => {
+    if (!latestRun) {
+      return <div className="text-sm text-gray-500">暂无运行记录，点击「立即扫描选品」开始</div>;
+    }
+    const s = runStatusMap[latestRun.status] || { label: latestRun.status, theme: 'default' };
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center gap-3">
+          <Tag theme={s.theme}>{s.label}</Tag>
+          <span className="text-sm text-gray-600">{latestRun.message || ''}</span>
+          {latestRun.status === 'running' && <Loading size="small" loading />}
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
+          <div>
+            <div className="text-gray-500">扫描商品</div>
+            <div className="font-medium">{latestRun.total_scanned || 0}</div>
+          </div>
+          <div>
+            <div className="text-gray-500">进入匹配</div>
+            <div className="font-medium">{latestRun.total_matched || 0}</div>
+          </div>
+          <div>
+            <div className="text-gray-500">已核价</div>
+            <div className="font-medium">{latestRun.total_scored || 0}</div>
+          </div>
+          <div>
+            <div className="text-gray-500">入库通过</div>
+            <div className="font-medium text-green-600">{latestRun.total_approved || 0}</div>
+          </div>
+          <div>
+            <div className="text-gray-500"> rejected</div>
+            <div className="font-medium text-red-600">{latestRun.total_rejected || 0}</div>
+          </div>
+        </div>
+        {latestRun.error && (
+          <div className="text-xs text-red-600 bg-red-50 p-2 rounded">{latestRun.error}</div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="p-4 h-full overflow-auto">
+      <Card title="运行状态" headerBordered className="mb-4">
+        {renderRunStatus()}
+      </Card>
+
       <Card title="AI 选品候选列表" headerBordered>
         <div className="flex items-center justify-between mb-4">
           <Space>

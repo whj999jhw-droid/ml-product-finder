@@ -144,8 +144,12 @@ CREATE TABLE IF NOT EXISTS sourcing_runs (
   total_scored INTEGER DEFAULT 0,
   total_approved INTEGER DEFAULT 0,
   total_rejected INTEGER DEFAULT 0,
+  message TEXT,
   error TEXT
 );
+
+-- 兼容老数据库：补充 message 字段
+try { db.exec('ALTER TABLE sourcing_runs ADD COLUMN message TEXT'); } catch { /* 已存在则忽略 */ }
 
 -- 候选商品：ML 竞品 + 1688 货源 + 利润测算 + 五维评分 + 审核状态
 CREATE TABLE IF NOT EXISTS candidates (
@@ -484,6 +488,7 @@ export function updateSourcingRun(
     total_scored?: number;
     total_approved?: number;
     total_rejected?: number;
+    message?: string;
     error?: string;
   }
 ): void {
@@ -503,6 +508,11 @@ export function updateSourcingRun(
 export function getSourcingRun(id: string): any {
   if (!db) return null;
   return db.prepare('SELECT * FROM sourcing_runs WHERE id = ?').get(id);
+}
+
+export function getLatestSourcingRun(): any {
+  if (!db) return null;
+  return db.prepare('SELECT * FROM sourcing_runs ORDER BY started_at DESC LIMIT 1').get();
 }
 
 export function insertCandidate(data: any): number {

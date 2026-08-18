@@ -17,6 +17,7 @@ import {
   getCandidateById,
   updateCandidateStatus,
   getSourcingRun,
+  getLatestSourcingRun,
   createPublishJob,
 } from './db.js';
 import { getAllStores } from './stores.js';
@@ -2144,6 +2145,13 @@ app.post('/api/ml/sourcing/run', async (req, res) => {
 app.get('/api/ml/sourcing/runs/:id', async (req, res) => {
   const run = getSourcingRun(req.params.id);
   if (!run) return res.status(404).json({ success: false, message: '运行记录不存在' });
+  res.json({ success: true, run });
+});
+
+// 查询最近一次运行状态（供前端进度面板轮询）
+app.get('/api/ml/sourcing/runs/latest', async (req, res) => {
+  const run = getLatestSourcingRun();
+  if (!run) return res.json({ success: true, run: null });
   res.json({ success: true, run });
 });
 
