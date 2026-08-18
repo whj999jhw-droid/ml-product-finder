@@ -218,16 +218,24 @@ export async function scanNewRisingProducts(
           const fromHighlights = res.fromHighlights;
           totalScanned += results.length;
           report(`[${site}/${cat.name}] 获取 ${results.length} 个结果${fromHighlights ? '（highlights 兜底）' : ''}`, { totalScanned });
+          // 统计本分类被过滤原因，便于调试 highlights 数据
+          const reasons: Record<string, number> = {};
           for (const item of results) {
             const c = normalizeItem(site, item, cat.name, rates);
-            if (!c) continue;
+            if (!c) { reasons['normalize_null'] = (reasons['normalize_null'] || 0) + 1; continue; }
             // highlights 兜底的货源是「长期热门」，没有「近30天新品」概念，
-            // 放宽时间与日均销量门槛，仅保留：有销量、价格区间、全新，避免被时间过滤全清掉
+            // 且 /products/{id}/items 返回的 item 常缺少 sold_quantity/condition，
+            // 因此放宽过滤：价格>0、能上 Best Sellers 默认有销量、condition 为空默认可通过
             if (item._fromHighlights) {
-              if (c.soldQuantity < minSold) continue;
-              if (c.priceUsd < minPriceUsd || c.priceUsd > maxPriceUsd) continue;
-              if (c.condition && c.condition !== 'new') continue;
-              all.push(c);
+              const effSold = c.soldQuantity > 0 ? c.soldQuantity : 1; // Best Sellers 默认有销量
+              const effCondition = c.condition || 'new';
+              if (effSold < minSold) { reasons['sold'] = (reasons['sold'] || 0) + 1; continue; }
+              if (c.priceUsd <= 0) { reasons['price_zero'] = (reasons['price_zero'] || 0) + 1; continue; }
+              if (c.priceUsd < minPriceUsd || c.priceUsd > maxPriceUsd) { reasons['price_range'] = (reasons['price_range'] || 0) + 1; continue; }
+              if (effCondition !== 'new') { reasons['condition'] = (reasons['condition'] || 0) + 1; continue; }
+              // 修正日均销量，避免 daysListed 过大导致 dailySales 极低
+              const corrected = { ...c, soldQuantity: effSold, condition: effCondition, dailySales: effSold / Math.max(1, c.daysListed) };
+              all.push(corrected);
               continue;
             }
             // 过滤：近 N 天、有销量、价格区间
@@ -238,6 +246,9 @@ export async function scanNewRisingProducts(
             // 仅 new（避免二手/翻新品）
             if (c.condition && c.condition !== 'new') continue;
             all.push(c);
+          }
+          if (Object.keys(reasons).length) {
+            console.log(`[SourcingScanner] [${site}/${cat.name}] 过滤原因统计:`, reasons);
           }
         } catch (err: any) {
           const msg = `[${site}/${cat.id}] ${err?.message || String(err)}`.slice(0, 200);
@@ -259,7 +270,10 @@ export async function scanNewRisingProducts(
 
     // 按日均销量降序
     unique.sort((a, b) => b.dailySales - a.dailySales);
-    report(`扫描完成：${totalScanned} 个商品，${unique.length} 个通过过滤`);
+    report(`扫描完成：${totalScanned} 个商品，${unique.length} 个通过过滤`, {
+      totalScanned,
+      totalMatched: unique.length,
+    });
     return { candidates: unique, totalScanned, errors, scanToken: scanToken || undefined };
   };
 

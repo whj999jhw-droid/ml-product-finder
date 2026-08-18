@@ -1491,7 +1491,7 @@ export async function searchWithHighlightsFallback(
     const baseDelay = 300;
     for (let i = 0; i < productIds.length; i++) {
       try {
-        const productItems = await fetchProductItems(productIds[i], 5);
+        const productItems = await fetchProductItems(productIds[i], 5, accessTokenOverride);
         for (const it of productItems) {
           // highlights 货源缺上架时间则近似为近 7 天（热门≈近期热销），避免被时间过滤清掉
           if (!it.start_time && !it.date_created) {
