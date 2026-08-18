@@ -230,8 +230,9 @@ export async function scanNewRisingProducts(
               const effSold = c.soldQuantity > 0 ? c.soldQuantity : 1; // Best Sellers 默认有销量
               const effCondition = c.condition || 'new';
               if (effSold < minSold) { reasons['sold'] = (reasons['sold'] || 0) + 1; continue; }
+              // highlights 是官方 Best Sellers，价格分布广；仅排除价格未转换成功或明显离谱的商品
               if (c.priceUsd <= 0) { reasons['price_zero'] = (reasons['price_zero'] || 0) + 1; continue; }
-              if (c.priceUsd < minPriceUsd || c.priceUsd > maxPriceUsd) { reasons['price_range'] = (reasons['price_range'] || 0) + 1; continue; }
+              if (c.priceUsd < 1 || c.priceUsd > 200) { reasons['price_range'] = (reasons['price_range'] || 0) + 1; continue; }
               if (effCondition !== 'new') { reasons['condition'] = (reasons['condition'] || 0) + 1; continue; }
               // 修正日均销量，避免 daysListed 过大导致 dailySales 极低
               const corrected = { ...c, soldQuantity: effSold, condition: effCondition, dailySales: effSold / Math.max(1, c.daysListed) };
