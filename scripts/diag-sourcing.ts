@@ -60,9 +60,26 @@ async function main() {
   console.log('[DIAG] 1688 config:', JSON.stringify(cfg));
   if (first?.title) {
     const q = String(first.title).slice(0, 40);
-    const r = await search1688ByQuery(q);
+    console.log('[DIAG] 1688 原始标题:', first.title);
     console.log('[DIAG] 1688 搜索词:', q);
+    const r = await search1688ByQuery(q);
     console.log('[DIAG] 1688 success =', r.success, '| message =', String(r.message || '').slice(0, 300), '| products =', r.products?.length);
+    if (r.raw) {
+      console.log('[DIAG] 1688 raw:', JSON.stringify(r.raw).slice(0, 1000));
+    }
+    if (r.products?.length) {
+      console.log('[DIAG] 1688 第一个结果:', JSON.stringify(r.products[0], null, 2).slice(0, 800));
+    }
+    // 同时用第二个、第三个标题再测一次
+    for (let i = 1; i < Math.min(3, res.items.length); i++) {
+      const alt = res.items[i];
+      const altTitle = alt.title || alt.name || alt.family_name;
+      if (altTitle) {
+        console.log(`\n[DIAG] 1688 额外测试 #${i + 1} 搜索词:`, String(altTitle).slice(0, 40));
+        const r2 = await search1688ByQuery(String(altTitle).slice(0, 40));
+        console.log('[DIAG] 1688 success =', r2.success, '| message =', String(r2.message || '').slice(0, 300), '| products =', r2.products?.length);
+      }
+    }
   }
 }
 

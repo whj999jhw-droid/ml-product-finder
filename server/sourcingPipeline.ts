@@ -182,7 +182,12 @@ async function processOneCandidate(
 
   // 2.2 1688 找货源（用简化标题，去掉站点无关词）
   const searchQuery = build1688SearchQuery(enriched.title);
+  console.log(`[SourcingPipeline] 候选 ${raw.itemId} 1688 搜索词: "${searchQuery}"`);
   const searchResult = await search1688ByQuery(searchQuery);
+  console.log(`[SourcingPipeline] 候选 ${raw.itemId} 1688 搜索结果: success=${searchResult.success}, message=${searchResult.message}, products=${searchResult.products.length}`);
+  if (searchResult.raw) {
+    console.log(`[SourcingPipeline] 候选 ${raw.itemId} 1688 搜索 raw:`, JSON.stringify(searchResult.raw).slice(0, 500));
+  }
   if (!searchResult.success || searchResult.products.length === 0) {
     return { result: null, reason: '1688无货源' };
   }

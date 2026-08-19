@@ -178,7 +178,8 @@ export async function search1688ByQuery(query: string): Promise<Ali1688SearchRes
     };
   } catch (err: any) {
     const msg = err?.message || String(err);
-    console.error('[Ali1688Skill] search 失败:', msg);
+    const stderr = err?.stderr ? String(err.stderr).slice(0, 400) : '';
+    console.error('[Ali1688Skill] search 失败:', msg, stderr ? `stderr=${stderr}` : '');
     return { success: false, message: msg, products: [] };
   }
 }
