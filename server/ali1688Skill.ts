@@ -94,6 +94,8 @@ function getAkFromConfig(): string | undefined {
 function getPythonCandidates(): string[] {
   const list = [
     process.env.ML_PYTHON_PATH,
+    // 优先使用 skill 自带虚拟环境，避免 Ubuntu 系统 pip 被 PEP 668 限制
+    path.join(SKILL_DIR, '.venv', 'bin', 'python'),
     process.platform === 'win32' ? 'python' : 'python3',
     'python3',
     'python',
