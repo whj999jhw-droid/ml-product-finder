@@ -7,6 +7,10 @@ import { searchWithHighlightsFallback, fetchItemDetails, fetchProductItems } fro
 import { check1688Config, search1688ByQuery } from '../server/ali1688Skill.js';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 async function main() {
   // 1. 读取店铺 token（与应用 stores.ts 同一来源）
