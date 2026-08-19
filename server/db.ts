@@ -149,18 +149,6 @@ CREATE TABLE IF NOT EXISTS sourcing_runs (
   error TEXT
 );
 
--- 兼容老数据库：补充 sourcing_runs.message 字段（旧表可能早于该列创建）
-try {
-  db.exec('ALTER TABLE sourcing_runs ADD COLUMN message TEXT');
-  console.log('[DB] sourcing_runs.message 列已添加');
-} catch (e: any) {
-  const msg = e?.message || String(e);
-  // 列已存在不是错误；其它异常才打印
-  if (!/duplicate column name|already exists|已存在/i.test(msg)) {
-    console.warn('[DB] 补加 sourcing_runs.message 列失败:', msg);
-  }
-}
-
 -- 候选商品：ML 竞品 + 1688 货源 + 利润测算 + 五维评分 + 审核状态
 CREATE TABLE IF NOT EXISTS candidates (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -238,6 +226,16 @@ CREATE TABLE IF NOT EXISTS publish_jobs (
 CREATE INDEX IF NOT EXISTS idx_publish_jobs_candidate ON publish_jobs(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_publish_jobs_status ON publish_jobs(status);
 `);
+    // 兼容旧数据库：若 sourcing_runs 表缺少 message 列则补加
+    try {
+      const cols = db.prepare("PRAGMA table_info(sourcing_runs)").all() as { name: string }[];
+      if (cols.length && !cols.find((c) => c.name === 'message')) {
+        db.exec("ALTER TABLE sourcing_runs ADD COLUMN message TEXT");
+        console.log('[DB] sourcing_runs.message 列已添加');
+      }
+    } catch (e: any) {
+      console.warn('[DB] 检查/补加 sourcing_runs.message 列失败:', e?.message || String(e));
+    }
     // 兼容旧数据库：若 orders 表缺少 handling_deadline 列则补加
     try {
       const cols = db.prepare("PRAGMA table_info(orders)").all() as { name: string }[];
