@@ -102,6 +102,9 @@ function getPythonCandidates(): string[] {
 }
 
 async function runCli(args: string[], timeoutMs = 60000): Promise<{ stdout: string; stderr: string }> {
+  if (!fs.existsSync(CLI_PATH)) {
+    throw new Error(`1688-shopkeeper CLI 未安装：找不到 ${CLI_PATH}。请先在服务器安装该 skill（路径 ~/.workbuddy/skills/1688-shopkeeper-bak__skillhub）。`);
+  }
   const candidates = getPythonCandidates();
   let lastErr: any;
   for (const python of candidates) {
@@ -215,9 +218,12 @@ export async function get1688ProductDetail(itemIds: string | string[]): Promise<
  * 优先读本地配置文件；读不到再尝试 CLI check。
  */
 export async function check1688Config(): Promise<{ ok: boolean; message: string }> {
+  if (!fs.existsSync(CLI_PATH)) {
+    return { ok: false, message: `1688-shopkeeper CLI 未安装：找不到 ${CLI_PATH}。请先在服务器安装该 skill。` };
+  }
   const ak = getAkFromConfig();
-  if (ak && ak.length >= 8) {
-    return { ok: true, message: `AK 已配置（${getOpenClawConfigPath()}）` };
+  if (!ak || ak.length < 8) {
+    return { ok: false, message: `AK 未配置（${getOpenClawConfigPath()}）` };
   }
   try {
     const { stdout } = await runCli(['check'], 30000);

@@ -189,7 +189,10 @@ async function processOneCandidate(
     console.log(`[SourcingPipeline] 候选 ${raw.itemId} 1688 搜索 raw:`, JSON.stringify(searchResult.raw).slice(0, 500));
   }
   if (!searchResult.success || searchResult.products.length === 0) {
-    return { result: null, reason: '1688无货源' };
+    const reason = searchResult.message?.includes('CLI 未安装')
+      ? searchResult.message.slice(0, 80)
+      : '1688无货源';
+    return { result: null, reason };
   }
 
   // 取 cheapest + 有销量的货源
