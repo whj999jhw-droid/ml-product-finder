@@ -129,7 +129,13 @@ async function runCli(args: string[], timeoutMs = 60000): Promise<{ stdout: stri
 
 function parseJson(stdout: string): any {
   const text = stdout.trim();
-  // 取最后一行 JSON（前面可能有日志）
+  // cli.py check 输出美化后的多行 JSON，先整体解析
+  try {
+    return JSON.parse(text);
+  } catch {
+    /* continue */
+  }
+  // 整体失败时，取最后一行 JSON（前面可能有日志）
   const lines = text.split(/\r?\n/).filter((l) => l.trim());
   for (let i = lines.length - 1; i >= 0; i--) {
     try {
