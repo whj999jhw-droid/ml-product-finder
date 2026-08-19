@@ -181,8 +181,8 @@ function normalizeItem(site: string, item: any, categoryName: string, rates: Rec
   const sold = typeof item.sold_quantity === 'number' ? item.sold_quantity : parseInt(String(item.sold_quantity || '0'), 10) || 0;
   return {
     site,
-    itemId: String(item.id || ''),
-    title: String(item.title || ''),
+    itemId: String(item.id || item.item_id || ''),
+    title: String(item.title || item.name || item.family_name || ''),
     priceUsd,
     currency,
     soldQuantity: sold,

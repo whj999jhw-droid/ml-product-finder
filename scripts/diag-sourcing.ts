@@ -32,20 +32,22 @@ async function main() {
   console.log('[DIAG] fromHighlights =', res.fromHighlights, '| items 数量 =', res.items.length);
   for (const it of res.items) {
     const priceKeys = Object.keys(it).filter((k) => /price/i.test(k));
+    const idVal = it.id || it.item_id;
     console.log(
-      `[DIAG] itemId=${it.id} | price=${it.price} | priceUsd字段=${it.priceUsd} | price相关键=[${priceKeys.join(',')}] | sold=${it.sold_quantity} | condition=${it.condition} | _fromHighlights=${it._fromHighlights}`
+      `[DIAG] itemId=${idVal} | price=${it.price} | priceUsd字段=${it.priceUsd} | price相关键=[${priceKeys.join(',')}] | sold=${it.sold_quantity} | condition=${it.condition} | _fromHighlights=${it._fromHighlights}`
     );
   }
 
   // 3. 第一个商品深挖：it / /items/{id} / /products/{id}/items 三者原始结构
   const first = res.items[0];
-  if (first?.id) {
+  const firstId = first?.id || first?.item_id;
+  if (firstId) {
     console.log('\n=== 3) 第一个商品 it（来自 /products/{id}/items）原始结构 ===');
     console.log(JSON.stringify(first, null, 2).slice(0, 2500));
-    const detail = await fetchItemDetails(String(first.id), token);
+    const detail = await fetchItemDetails(String(firstId), token);
     console.log('\n=== 3b) /items/{id} 详情（detail）原始结构 ===');
     console.log(JSON.stringify(detail, null, 2).slice(0, 2500));
-    const pitems = await fetchProductItems(String(first.id), 5, token);
+    const pitems = await fetchProductItems(String(firstId), 5, token);
     console.log('\n=== 3c) /products/{id}/items 原始结构（前 1 条） ===');
     console.log(JSON.stringify(pitems.slice(0, 1), null, 2).slice(0, 2500));
   } else {

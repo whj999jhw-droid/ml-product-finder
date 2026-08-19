@@ -1493,6 +1493,12 @@ export async function searchWithHighlightsFallback(
       try {
         const productItems = await fetchProductItems(productIds[i], 5, accessTokenOverride);
         for (const it of productItems) {
+          // /products/{id}/items 返回的 item 字段名与 /search results 不完全一致：
+          // 常见有 item_id 无 id、name 无 title、无 sold_quantity 等。先做同构映射。
+          if (!it.id && it.item_id) it.id = it.item_id;
+          if (!it.title && it.name) it.title = it.name;
+          if (!it.title && it.family_name) it.title = it.family_name;
+          if (!it.sold_quantity && it.sold_quantity === undefined && it.sold) it.sold_quantity = it.sold;
           // highlights 货源缺上架时间则近似为近 7 天（热门≈近期热销），避免被时间过滤清掉
           if (!it.start_time && !it.date_created) {
             it.start_time = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
