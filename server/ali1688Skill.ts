@@ -144,8 +144,17 @@ export async function search1688ByQuery(query: string): Promise<Ali1688SearchRes
   if (!query?.trim()) {
     return { success: false, message: '搜索词为空', products: [] };
   }
+  const ak = getAkFromConfig();
+  if (!ak || ak.length < 8) {
+    const msg = 'ALI_1688_AK 未配置，无法搜索 1688（请在页面「配置 1688 AK」或设置环境变量 ALI_1688_AK）';
+    console.error('[Ali1688Skill] search 失败:', msg);
+    return { success: false, message: msg, products: [] };
+  }
   try {
-    const { stdout } = await runCli(['search', '--query', query.trim(), '--channel', '']);
+    const { stdout, stderr } = await runCli(['search', '--query', query.trim(), '--channel', '']);
+    if (stderr) {
+      console.warn('[Ali1688Skill] search stderr:', stderr.slice(0, 400));
+    }
     const json = parseJson(stdout);
     const products = (json.data?.products || []).map((p: any) => ({
       id: String(p.id || ''),
@@ -155,8 +164,13 @@ export async function search1688ByQuery(query: string): Promise<Ali1688SearchRes
       imageUrl: p.imageUrl ? String(p.imageUrl) : undefined,
       stats: p.stats || undefined,
     }));
+    if (json.success !== true) {
+      const msg = json.markdown || json.message || '1688 搜索返回失败状态';
+      console.error('[Ali1688Skill] search 失败:', msg, 'raw=', JSON.stringify(json).slice(0, 300));
+      return { success: false, message: msg, products, raw: json };
+    }
     return {
-      success: json.success === true,
+      success: true,
       message: json.markdown || json.message || '',
       dataId: json.data?.data_id,
       products,

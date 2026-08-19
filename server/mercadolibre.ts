@@ -1499,7 +1499,19 @@ export async function searchWithHighlightsFallback(
           }
           // 补上 category_id，否则 normalizeItem 无法识别分类
           if (!it.category_id) it.category_id = categoryId;
-          items.push({ ...it, _fromHighlights: true });
+          // /products/{id}/items 返回的 item 经常缺失 price 等字段，用 /items/{id} 补充
+          let enriched = it;
+          if (it.id && (it.price === undefined || it.price === null || it.price === '')) {
+            try {
+              const detail = await fetchItemDetails(String(it.id), accessTokenOverride);
+              if (detail) {
+                enriched = { ...detail, ...it, _fromHighlights: true };
+              }
+            } catch {
+              /* 补充失败仍保留原 item */
+            }
+          }
+          items.push({ ...enriched, _fromHighlights: true });
         }
       } catch {
         /* 单个 product 失败忽略 */
@@ -1510,6 +1522,21 @@ export async function searchWithHighlightsFallback(
   } catch (e: any) {
     console.warn(`[ML Search] highlights 兜底失败 (${categoryId}): ${e?.message?.slice(0, 80)}`);
     return { items: [], fromHighlights: true };
+  }
+}
+
+/**
+ * 通过 /items/{id} 公开端点获取 marketplace item 详情（含价格、卖家、物流等）。
+ * /products/{id}/items 返回的 item 常常缺失 price 字段，用此端点补充。
+ */
+export async function fetchItemDetails(itemId: string, accessTokenOverride?: string): Promise<any | null> {
+  if (!itemId) return null;
+  const authH = accessTokenOverride ? { Authorization: `Bearer ${accessTokenOverride}` } : {};
+  try {
+    return await httpsGet(`${getApiBase()}/items/${itemId}`, authH);
+  } catch (err: any) {
+    console.warn(`[ML Items] 获取 item 详情失败 ${itemId}: ${err?.message?.slice(0, 80)}`);
+    return null;
   }
 }
 
