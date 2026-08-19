@@ -112,7 +112,12 @@ async function runCli(args: string[], timeoutMs = 60000): Promise<{ stdout: stri
   for (const python of candidates) {
     console.log(`[Ali1688Skill] try ${python} ${CLI_PATH} ${args.join(' ')}`);
     try {
-      return await execFileAsync(python, [CLI_PATH, ...args], { cwd: SKILL_DIR, timeout: timeoutMs });
+      return await execFileAsync(python, [CLI_PATH, ...args], {
+        cwd: SKILL_DIR,
+        timeout: timeoutMs,
+        // stdin 设为 ignore，避免 Python CLI 在非 TTY 环境下阻塞等待输入
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
     } catch (err: any) {
       if (err.code === 'ENOENT' || (err.message && /ENOENT/.test(err.message))) {
         lastErr = err;
