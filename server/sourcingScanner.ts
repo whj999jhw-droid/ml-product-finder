@@ -135,10 +135,29 @@ function parseDate(d: any): Date | null {
   return isNaN(dt.getTime()) ? null : dt;
 }
 
+function extractPriceLocal(item: any): { price: number; currency: string } {
+  // /products/{id}/items 返回的 price 字段位置不固定，尝试多个常见路径
+  const candidates = [
+    [item.price, item.currency_id || item.currency],
+    [item.sale_price?.amount, item.sale_price?.currency_id || item.currency_id || item.currency],
+    [item.buy_box_winner?.price?.amount, item.buy_box_winner?.price?.currency_id || item.currency_id || item.currency],
+    [item.buy_box_winner?.sale_price?.amount, item.buy_box_winner?.sale_price?.currency_id || item.currency_id || item.currency],
+    [item.prices?.prices?.[0]?.amount, item.prices?.prices?.[0]?.currency_id || item.currency_id || item.currency],
+    [item.prices?.purchase_price?.amount, item.prices?.purchase_price?.currency_id || item.currency_id || item.currency],
+    [item.official_store_price?.amount, item.official_store_price?.currency_id || item.currency_id || item.currency],
+  ];
+  for (const [p, c] of candidates) {
+    const parsed = typeof p === 'number' ? p : parseFloat(String(p || '').replace(/[^0-9.]/g, ''));
+    if (parsed && parsed > 0) {
+      return { price: parsed, currency: String(c || '') };
+    }
+  }
+  return { price: 0, currency: '' };
+}
+
 function normalizeItem(site: string, item: any, categoryName: string, rates: Record<string, number>): RawCandidate | null {
-  // /products/{id}/items 返回的 price 可能是字符串，做健壮解析
-  const priceLocal = typeof item.price === 'number' ? item.price : parseFloat(String(item.price || '').replace(/[^0-9.]/g, '')) || 0;
-  const currency = item.currency_id || item.currency || (site === 'MLM' ? 'MXN' : site === 'MLB' ? 'BRL' : site === 'MLC' ? 'CLP' : 'COP');
+  const { price: priceLocal, currency: extractedCurrency } = extractPriceLocal(item);
+  const currency = extractedCurrency || item.currency_id || item.currency || (site === 'MLM' ? 'MXN' : site === 'MLB' ? 'BRL' : site === 'MLC' ? 'CLP' : 'COP');
   const priceUsd = toUsd(priceLocal, currency, rates);
   const listingDate = parseDate(item.start_time || item.date_created);
   if (!listingDate) return null;

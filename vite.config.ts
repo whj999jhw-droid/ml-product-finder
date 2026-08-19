@@ -41,9 +41,10 @@ export default defineConfig({
     // Electron 兼容
     rollupOptions: {
       output: {
-        entryFileNames: 'assets/[name].js',
-        chunkFileNames: 'assets/[name].js',
-        assetFileNames: 'assets/[name].[ext]',
+        // 带 hash 文件名，避免浏览器/CDN 长期缓存旧 bundle，导致前端轮询逻辑不更新
+        entryFileNames: 'assets/[name]-[hash].js',
+        chunkFileNames: 'assets/[name]-[hash].js',
+        assetFileNames: 'assets/[name]-[hash].[ext]',
       }
     }
   }
