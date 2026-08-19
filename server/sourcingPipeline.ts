@@ -104,6 +104,7 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
     let totalScored = 0;
     let totalApproved = 0;
     let totalRejected = 0;
+    const rejectReasons: Record<string, number> = {};
 
     // 2) 逐个查 1688 + 利润 + 评分 + 入库
     const totalToProcess = Math.min(rawCandidates.length, maxCandidatesToSource);
@@ -116,12 +117,14 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
         total_rejected: totalRejected,
       });
       try {
-        const result = await processOneCandidate(runId, raw, targetNetRate, minScore, scanToken);
+        const { result, reason } = await processOneCandidate(runId, raw, targetNetRate, minScore, scanToken);
         totalScored++;
         if (result) {
           totalApproved++;
         } else {
           totalRejected++;
+          rejectReasons[reason] = (rejectReasons[reason] || 0) + 1;
+          console.log(`[SourcingPipeline] 候选 ${raw.itemId} 未通过: ${reason}`);
         }
       } catch (err: any) {
         const msg = `处理候选 ${raw.itemId} 失败: ${err?.message || String(err)}`.slice(0, 200);
@@ -132,13 +135,17 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
       await sleep(800);
     }
 
+    const rejectSummary = Object.entries(rejectReasons)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${k}:${v}`)
+      .join(', ');
     updateSourcingRun(runId, {
       status: 'done',
       finished_at: new Date().toISOString(),
       total_scored: totalScored,
       total_approved: totalApproved,
       total_rejected: totalRejected,
-      message: `选品完成：扫描 ${scan.totalScanned} 个，入库 ${totalApproved} 个`,
+      message: `选品完成：扫描 ${scan.totalScanned} 个，入库 ${totalApproved} 个${rejectSummary ? `，淘汰原因 [${rejectSummary}]` : ''}`,
       error: errors.length ? errors.join('; ') : null,
     });
 
@@ -169,7 +176,7 @@ async function processOneCandidate(
   targetNetRate: number,
   minScore: number,
   scanToken?: string
-): Promise<SourcedCandidate | null> {
+): Promise<{ result: SourcedCandidate | null; reason: string }> {
   // 2.1 补充详情（重量/尺寸/图片）
   const enriched = await enrichCandidate(raw, scanToken);
 
@@ -177,12 +184,12 @@ async function processOneCandidate(
   const searchQuery = build1688SearchQuery(enriched.title);
   const searchResult = await search1688ByQuery(searchQuery);
   if (!searchResult.success || searchResult.products.length === 0) {
-    return null; // 无货源，直接丢弃
+    return { result: null, reason: '1688无货源' };
   }
 
   // 取 cheapest + 有销量的货源
   const source = pickBestSource(searchResult.products);
-  if (!source) return null;
+  if (!source) return { result: null, reason: '1688货源筛选失败' };
 
   // 2.3 利润测算：按目标净利率反推建议售价
   const suggestedPrice = await reverseEngineerPrice({
@@ -216,7 +223,7 @@ async function processOneCandidate(
   // 2.4 五维评分
   const score = scoreCandidate({ candidate: enriched, source, profit });
   if (!isScorePass(score) || score.total < minScore) {
-    return null;
+    return { result: null, reason: `评分未通过(total=${score.total}, profit=${score.profit}, compliance=${score.compliance})` };
   }
 
   // 2.5 入库
@@ -262,15 +269,18 @@ async function processOneCandidate(
     status: 'pending',
   });
 
-  if (!dbId) return null;
+  if (!dbId) return { result: null, reason: '数据库写入失败' };
 
   return {
-    candidate: enriched,
-    source,
-    profit,
-    score,
-    suggestedPriceUsd: listingPrice,
-    dbId,
+    result: {
+      candidate: enriched,
+      source,
+      profit,
+      score,
+      suggestedPriceUsd: listingPrice,
+      dbId,
+    },
+    reason: '通过',
   };
 }
 

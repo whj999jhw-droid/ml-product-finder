@@ -145,6 +145,12 @@ function extractPriceLocal(item: any): { price: number; currency: string } {
     [item.prices?.prices?.[0]?.amount, item.prices?.prices?.[0]?.currency_id || item.currency_id || item.currency],
     [item.prices?.purchase_price?.amount, item.prices?.purchase_price?.currency_id || item.currency_id || item.currency],
     [item.official_store_price?.amount, item.official_store_price?.currency_id || item.currency_id || item.currency],
+    [item.variations?.[0]?.price, item.variations?.[0]?.currency_id || item.currency_id || item.currency],
+    [item.variations?.[0]?.sale_price?.amount, item.variations?.[0]?.sale_price?.currency_id || item.currency_id || item.currency],
+    [item.price_range?.min?.amount ?? item.price_range?.min, item.price_range?.min?.currency_id || item.currency_id || item.currency],
+    [item.price_range?.max?.amount ?? item.price_range?.max, item.price_range?.max?.currency_id || item.currency_id || item.currency],
+    [item.base_price, item.currency_id || item.currency],
+    [item.original_price, item.currency_id || item.currency],
   ];
   for (const [p, c] of candidates) {
     const parsed = typeof p === 'number' ? p : parseFloat(String(p || '').replace(/[^0-9.]/g, ''));
@@ -153,6 +159,16 @@ function extractPriceLocal(item: any): { price: number; currency: string } {
     }
   }
   return { price: 0, currency: '' };
+}
+
+function logPriceDebug(item: any, site: string, categoryName: string) {
+  const fields = Object.keys(item).filter(k => /price|currency|amount|sale|winner|variation/i.test(k));
+  const snippet = JSON.stringify(item, (k, v) => {
+    if (typeof v === 'object' && v !== null && !Array.isArray(v)) return v;
+    if (Array.isArray(v)) return `[array:${v.length}]`;
+    return v;
+  }, 0).slice(0, 500);
+  console.warn(`[SourcingScanner] [${site}/${categoryName}] 价格解析失败 itemId=${item.id} title=${String(item.title || '').slice(0, 40)} 字段=[${fields.join(',')}] snippet=${snippet}`);
 }
 
 function normalizeItem(site: string, item: any, categoryName: string, rates: Record<string, number>): RawCandidate | null {
@@ -250,7 +266,11 @@ export async function scanNewRisingProducts(
               // highlights 是官方 Best Sellers，/products/{id}/items 返回的 item
               // 常缺少 sold_quantity/condition，且价格分布广。这里只排除价格未转换成功的商品，
               // 让后端 1688 匹配 + 五维评分去淘汰，避免扫描阶段把候选全部刷掉。
-              if (c.priceUsd <= 0) { reasons['price_zero'] = (reasons['price_zero'] || 0) + 1; continue; }
+              if (c.priceUsd <= 0) {
+                reasons['price_zero'] = (reasons['price_zero'] || 0) + 1;
+                logPriceDebug(item, site, cat.name);
+                continue;
+              }
               const effSold = c.soldQuantity > 0 ? c.soldQuantity : 1;
               const effCondition = c.condition || 'new';
               const corrected = { ...c, soldQuantity: effSold, condition: effCondition, dailySales: effSold / Math.max(1, c.daysListed) };
