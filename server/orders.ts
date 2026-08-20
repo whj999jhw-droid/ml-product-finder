@@ -126,22 +126,30 @@ function setCache<T>(map: Map<string, { at: number; data: T }>, key: string, dat
 /** 为 CBT 订单查询每个子订单的真实物流状态（子订单 shipping.status 本身为空） */
 async function fetchMarketplaceShipmentStatuses(store: Store, orders: any[]): Promise<Map<string, string>> {
   const isCbt = (store.site || '').toUpperCase() === 'CBT';
+  console.log(`[Orders] fetchMarketplaceShipmentStatuses site=${store.site} isCbt=${isCbt} orders=${orders.length}`);
   if (!isCbt) return new Map();
   const map = new Map<string, string>();
   const withShip = orders.filter((o) => o.shipping?.id);
+  console.log(`[Orders] withShip=${withShip.length}/${orders.length}`);
   await mapLimit(withShip, 5, async (o: any) => {
     try {
       const shipId = String(o.shipping.id);
+      const orderId = String(o.id);
       const cached = getCache(shipCache, shipId);
+      console.log(`[Orders] shipment orderId=${orderId} shipId=${shipId} cached=${cached ? 'yes' : 'no'}`);
       // CBT shipments 端点需要 x-format-new=true 才能拿到 status，
       // 否则可能返回 404 或不包含 status，导致已发货订单被误判为未发货。
       const ship = cached || (await storeApiGet(store, `/marketplace/shipments/${shipId}`, 3, { 'x-format-new': 'true' }));
       if (!cached) setCache(shipCache, shipId, ship);
-      if (ship?.status) map.set(String(o.id), String(ship.status));
+      const status = ship?.status;
+      const keys = Object.keys(ship || {});
+      console.log(`[Orders] shipment orderId=${orderId} status=${JSON.stringify(status)} shipKeys=[${keys.join(',')}] substatus=${JSON.stringify(ship?.substatus)}`);
+      if (status) map.set(orderId, String(status));
     } catch (e: any) {
       console.warn(`[Orders] CBT 物流状态获取失败 ${o.id}:`, e?.message || e);
     }
   });
+  console.log(`[Orders] fetchMarketplaceShipmentStatuses done mapSize=${map.size}`);
   return map;
 }
 
@@ -436,6 +444,7 @@ export async function fetchAllOrdersForStore(store: Store): Promise<{
       for (const o of children) {
         const shipStatus = shipStatusMap.get(String(o.id));
         const category = classifyOrder(o, shipStatus);
+        console.log(`[Orders] classify orderId=${o.id} orderStatus=${o.status} shippingStatus=${o.shipping?.status} externalShipStatus=${shipStatus} -> category=${category}`);
         const fd = deadlineMap.get(String(o.id));
         const enriched = attachFulfillmentDeadline({ ...o, site: store.site }, fd);
         byId.set(String(o.id), {
@@ -524,9 +533,11 @@ export async function fetchRecentOrdersSince(store: Store, sinceMs: number): Pro
       for (const o of children) {
         if (new Date(o.date_created).getTime() > sinceMs) {
           const shipStatus = shipStatusMap.get(String(o.id));
+          const category = classifyOrder(o, shipStatus);
+          console.log(`[Orders] sync classify orderId=${o.id} orderStatus=${o.status} shippingStatus=${o.shipping?.status} externalShipStatus=${shipStatus} -> category=${category}`);
           const fd = deadlineMap.get(String(o.id));
           const enriched = attachFulfillmentDeadline({ ...o, site: store.site }, fd);
-          byId.set(String(o.id), { ...enriched, mlStatus: classifyOrder(o, shipStatus), orderStatus: o.status, shipStatus });
+          byId.set(String(o.id), { ...enriched, mlStatus: category, orderStatus: o.status, shipStatus });
         }
       }
       if (parents.length < 50) break;
