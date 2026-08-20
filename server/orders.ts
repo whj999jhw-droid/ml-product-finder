@@ -153,6 +153,53 @@ async function fetchMarketplaceShipmentStatuses(store: Store, orders: any[]): Pr
   return map;
 }
 
+/**
+ * 强制刷新 DB 缓存订单的真实物流状态（主要用于 CBT 列表状态修正）。
+ * - sync 完成后调用，确保列表状态与 /marketplace/shipments 实时一致。
+ * - 仅对 CBT 店铺、有 shipping.id、且非 cancelled 的订单查 shipments。
+ * - 以内查结果为准覆盖 mlStatus/shipStatus，并重新计算履约截止时间。
+ */
+export async function refreshCachedOrderShipmentStatuses(
+  store: Store
+): Promise<{ checked: number; changed: number }> {
+  const isCbt = (store.site || '').toUpperCase() === 'CBT';
+  if (!isCbt) return { checked: 0, changed: 0 };
+
+  const { orders } = getCachedOrders(store.id);
+  // 已取消的不会再变化，不需要浪费 API；已发货/未发货都可能与内查不一致，统一刷新
+  const toCheck = orders.filter((o: any) => o.shipping?.id && o.mlStatus !== 'cancelled');
+  console.log(
+    `[Orders] refreshCachedOrderShipmentStatuses store=${store.id} total=${orders.length} toCheck=${toCheck.length}`
+  );
+  if (toCheck.length === 0) return { checked: 0, changed: 0 };
+
+  const shipStatusMap = await fetchMarketplaceShipmentStatuses(store, toCheck);
+  let changed = 0;
+  const updated = orders.map((o: any) => {
+    const orderId = String(o.id);
+    const shipStatus = shipStatusMap.get(orderId);
+    if (shipStatus === undefined) return o; // 内查无结果，保持原样避免误判
+
+    const prevMlStatus = o.mlStatus;
+    const newO: any = { ...o, shipStatus };
+    // 同步更新 shipping.status，让 classifyOrder/attachFulfillmentDeadline 读到最新值
+    if (!newO.shipping) newO.shipping = {};
+    newO.shipping = { ...newO.shipping, status: shipStatus };
+    newO.mlStatus = classifyOrder(newO, shipStatus);
+
+    if (newO.mlStatus === prevMlStatus && shipStatus === o.shipStatus) return o; // 无变化
+
+    changed++;
+    return attachFulfillmentDeadline(newO);
+  });
+
+  if (changed > 0) {
+    upsertOrders(store.id, store.site, updated, 'manual');
+  }
+  console.log(`[Orders] refreshCachedOrderShipmentStatuses done checked=${toCheck.length} changed=${changed}`);
+  return { checked: toCheck.length, changed };
+}
+
 /** 批量为订单取物流详情并计算履约截止时间（仅针对未发货订单，避免浪费 API） */
 /**
  * 计算各未发货订单的履约截止时间（按「72 营业小时 + 跳过周末/节假日」规则）。
@@ -588,7 +635,7 @@ export async function fetchRecentOrdersSince(store: Store, sinceMs: number): Pro
 export async function syncStoreOrders(
   store: Store,
   sourceOverride?: 'manual' | 'sync'
-): Promise<{ newCount: number; total: number; fromBootstrap: boolean }> {
+): Promise<{ newCount: number; total: number; fromBootstrap: boolean; refreshed: { checked: number; changed: number } }> {
   const state = getOrderSyncState(store.id);
   const isBootstrap = !state?.last_max_date;
   const effectiveSource: string = isBootstrap ? 'manual' : (sourceOverride || 'sync');
@@ -612,7 +659,10 @@ export async function syncStoreOrders(
     last_max_date: maxMs > 0 ? new Date(maxMs).toISOString() : null,
   });
 
-  return { newCount: newOnes.length, total: fetched.orders.length, fromBootstrap: isBootstrap };
+  // 同步完成后，强制刷新 DB 中已有 CBT 订单的真实物流状态，以内查结果覆盖列表状态
+  const refreshed = await refreshCachedOrderShipmentStatuses(store);
+
+  return { newCount: newOnes.length, total: fetched.orders.length, fromBootstrap: isBootstrap, refreshed };
 }
 
 /** 遍历所有启用店铺做增量同步（后台定时任务调用） */

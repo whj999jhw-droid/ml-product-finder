@@ -1158,7 +1158,7 @@ app.post('/api/ml/stores/:id/sync-orders', async (req, res) => {
   try {
     const store = stores.getStoreRaw(req.params.id);
     if (!store) return res.status(404).json({ success: false, message: '店铺不存在' });
-    await orders.syncStoreOrders(store, 'manual');
+    const syncResult = await orders.syncStoreOrders(store, 'manual');
     const fresh = db.getCachedOrders(store.id);
     res.json({
       success: true,
@@ -1166,6 +1166,7 @@ app.post('/api/ml/stores/:id/sync-orders', async (req, res) => {
       counts: fresh.counts,
       newCount: orders.getNewSyncOrderCount(store.id),
       syncedAt: db.getOrderSyncState(store.id)?.last_sync_at || null,
+      refreshed: syncResult.refreshed,
     });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err?.message || String(err) });
@@ -1274,6 +1275,9 @@ app.get('/api/mobile/orders/recent', (req, res) => {
           : o.paid_amount != null
             ? `${o.currency_id || ''} ${typeof o.paid_amount === 'object' ? o.paid_amount.amount : o.paid_amount}`.trim()
             : '';
+      // 按当前保存的物流状态重新分类，修复早期 classify 错误导致「已发货仍显示超时」
+      const category = orders.classifyOrder(o, o.shipStatus || o.shipping?.status);
+      const isShipped = category === 'shipped';
       return {
         storeId: r.store_id,
         storeName: store?.nickname || store?.site || r.store_id,
@@ -1286,9 +1290,9 @@ app.get('/api/mobile/orders/recent', (req, res) => {
         itemCount: items.length,
         itemTitles: items.slice(0, 3).map((it: any) => it.item?.title || it.title || ''),
         syncSaved: r.source === 'sync',
-        handlingDeadline: o.handlingDeadline || null,
-        remainingHours: o.remainingHours ?? null,
-        remainingHoursText: o.remainingHoursText || '—',
+        handlingDeadline: isShipped ? null : (o.handlingDeadline || null),
+        remainingHours: isShipped ? null : (o.remainingHours ?? null),
+        remainingHoursText: isShipped ? '—' : (o.remainingHoursText || '—'),
       };
     });
     res.json({ success: true, since, count: out.length, orders: out });
