@@ -133,11 +133,13 @@ async function fetchMarketplaceShipmentStatuses(store: Store, orders: any[]): Pr
     try {
       const shipId = String(o.shipping.id);
       const cached = getCache(shipCache, shipId);
-      const ship = cached || (await storeApiGet(store, `/marketplace/shipments/${shipId}`));
+      // CBT shipments 端点需要 x-format-new=true 才能拿到 status，
+      // 否则可能返回 404 或不包含 status，导致已发货订单被误判为未发货。
+      const ship = cached || (await storeApiGet(store, `/marketplace/shipments/${shipId}`, 3, { 'x-format-new': 'true' }));
       if (!cached) setCache(shipCache, shipId, ship);
       if (ship?.status) map.set(String(o.id), String(ship.status));
-    } catch {
-      /* 物流端点可能限流或无权限，忽略 */
+    } catch (e: any) {
+      console.warn(`[Orders] CBT 物流状态获取失败 ${o.id}:`, e?.message || e);
     }
   });
   return map;
@@ -391,12 +393,17 @@ const MAX_PAGES_PER_STATUS = 20; // 上限 20*50 = 1000 单/状态，防止极�
 
 const SHIPPED_STATUSES = ['shipped', 'delivered', 'closed', 'not_delivered'];
 
-function classifyOrder(o: any, externalShipStatus?: string): 'unshipped' | 'shipped' | 'cancelled' {
+export function classifyOrder(o: any, externalShipStatus?: string): 'unshipped' | 'shipped' | 'cancelled' {
   const orderStatus = String(o.status || '').toLowerCase();
   if (orderStatus === 'cancelled') return 'cancelled';
 
   const shipStatus = String(externalShipStatus || o.shipping?.status || '').toLowerCase();
-  if (orderStatus === 'paid' && SHIPPED_STATUSES.includes(shipStatus)) {
+  // 物流状态直接说明已发货（最准），不限制订单主状态必须是 paid
+  if (SHIPPED_STATUSES.includes(shipStatus)) {
+    return 'shipped';
+  }
+  // 订单主状态本身已是 shipped/delivered/closed 也视为已发货
+  if (SHIPPED_STATUSES.includes(orderStatus)) {
     return 'shipped';
   }
   // paid / handling / ready_to_ship / 其它非取消都归为未发货
