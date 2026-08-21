@@ -7,6 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   scanNewRisingProducts,
   enrichCandidate,
+  CATEGORY_ZH_BY_ID,
   type RawCandidate,
   type ScannerOptions,
 } from './sourcingScanner.js';
@@ -57,8 +58,8 @@ export interface SourcedCandidate {
 export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<PipelineResult> {
   const runId = opts.runId || uuidv4();
   const targetNetRate = opts.targetNetRate ?? 0.15;
-  const maxCandidatesToSource = opts.maxCandidatesToSource ?? 30;
-  const minScore = opts.minScoreThreshold ?? 0.6;
+  const maxCandidatesToSource = opts.maxCandidatesToSource ?? 40;
+  const minScore = opts.minScoreThreshold ?? 0.55;
 
   // run 记录应由调用方（API 端点）预先创建，这里兜底创建
   try {
@@ -168,7 +169,80 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
 }
 
 /**
+ * 组装 candidates 入库行。类目名存为「中文 (Native)」双语，便于前端中英文展示。
+ * 无论通过还是淘汰都走这里，保证候选列表可见、可人工复核。
+ */
+function buildCandidateRow(
+  runId: string,
+  enriched: Awaited<ReturnType<typeof enrichCandidate>>,
+  opts: {
+    status: 'pending' | 'rejected';
+    rejectReason?: string;
+    searchQuery?: string;
+    source?: Ali1688Product;
+    profit?: ProfitResult;
+    listingPrice?: number;
+    score?: ScoreBreakdown;
+    aiEvaluation?: AIEvaluationResult;
+  }
+): Record<string, any> {
+  const zh = CATEGORY_ZH_BY_ID[enriched.categoryId] || '';
+  const categoryNameBilingual = zh ? `${zh} (${enriched.categoryName})` : enriched.categoryName;
+  const row: Record<string, any> = {
+    run_id: runId,
+    site: enriched.site,
+    ml_item_id: enriched.itemId,
+    ml_title: enriched.title,
+    ml_price_usd: enriched.priceUsd,
+    ml_currency: enriched.currency,
+    ml_sold_quantity: enriched.soldQuantity,
+    ml_category_id: enriched.categoryId,
+    ml_category_name: categoryNameBilingual,
+    ml_permalink: enriched.permalink,
+    ml_thumbnail: enriched.thumbnail,
+    ml_seller_id: enriched.sellerId ? String(enriched.sellerId) : null,
+    ml_listing_date: enriched.listingDate,
+    length_cm: enriched.lengthCm,
+    width_cm: enriched.widthCm,
+    height_cm: enriched.heightCm,
+    weight_kg: enriched.weightKg,
+    status: opts.status,
+    reject_reason: opts.rejectReason || null,
+  };
+  if (opts.source) {
+    row.source_title = opts.searchQuery || '';
+    row.source_image_url = opts.source.imageUrl || enriched.thumbnail;
+    row.ali1688_product_id = opts.source.id;
+    row.ali1688_title = opts.source.title;
+    row.ali1688_price_cny = opts.source.price;
+    row.ali1688_shipping_cny = estimate1688Shipping(opts.source.price);
+    row.ali1688_url = opts.source.url;
+    row.ali1688_supplier = opts.source.stats?.categoryListName || '';
+    row.ali1688_image_url = opts.source.imageUrl;
+  }
+  if (opts.profit) {
+    row.listing_price_usd = opts.listingPrice;
+    row.profit_net_usd = opts.profit.netProfit;
+    row.profit_rate = opts.profit.netProfitRate;
+    row.roi = opts.profit.roi;
+    row.break_even_price = opts.profit.breakEvenPrice;
+    row.cost_breakdown_json = JSON.stringify(opts.profit.costBreakdown);
+  }
+  if (opts.score) {
+    row.score_demand = opts.score.demand;
+    row.score_competition = opts.score.competition;
+    row.score_profit = opts.score.profit;
+    row.score_logistics = opts.score.logistics;
+    row.score_compliance = opts.score.compliance;
+    row.score_total = opts.score.total;
+  }
+  if (opts.aiEvaluation) row.ai_evaluation_json = JSON.stringify(opts.aiEvaluation);
+  return row;
+}
+
+/**
  * 处理单个候选：1688 货源 → 利润 → 评分 → 入库
+ * 通过则入库为 pending；1688 无货源/评分未通过等也入库为 rejected（带原因），便于人工复核。
  * @returns SourcedCandidate 如果通过评分；null 如果未通过或处理失败
  */
 async function processOneCandidate(
@@ -185,6 +259,7 @@ async function processOneCandidate(
   const searchQuery = build1688SearchQuery(enriched.title);
   console.log(`[SourcingPipeline] 候选 ${raw.itemId} 1688 搜索词: "${searchQuery}"`);
   if (!searchQuery.trim()) {
+    insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: '标题为空，无法生成1688搜索词' }));
     return { result: null, reason: '标题为空，无法生成1688搜索词' };
   }
   const searchResult = await search1688ByQuery(searchQuery);
@@ -196,12 +271,16 @@ async function processOneCandidate(
     const reason = searchResult.message?.includes('CLI 未安装')
       ? searchResult.message.slice(0, 80)
       : '1688无货源';
+    insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: reason, searchQuery }));
     return { result: null, reason };
   }
 
   // 取 cheapest + 有销量的货源
   const source = pickBestSource(searchResult.products);
-  if (!source) return { result: null, reason: '1688货源筛选失败' };
+  if (!source) {
+    insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: '1688货源筛选失败', searchQuery }));
+    return { result: null, reason: '1688货源筛选失败' };
+  }
 
   // 2.3 利润测算：按目标净利率反推建议售价
   const suggestedPrice = await reverseEngineerPrice({
@@ -235,7 +314,9 @@ async function processOneCandidate(
   // 2.4 五维评分
   const score = scoreCandidate({ candidate: enriched, source, profit });
   if (!isScorePass(score) || score.total < minScore) {
-    return { result: null, reason: `评分未通过(total=${score.total}, profit=${score.profit}, compliance=${score.compliance})` };
+    const reason = `评分未通过(total=${score.total}, profit=${score.profit}, compliance=${score.compliance})`;
+    insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: reason, searchQuery, source, profit, listingPrice, score }));
+    return { result: null, reason };
   }
 
   // 2.5 AI 选品研判（可选，失败不影响入库）
@@ -264,49 +345,18 @@ async function processOneCandidate(
     console.warn(`[SourcingPipeline] 候选 ${raw.itemId} AI 研判失败:`, err?.message || err);
   }
 
-  // 2.6 入库
-  const dbId = insertCandidate({
-    run_id: runId,
-    site: enriched.site,
-    ml_item_id: enriched.itemId,
-    ml_title: enriched.title,
-    ml_price_usd: enriched.priceUsd,
-    ml_currency: enriched.currency,
-    ml_sold_quantity: enriched.soldQuantity,
-    ml_category_id: enriched.categoryId,
-    ml_category_name: enriched.categoryName,
-    ml_permalink: enriched.permalink,
-    ml_thumbnail: enriched.thumbnail,
-    ml_seller_id: enriched.sellerId ? String(enriched.sellerId) : null,
-    ml_listing_date: enriched.listingDate,
-    source_title: searchQuery,
-    source_image_url: source.imageUrl || enriched.thumbnail,
-    ali1688_product_id: source.id,
-    ali1688_title: source.title,
-    ali1688_price_cny: source.price,
-    ali1688_shipping_cny: estimate1688Shipping(source.price),
-    ali1688_url: source.url,
-    ali1688_supplier: source.stats?.categoryListName || '',
-    ali1688_image_url: source.imageUrl,
-    length_cm: enriched.lengthCm,
-    width_cm: enriched.widthCm,
-    height_cm: enriched.heightCm,
-    weight_kg: enriched.weightKg,
-    listing_price_usd: listingPrice,
-    profit_net_usd: profit.netProfit,
-    profit_rate: profit.netProfitRate,
-    roi: profit.roi,
-    break_even_price: profit.breakEvenPrice,
-    cost_breakdown_json: JSON.stringify(profit.costBreakdown),
-    score_demand: score.demand,
-    score_competition: score.competition,
-    score_profit: score.profit,
-    score_logistics: score.logistics,
-    score_compliance: score.compliance,
-    score_total: score.total,
-    ai_evaluation_json: aiEvaluation ? JSON.stringify(aiEvaluation) : null,
-    status: 'pending',
-  });
+  // 2.6 入库（通过 → pending）
+  const dbId = insertCandidate(
+    buildCandidateRow(runId, enriched, {
+      status: 'pending',
+      searchQuery,
+      source,
+      profit,
+      listingPrice,
+      score,
+      aiEvaluation,
+    })
+  );
 
   if (!dbId) return { result: null, reason: '数据库写入失败' };
 

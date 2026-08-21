@@ -81,46 +81,56 @@ export interface RawCandidate {
 const DEFAULT_SITES = ['MLM', 'MLB', 'MLC', 'MCO'];
 
 // 轻量内置分类：覆盖四大站点的常见跨境类目，后续可扩展为可配置
-const DEFAULT_CATEGORIES: Record<string, { id: string; name: string }[]> = {
+// 每个分类带 zh 中文名，用于在候选列表/预览中做「中英文」展示
+const DEFAULT_CATEGORIES: Record<string, { id: string; name: string; zh: string }[]> = {
   MLM: [
-    { id: 'MLM1574', name: 'Hogar, Muebles y Jardín' },
-    { id: 'MLM1132', name: 'Juegos y Juguetes' },
-    { id: 'MLM1430', name: 'Ropa, Bolsas y Calzado' },
-    { id: 'MLM1648', name: 'Computación' },
-    { id: 'MLM1000', name: 'Electrónica, Audio y Video' },
-    { id: 'MLM1246', name: 'Belleza y Cuidado Personal' },
-    { id: 'MLM1144', name: 'Consolas y Videojuegos' },
-    { id: 'MLM180800', name: 'Accesorios para Vehículos' },
+    { id: 'MLM1574', name: 'Hogar, Muebles y Jardín', zh: '家居、家具和园艺' },
+    { id: 'MLM1132', name: 'Juegos y Juguetes', zh: '玩具和游戏' },
+    { id: 'MLM1430', name: 'Ropa, Bolsas y Calzado', zh: '服装、箱包和鞋类' },
+    { id: 'MLM1648', name: 'Computación', zh: '电脑及计算设备' },
+    { id: 'MLM1000', name: 'Electrónica, Audio y Video', zh: '电子、音频和视频' },
+    { id: 'MLM1246', name: 'Belleza y Cuidado Personal', zh: '美妆和个人护理' },
+    { id: 'MLM1144', name: 'Consolas y Videojuegos', zh: '游戏主机和视频游戏' },
+    { id: 'MLM180800', name: 'Accesorios para Vehículos', zh: '汽车配件' },
   ],
   MLB: [
-    { id: 'MLB1574', name: 'Casa, Móveis e Decoração' },
-    { id: 'MLB1132', name: 'Brinquedos e Hobbies' },
-    { id: 'MLB1430', name: 'Roupas, Bolsas e Calçados' },
-    { id: 'MLB1648', name: 'Informática' },
-    { id: 'MLB1000', name: 'Eletrônicos, Áudio e Vídeo' },
-    { id: 'MLB1246', name: 'Beleza e Cuidado Pessoal' },
-    { id: 'MLB1144', name: 'Games' },
-    { id: 'MLB180800', name: 'Acessórios para Veículos' },
+    { id: 'MLB1574', name: 'Casa, Móveis e Decoração', zh: '家居、家具和装饰' },
+    { id: 'MLB1132', name: 'Brinquedos e Hobbies', zh: '玩具和爱好' },
+    { id: 'MLB1430', name: 'Roupas, Bolsas e Calçados', zh: '服装、箱包和鞋类' },
+    { id: 'MLB1648', name: 'Informática', zh: '电脑及信息技术' },
+    { id: 'MLB1000', name: 'Eletrônicos, Áudio e Vídeo', zh: '电子、音频和视频' },
+    { id: 'MLB1246', name: 'Beleza e Cuidado Pessoal', zh: '美妆和个人护理' },
+    { id: 'MLB1144', name: 'Games', zh: '游戏' },
+    { id: 'MLB180800', name: 'Acessórios para Veículos', zh: '汽车配件' },
   ],
   MLC: [
-    { id: 'MLC1574', name: 'Hogar y Muebles' },
-    { id: 'MLC1132', name: 'Juegos y Juguetes' },
-    { id: 'MLC1430', name: 'Ropa, Zapatos y Accesorios' },
-    { id: 'MLC1648', name: 'Computación' },
-    { id: 'MLC1000', name: 'Electrónica, Audio y Video' },
-    { id: 'MLC1246', name: 'Belleza y Cuidado Personal' },
-    { id: 'MLC1144', name: 'Consolas y Videojuegos' },
+    { id: 'MLC1574', name: 'Hogar y Muebles', zh: '家居和家具' },
+    { id: 'MLC1132', name: 'Juegos y Juguetes', zh: '玩具和游戏' },
+    { id: 'MLC1430', name: 'Ropa, Zapatos y Accesorios', zh: '服装、鞋类和配饰' },
+    { id: 'MLC1648', name: 'Computación', zh: '电脑及计算设备' },
+    { id: 'MLC1000', name: 'Electrónica, Audio y Video', zh: '电子、音频和视频' },
+    { id: 'MLC1246', name: 'Belleza y Cuidado Personal', zh: '美妆和个人护理' },
+    { id: 'MLC1144', name: 'Consolas y Videojuegos', zh: '游戏主机和视频游戏' },
   ],
   MCO: [
-    { id: 'MCO1574', name: 'Hogar y Muebles' },
-    { id: 'MCO1132', name: 'Juegos y Juguetes' },
-    { id: 'MCO1430', name: 'Ropa, Zapatos y Accesorios' },
-    { id: 'MCO1648', name: 'Computación' },
-    { id: 'MCO1000', name: 'Electrónica, Audio y Video' },
-    { id: 'MCO1246', name: 'Belleza y Cuidado Personal' },
-    { id: 'MCO1144', name: 'Consolas y Videojuegos' },
+    { id: 'MCO1574', name: 'Hogar y Muebles', zh: '家居和家具' },
+    { id: 'MCO1132', name: 'Juegos y Juguetes', zh: '玩具和游戏' },
+    { id: 'MCO1430', name: 'Ropa, Zapatos y Accesorios', zh: '服装、鞋类和配饰' },
+    { id: 'MCO1648', name: 'Computación', zh: '电脑及计算设备' },
+    { id: 'MCO1000', name: 'Electrónica, Audio y Video', zh: '电子、音频和视频' },
+    { id: 'MCO1246', name: 'Belleza y Cuidado Personal', zh: '美妆和个人护理' },
+    { id: 'MCO1144', name: 'Consolas y Videojuegos', zh: '游戏主机和视频游戏' },
   ],
 };
+
+// 类目 id → 中文名 映射，供流水线入库时生成「中文 (Native)」双语类目名
+export const CATEGORY_ZH_BY_ID: Record<string, string> = (() => {
+  const map: Record<string, string> = {};
+  for (const cats of Object.values(DEFAULT_CATEGORIES)) {
+    for (const c of cats) map[c.id] = c.zh;
+  }
+  return map;
+})();
 
 function toUsd(price: number, currency: string, rates: Record<string, number>): number {
   if (currency === 'USD') return price;

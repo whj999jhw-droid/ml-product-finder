@@ -100,7 +100,7 @@ const statusMap: Record<string, { label: string; theme: any }> = {
 export function CandidatesPage() {
   const [rows, setRows] = useState<Candidate[]>([]);
   const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState<string>('pending');
+  const [status, setStatus] = useState<string>('');
   const [running, setRunning] = useState(false);
   const [stores, setStores] = useState<Store[]>([]);
   const [selectedStoreIds, setSelectedStoreIds] = useState<string[]>([]);
@@ -239,7 +239,7 @@ export function CandidatesPage() {
       const res = await fetch('/api/ml/sourcing/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ maxCandidatesToSource: 20, targetNetRate: 0.15 }),
+        body: JSON.stringify({ maxCandidatesToSource: 30, targetNetRate: 0.15 }),
       });
       const data = await res.json();
       if (data.success && data.runId) {
@@ -380,6 +380,13 @@ export function CandidatesPage() {
       },
     },
     { colKey: 'site', title: '站点', width: 80 },
+    {
+      colKey: 'ml_category_name',
+      title: '类目',
+      width: 180,
+      ellipsis: true,
+      cell: ({ row }) => <span className="text-xs text-gray-600">{row.ml_category_name || '-'}</span>,
+    },
     {
       colKey: 'ml_price_usd',
       title: '竞品售价',
@@ -560,6 +567,7 @@ export function CandidatesPage() {
             value={status}
             onChange={(v) => setStatus(v as string)}
             options={[
+              { label: '全部', value: '' },
               { label: '待审核', value: 'pending' },
               { label: '已通过', value: 'approved' },
               { label: '已拒绝', value: 'rejected' },
