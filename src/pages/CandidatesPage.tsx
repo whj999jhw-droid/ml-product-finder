@@ -323,25 +323,41 @@ export function CandidatesPage() {
     {
       colKey: 'thumbnail',
       title: '图片',
-      width: 80,
-      cell: ({ row }) => (
-        <img
-          src={row.ali1688_image_url || row.ml_thumbnail}
-          alt=""
-          className="w-14 h-14 object-cover rounded"
-          onError={(e) => { (e.target as HTMLImageElement).src = row.ml_thumbnail; }}
-        />
-      ),
+      width: 90,
+      cell: ({ row }) => {
+        const src = row.ali1688_image_url || row.ml_thumbnail;
+        return src ? (
+          <img
+            src={src}
+            alt=""
+            className="w-16 h-16 object-cover rounded border border-gray-100"
+            onError={(e) => {
+              const img = e.target as HTMLImageElement;
+              img.onerror = null;
+              img.src = 'data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22%23f3f4f6%22/><text x=%2250%22 y=%2255%22 font-size=%2212%22 fill=%22%239ca3af%22 text-anchor=%22middle%22>无图</text></svg>';
+            }}
+          />
+        ) : (
+          <div className="w-16 h-16 rounded bg-gray-100 flex items-center justify-center text-xs text-gray-400 border border-gray-100">
+            无图
+          </div>
+        );
+      },
     },
     {
       colKey: 'ml_title',
       title: '标题',
       ellipsis: true,
-      cell: ({ row }) => (
-        <a href={row.ml_permalink} target="_blank" rel="noreferrer" className="hover:underline">
-          {row.ml_title}
-        </a>
-      ),
+      cell: ({ row }) => {
+        const title = row.ml_title || row.ali1688_title || '';
+        const isFallback = !row.ml_title && !!row.ali1688_title;
+        return (
+          <a href={row.ml_permalink} target="_blank" rel="noreferrer" className="hover:underline block">
+            <span className={isFallback ? 'text-orange-600' : ''}>{title}</span>
+            {isFallback && <span className="text-xs text-gray-400 ml-1">(来自1688)</span>}
+          </a>
+        );
+      },
     },
     { colKey: 'site', title: '站点', width: 80 },
     {

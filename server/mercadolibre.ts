@@ -1490,14 +1490,24 @@ export async function searchWithHighlightsFallback(
     const items: any[] = [];
     const baseDelay = 300;
     for (let i = 0; i < productIds.length; i++) {
+      const productId = productIds[i];
       try {
-        const productItems = await fetchProductItems(productIds[i], 5, accessTokenOverride);
+        // /products/{id}/items 常缺失 title/thumbnail/pictures，先取 product 详情兜底。
+        const productDetail = await fetchProductDetails(productId, accessTokenOverride);
+        const productItems = await fetchProductItems(productId, 5, accessTokenOverride);
         for (const it of productItems) {
           // /products/{id}/items 返回的 item 字段名与 /search results 不完全一致：
           // 常见有 item_id 无 id、name 无 title、无 sold_quantity 等。先做同构映射。
           if (!it.id && it.item_id) it.id = it.item_id;
           if (!it.title && it.name) it.title = it.name;
           if (!it.title && it.family_name) it.title = it.family_name;
+          // 用 product 详情补标题/图片（highlights 场景下 item 自身常缺）
+          if (!it.title && productDetail?.name) it.title = productDetail.name;
+          if (!it.title && productDetail?.family_name) it.title = productDetail.family_name;
+          if (!it.thumbnail && productDetail?.pictures?.[0]) {
+            it.thumbnail = productDetail.pictures[0].url || productDetail.pictures[0].secure_url;
+          }
+          if (!it.pictures && productDetail?.pictures) it.pictures = productDetail.pictures;
           if (!it.sold_quantity && it.sold_quantity === undefined && it.sold) it.sold_quantity = it.sold;
           // highlights 货源缺上架时间则近似为近 7 天（热门≈近期热销），避免被时间过滤清掉
           if (!it.start_time && !it.date_created) {

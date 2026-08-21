@@ -231,13 +231,22 @@ interface LLMOptions {
 
 /**
  * 根据 baseUrl 生成 OpenAI /chat/completions 完整 URL。
- * 兼容用户填写时带或不带 `/v1` 结尾。
+ * 兼容用户填写时带或不带 `/v1`、`/v2`、`/v3`、`/v4` 等版本路径结尾。
+ * 例如：
+ *   - https://api.openai.com/v1           → https://api.openai.com/v1/chat/completions
+ *   - https://ark.cn-beijing.volces.com/api/v3 → https://ark.cn-beijing.volces.com/api/v3/chat/completions
  */
 function chatCompletionsUrl(baseUrl: string): string {
   const normalized = (baseUrl || '').trim().replace(/\/+$/, '');
-  if (normalized.toLowerCase().endsWith('/v1')) {
+  // 已经是完整 chat completions 端点
+  if (normalized.toLowerCase().endsWith('/chat/completions')) {
+    return normalized;
+  }
+  // 已包含 /v1 /v2 /v3 /v4 等版本路径：直接追加 chat/completions
+  if (\/v\\d+$/i.test(normalized)) {
     return `${normalized}/chat/completions`;
   }
+  // 默认按 OpenAI 规范补 /v1
   return `${normalized}/v1/chat/completions`;
 }
 
