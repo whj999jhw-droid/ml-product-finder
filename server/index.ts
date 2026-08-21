@@ -748,6 +748,7 @@ import {
   getLlmConfig,
   getLlmProviders,
   saveLlmConfig,
+  findSavedApiKey,
   translateTrendsKeywords,
   testLlmTranslation,
   probeLlmReachability,
@@ -2577,17 +2578,11 @@ app.post('/api/ml/llm-config/test', async (req, res) => {
     }
 
     // 测试时允许「Api Key 留空=使用已保存的 Key」，避免编辑 baseUrl/model 时必须重新输入 Key
-    const savedProviders = getLlmProviders();
     providers = providers.map((p) => {
       if (p.apiKey) return p;
-      const baseUrl = (p.baseUrl || '').replace(/\/+$/, '').trim();
-      const match = savedProviders.find(
-        (s) =>
-          (s.baseUrl || '').replace(/\/+$/, '').trim() === baseUrl &&
-          (s.model || '').trim() === (p.model || '').trim()
-      );
-      if (match?.apiKey) {
-        return { ...p, apiKey: match.apiKey };
+      const savedKey = findSavedApiKey(p.baseUrl, p.model);
+      if (savedKey) {
+        return { ...p, apiKey: savedKey };
       }
       return p;
     });

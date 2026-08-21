@@ -117,6 +117,27 @@ export function getLlmConfig(): LlmProvider | null {
   return providers[0] || null;
 }
 
+/** 从文件配置里查找已保存的 Api Key（用于测试/保存时「留空=不修改」）。优先按 baseUrl+model，再按 baseUrl。 */
+export function findSavedApiKey(baseUrl: string, model?: string): string | undefined {
+  const file = loadLlmConfigFile();
+  if (!file?.providers) return undefined;
+  const normalizedBase = normalizeBaseUrl(baseUrl);
+  const normalizedModel = (model || '').trim();
+  let byBoth: LlmProvider | undefined;
+  let byBase: LlmProvider | undefined;
+  for (const p of file.providers) {
+    const pBase = normalizeBaseUrl(p.baseUrl);
+    const pModel = (p.model || '').trim();
+    if (pBase !== normalizedBase) continue;
+    if (!byBase && p.apiKey) byBase = p;
+    if (pModel === normalizedModel && p.apiKey) {
+      byBoth = p;
+      break;
+    }
+  }
+  return byBoth?.apiKey || byBase?.apiKey;
+}
+
 export interface SaveLlmConfigResult {
   success: boolean;
   message?: string;
@@ -135,9 +156,12 @@ export function saveLlmConfig(cfg: Partial<LlmProvider> | { providers?: Partial<
   }
 
   const existing = loadLlmConfigFile();
-  const existingByKey = new Map<string, LlmProvider>();
+  const existingByBase = new Map<string, LlmProvider>();
+  const existingByBoth = new Map<string, LlmProvider>();
   for (const p of existing?.providers || []) {
-    existingByKey.set(`${p.baseUrl}|${p.model}`, p);
+    const b = normalizeBaseUrl(p.baseUrl);
+    existingByBase.set(b, p);
+    existingByBoth.set(`${b}|${(p.model || '').trim()}`, p);
   }
 
   const finalProviders: LlmProvider[] = [];
@@ -146,10 +170,11 @@ export function saveLlmConfig(cfg: Partial<LlmProvider> | { providers?: Partial<
     const baseUrl = normalizeBaseUrl(p.baseUrl || '');
     const model = (p.model || '').trim();
     let apiKey = (p.apiKey || '').trim();
-    // apiKey 为空：从同 baseUrl+model 的已有配置复用（允许只改地址/模型不改 key）
+    // apiKey 为空：优先按 baseUrl+model，再按 baseUrl 复用已有 key（改模型名也不会丢 key）
     if (!apiKey) {
-      const old = existingByKey.get(`${baseUrl}|${model}`);
-      if (old) apiKey = old.apiKey;
+      const oldBoth = existingByBoth.get(`${baseUrl}|${model}`);
+      const oldBase = existingByBase.get(baseUrl);
+      apiKey = oldBoth?.apiKey || oldBase?.apiKey || '';
     }
     if (!baseUrl || !model) {
       return { success: false, message: `第 ${i + 1} 个平台必须填写 baseUrl 和 model` };

@@ -183,6 +183,9 @@ async function processOneCandidate(
   // 2.2 1688 找货源（用简化标题，去掉站点无关词）
   const searchQuery = build1688SearchQuery(enriched.title);
   console.log(`[SourcingPipeline] 候选 ${raw.itemId} 1688 搜索词: "${searchQuery}"`);
+  if (!searchQuery.trim()) {
+    return { result: null, reason: '标题为空，无法生成1688搜索词' };
+  }
   const searchResult = await search1688ByQuery(searchQuery);
   console.log(`[SourcingPipeline] 候选 ${raw.itemId} 1688 搜索结果: success=${searchResult.success}, message=${searchResult.message}, products=${searchResult.products.length}`);
   if (searchResult.raw) {

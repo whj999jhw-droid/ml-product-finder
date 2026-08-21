@@ -179,10 +179,15 @@ function normalizeItem(site: string, item: any, categoryName: string, rates: Rec
   if (!listingDate) return null;
   const daysListed = Math.max(1, Math.floor((Date.now() - listingDate.getTime()) / (24 * 60 * 60 * 1000)));
   const sold = typeof item.sold_quantity === 'number' ? item.sold_quantity : parseInt(String(item.sold_quantity || '0'), 10) || 0;
+  const rawTitle = String(item.title || item.name || item.family_name || '').trim();
+  const title = rawTitle || categoryName || String(item.category_id || '');
+  if (!rawTitle) {
+    console.warn(`[SourcingScanner] [${site}/${categoryName}] 商品缺少标题，使用类目名兜底 itemId=${item.id || item.item_id}`);
+  }
   return {
     site,
     itemId: String(item.id || item.item_id || ''),
-    title: String(item.title || item.name || item.family_name || ''),
+    title,
     priceUsd,
     currency,
     soldQuantity: sold,
