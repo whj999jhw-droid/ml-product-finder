@@ -117,6 +117,19 @@ export function CandidatesPage() {
   const [elapsedText, setElapsedText] = useState('');
   const [runPollError, setRunPollError] = useState<string | null>(null);
 
+  // YouTube 上传配置
+  const [ytDialogOpen, setYtDialogOpen] = useState(false);
+  const [ytClientId, setYtClientId] = useState('');
+  const [ytClientSecret, setYtClientSecret] = useState('');
+  const [ytAuthUrl, setYtAuthUrl] = useState('');
+  const [ytCode, setYtCode] = useState('');
+  const [ytConfigured, setYtConfigured] = useState(false);
+  const [ytSaving, setYtSaving] = useState(false);
+  const [ytMsg, setYtMsg] = useState('');
+  // 上架时是否上传 YouTube 视频（填本地视频文件绝对路径）
+  const [uploadYoutube, setUploadYoutube] = useState(false);
+  const [youtubeVideoPath, setYoutubeVideoPath] = useState('');
+
   const fetchAkStatus = async () => {
     try {
       const res = await fetch('/api/ml/ali1688/config');
@@ -124,6 +137,97 @@ export function CandidatesPage() {
       setAkStatus({ configured: data?.configured, message: data?.message || '' });
     } catch {
       setAkStatus({ configured: false, message: '无法检测 AK 状态' });
+    }
+  };
+
+  const fetchYouTubeStatus = async () => {
+    try {
+      const res = await fetch('/api/ml/youtube/status');
+      const data = await res.json();
+      setYtConfigured(!!data?.configured);
+    } catch {
+      setYtConfigured(false);
+    }
+  };
+
+  const openYtDialog = () => {
+    setYtClientId('');
+    setYtClientSecret('');
+    setYtAuthUrl('');
+    setYtCode('');
+    setYtMsg('');
+    setYtDialogOpen(true);
+    fetchYouTubeStatus();
+  };
+
+  const handleSaveYtClient = async () => {
+    if (!ytClientId.trim() || !ytClientSecret.trim()) {
+      MessagePlugin.warning('请填写 client_id 与 client_secret');
+      return;
+    }
+    setYtSaving(true);
+    try {
+      const res = await fetch('/api/ml/youtube/client', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientId: ytClientId.trim(), clientSecret: ytClientSecret.trim() }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setYtMsg('已保存，下一步：点击「获取授权链接」');
+        MessagePlugin.success('client_id/secret 已保存');
+        fetchYouTubeStatus();
+      } else {
+        setYtMsg(data.message || '保存失败');
+      }
+    } catch (e: any) {
+      setYtMsg(e?.message || '网络错误');
+    } finally {
+      setYtSaving(false);
+    }
+  };
+
+  const handleFetchYtAuthUrl = async () => {
+    setYtMsg('');
+    try {
+      const res = await fetch('/api/ml/youtube/auth-url');
+      const data = await res.json();
+      if (data.success && data.url) {
+        setYtAuthUrl(data.url);
+        setYtMsg('已生成授权链接，请在浏览器打开并复制 code');
+      } else {
+        setYtMsg(data.message || '生成授权链接失败（请先保存 client_id/secret）');
+      }
+    } catch (e: any) {
+      setYtMsg(e?.message || '网络错误');
+    }
+  };
+
+  const handleExchangeYtCode = async () => {
+    if (!ytCode.trim()) {
+      MessagePlugin.warning('请粘贴授权后得到的 code');
+      return;
+    }
+    setYtSaving(true);
+    try {
+      const res = await fetch('/api/ml/youtube/exchange', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: ytCode.trim() }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        MessagePlugin.success('YouTube 授权成功，可上传视频');
+        setYtMsg('授权成功 ✅');
+        setYtDialogOpen(false);
+        fetchYouTubeStatus();
+      } else {
+        setYtMsg(data.message || '换取 refresh_token 失败');
+      }
+    } catch (e: any) {
+      setYtMsg(e?.message || '网络错误');
+    } finally {
+      setYtSaving(false);
     }
   };
 
@@ -148,6 +252,7 @@ export function CandidatesPage() {
     fetchRows();
     fetchStores();
     fetchAkStatus();
+    fetchYouTubeStatus();
     fetchLatestRun();
     const timer = setInterval(() => {
       fetchLatestRun();
@@ -308,6 +413,8 @@ export function CandidatesPage() {
   const openPublish = (row: Candidate) => {
     setPublishRow(row);
     setSelectedStoreIds(stores.filter((s) => s.enabled && s.authorized).map((s) => s.id));
+    setUploadYoutube(false);
+    setYoutubeVideoPath('');
     setPublishOpen(true);
   };
 
@@ -322,7 +429,13 @@ export function CandidatesPage() {
       const res = await fetch(`/api/ml/candidates/${publishRow.id}/publish`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ storeIds: selectedStoreIds, useCbtCategory }),
+        body: JSON.stringify({
+          storeIds: selectedStoreIds,
+          useCbtCategory,
+          youtube: uploadYoutube
+            ? { enabled: true, videoPath: youtubeVideoPath.trim(), privacy: 'unlisted' }
+            : { enabled: false },
+        }),
       });
       const data = await res.json();
       if (data.success) {
@@ -562,6 +675,13 @@ export function CandidatesPage() {
             >
               {akStatus.configured ? '1688 AK 已配置' : '配置 1688 AK'}
             </Button>
+            <Button
+              variant="outline"
+              theme={ytConfigured ? 'success' : 'default'}
+              onClick={openYtDialog}
+            >
+              {ytConfigured ? 'YouTube 已授权' : '配置 YouTube'}
+            </Button>
           </Space>
           <Select
             value={status}
@@ -718,6 +838,37 @@ export function CandidatesPage() {
               <span className="text-sm">使用 CBT 类目前缀（上架失败可关闭）</span>
             </div>
 
+            {/* 加分项：上架前把商品视频上传到 YouTube */}
+            <div className="border border-gray-100 rounded p-3">
+              <div className="flex items-center gap-2 mb-2">
+                <Switch value={uploadYoutube} onChange={(v) => setUploadYoutube(v as boolean)} />
+                <span className="text-sm font-medium">上架后上传商品视频到 YouTube</span>
+                {!ytConfigured && (
+                  <Tag size="small" theme="warning">未授权</Tag>
+                )}
+              </div>
+              {uploadYoutube && (
+                <div className="space-y-2">
+                  <div className="text-xs text-gray-500">
+                    填写服务器上视频文件的<strong>绝对路径</strong>（如 /data/videos/abc.mp4）。图生视频需你先用 Luma/Kling 等工具生成。
+                    {!ytConfigured && (
+                      <span className="text-red-500"> 尚未完成 YouTube OAuth 授权，请先点右上「配置 YouTube」。</span>
+                    )}
+                  </div>
+                  <input
+                    type="text"
+                    value={youtubeVideoPath}
+                    onChange={(e) => setYoutubeVideoPath(e.target.value)}
+                    placeholder="/data/videos/product_demo.mp4"
+                    className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <div className="text-xs text-gray-400">
+                    上传成功后，视频链接会自动写入商品描述。上传失败不影响正常上架。
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="text-xs text-gray-400 bg-yellow-50 p-2 rounded">
               提示：确认上架后，系统会自动生成西/葡语标题和描述，并将图片上传至 Mercado Libre 图床后发布。
             </div>
@@ -748,6 +899,93 @@ export function CandidatesPage() {
             当前状态：{akStatus.configured ? '已配置' : '未配置'}
             {akStatus.message ? `（${akStatus.message}）` : ''}
           </div>
+        </div>
+      </Dialog>
+
+      <Dialog
+        visible={ytDialogOpen}
+        onClose={() => setYtDialogOpen(false)}
+        header="配置 YouTube 上传（OAuth2 授权）"
+        width={640}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setYtDialogOpen(false)}>
+              关闭
+            </Button>
+            {!ytConfigured && (
+              <Button theme="success" loading={ytSaving} onClick={handleExchangeYtCode}>
+                完成授权
+              </Button>
+            )}
+          </div>
+        }
+      >
+        <div className="space-y-4 text-sm">
+          <div className="text-xs text-gray-500 leading-relaxed">
+            步骤：① 在 Google Cloud 创建 OAuth 客户端（类型选「桌面应用 / TV 设备」），把 client_id / client_secret 粘贴到下方保存；
+            ② 点「获取授权链接」在浏览器打开并同意，复制地址栏或页面里的 code；③ 粘贴 code 后点「完成授权」。授权一次后静默上传，无需重复操作。
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-gray-600 mb-1">Client ID</label>
+              <input
+                type="text"
+                value={ytClientId}
+                onChange={(e) => setYtClientId(e.target.value)}
+                placeholder="xxxxx.apps.googleusercontent.com"
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-gray-600 mb-1">Client Secret</label>
+              <input
+                type="text"
+                value={ytClientSecret}
+                onChange={(e) => setYtClientSecret(e.target.value)}
+                placeholder="GOCSPX-xxxxxxxx"
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Button theme="primary" variant="outline" loading={ytSaving} onClick={handleSaveYtClient}>
+              1. 保存 Client 凭证
+            </Button>
+            <Button theme="primary" variant="outline" onClick={handleFetchYtAuthUrl}>
+              2. 获取授权链接
+            </Button>
+          </div>
+
+          {ytAuthUrl && (
+            <div className="border border-gray-100 rounded p-2">
+              <div className="text-gray-600 mb-1">授权链接（在新标签打开并复制 code）：</div>
+              <a href={ytAuthUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline break-all text-xs">
+                {ytAuthUrl}
+              </a>
+            </div>
+          )}
+
+          <div>
+            <label className="block text-gray-600 mb-1">3. 粘贴授权 code</label>
+            <input
+              type="text"
+              value={ytCode}
+              onChange={(e) => setYtCode(e.target.value)}
+              placeholder="4/0xxxxxxx-xxxxxxxx"
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+
+          {ytConfigured && (
+            <div className="text-green-600">已授权 ✅ 可直接在上架弹窗上传视频</div>
+          )}
+          {ytMsg && (
+            <div className={`text-xs p-2 rounded ${ytConfigured ? 'bg-green-50 text-green-700' : 'bg-gray-50 text-gray-600'}`}>
+              {ytMsg}
+            </div>
+          )}
         </div>
       </Dialog>
     </div>

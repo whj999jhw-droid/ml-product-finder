@@ -11,6 +11,7 @@ import { generateTitles } from './titleGenerator.js';
 import { publishBatch, type ListingDraft, type BatchPublishResult } from './listing.js';
 import { getAllStores, ensureStoreToken } from './stores.js';
 import { createPublishJob, updatePublishJob, updateCandidateStatus } from './db.js';
+import { uploadVideoToYouTube } from './youtubeUpload.js';
 
 // CBT 类目前缀：部分情况下需要在原站点类目前加 CBT- 前缀（若 API 报错可回退原 ID）
 function toCbtCategoryId(site: string, localCategoryId: string): string {
@@ -81,6 +82,7 @@ export interface PublishCandidateOptions {
   storeIds?: string[]; // 为空时发布到所有已启用店铺
   concurrency?: number;
   useCbtCategory?: boolean;
+  youtube?: { enabled: boolean; videoPath: string; privacy?: 'private' | 'unlisted' | 'public'; title?: string };
 }
 
 /**
@@ -100,6 +102,23 @@ export async function publishCandidate(opts: PublishCandidateOptions): Promise<B
     brand: opts.brand,
     useCbtCategory: opts.useCbtCategory,
   });
+
+  // 加分项：上架前把商品视频上传到 YouTube，并把链接写进商品描述
+  if (opts.youtube?.enabled && opts.youtube.videoPath) {
+    try {
+      const yt = await uploadVideoToYouTube({
+        filePath: opts.youtube.videoPath,
+        title: opts.youtube.title || draft.title,
+        description: `Video demostración del producto: ${draft.title}`,
+        tags: [opts.candidate.site, opts.candidate.categoryName].filter(Boolean).slice(0, 5) as string[],
+        privacy: opts.youtube.privacy || 'unlisted',
+      });
+      draft.description = `${draft.description}\n\n🎥 Video demostración: ${yt.url}`;
+      console.log(`[Publish] YouTube 上传成功: ${yt.url}`);
+    } catch (err: any) {
+      console.warn('[Publish] YouTube 上传失败（不影响上架）:', err?.message || err);
+    }
+  }
 
   // 为每个目标店铺创建 pending 任务
   const jobIdByStore: Record<string, number> = {};

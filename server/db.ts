@@ -227,6 +227,13 @@ CREATE TABLE IF NOT EXISTS publish_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_publish_jobs_candidate ON publish_jobs(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_publish_jobs_status ON publish_jobs(status);
+
+-- ============ 通用配置键值表（LLM/YouTube/OAuth 等凭证） ============
+CREATE TABLE IF NOT EXISTS app_config (
+  key TEXT PRIMARY KEY,
+  value TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `);
     // 兼容旧数据库：若 sourcing_runs 表缺少 message 列则补加
     try {
@@ -403,6 +410,13 @@ export function upsertOrders(storeId: string, site: string, orders: any[], sourc
   `);
   const tx = db.transaction((items: any[]) => {
     for (const o of items) {
+      // 写入层兜底：已发货/已取消订单不持久化履约剩余时间，避免脏负值（如 -2 小时）被原样写进
+      // order_json，导致读取层（含旧版 getCachedOrders）与手机端误显示「已超时」。与读取层防护一致。
+      if (o.mlStatus && o.mlStatus !== 'unshipped') {
+        o.handlingDeadline = null;
+        o.remainingHours = null;
+        o.remainingHoursText = '—';
+      }
       const total =
         typeof o.total_amount === 'number' ? o.total_amount
         : o.total && typeof o.total === 'object' ? o.total.amount
@@ -610,6 +624,25 @@ export function getCandidates(opts?: {
 export function getCandidateById(id: number): any {
   if (!db) return null;
   return db.prepare('SELECT * FROM candidates WHERE id = ?').get(id);
+}
+
+// 通用配置（key/value）。用于存放 YouTube OAuth 等凭证，避免写死在代码里。
+export function getAppConfig(key: string): string | null {
+  if (!db) return null;
+  const row = db.prepare('SELECT value FROM app_config WHERE key = ?').get(key) as { value: string } | undefined;
+  return row ? row.value : null;
+}
+
+export function setAppConfig(key: string, value: string | null): void {
+  if (!db) return;
+  if (value === null || value === '') {
+    db.prepare('DELETE FROM app_config WHERE key = ?').run(key);
+    return;
+  }
+  db.prepare(
+    `INSERT INTO app_config (key, value, updated_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
+  ).run(key, value);
 }
 
 export function updateCandidateStatus(

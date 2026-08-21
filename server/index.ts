@@ -25,6 +25,12 @@ import {
 import { getAllStores } from './stores.js';
 import { publishCandidate } from './publishFromCandidate.js';
 import { configure1688AK, check1688Config } from './ali1688Skill.js';
+import {
+  isYouTubeConfigured,
+  saveYouTubeClient,
+  buildAuthUrl,
+  exchangeCodeForRefreshToken,
+} from './youtubeUpload.js';
 
 const execAsync = promisify(exec);
 
@@ -1129,7 +1135,7 @@ app.get('/api/ml/stores/:id/all-orders', async (req, res) => {
       const fresh = db.getCachedOrders(store.id);
       return res.json({
         success: true,
-        orders: fresh.orders,
+        orders: fresh.orders.map((o) => (o && o.mlStatus && o.mlStatus !== 'unshipped' ? { ...o, handlingDeadline: null, remainingHours: null, remainingHoursText: '—' } : o)),
         counts: fresh.counts,
         fromCache: false,
         newCount: orders.getNewSyncOrderCount(store.id),
@@ -1142,7 +1148,7 @@ app.get('/api/ml/stores/:id/all-orders', async (req, res) => {
     orders.syncStoreOrders(store).catch((e) => console.error('[Orders] 后台增量同步失败:', e?.message || e));
     res.json({
       success: true,
-      orders: cached.orders,
+      orders: cached.orders.map((o) => (o && o.mlStatus && o.mlStatus !== 'unshipped' ? { ...o, handlingDeadline: null, remainingHours: null, remainingHoursText: '—' } : o)),
       counts: cached.counts,
       fromCache: true,
       newCount: orders.getNewSyncOrderCount(store.id),
@@ -1163,7 +1169,7 @@ app.post('/api/ml/stores/:id/sync-orders', async (req, res) => {
     const fresh = db.getCachedOrders(store.id);
     res.json({
       success: true,
-      orders: fresh.orders,
+      orders: fresh.orders.map((o) => (o && o.mlStatus && o.mlStatus !== 'unshipped' ? { ...o, handlingDeadline: null, remainingHours: null, remainingHoursText: '—' } : o)),
       counts: fresh.counts,
       newCount: orders.getNewSyncOrderCount(store.id),
       syncedAt: db.getOrderSyncState(store.id)?.last_sync_at || null,
@@ -2263,6 +2269,7 @@ app.post('/api/ml/candidates/:id/publish', async (req, res) => {
       brand: 'Generic',
       storeIds: req.body?.storeIds,
       useCbtCategory: req.body?.useCbtCategory ?? true,
+      youtube: req.body?.youtube,
     });
     res.json({ success: true, result });
   } catch (err: any) {
@@ -2290,6 +2297,44 @@ app.post('/api/ml/ali1688/config', async (req, res) => {
     res.json({ success: result.ok, message: result.message });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err?.message || '保存失败' });
+  }
+});
+
+// ============ YouTube 视频上传配置（OAuth2 out-of-band 授权） ============
+app.get('/api/ml/youtube/status', (req, res) => {
+  res.json({ success: true, configured: isYouTubeConfigured() });
+});
+
+app.post('/api/ml/youtube/client', (req, res) => {
+  try {
+    const { clientId, clientSecret } = req.body || {};
+    if (!clientId?.trim() || !clientSecret?.trim()) {
+      return res.status(400).json({ success: false, message: 'client_id 与 client_secret 均不能为空' });
+    }
+    saveYouTubeClient(clientId.trim(), clientSecret.trim());
+    res.json({ success: true, message: '已保存 client_id/secret，下一步请获取授权链接换取 refresh_token' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || '保存失败' });
+  }
+});
+
+app.get('/api/ml/youtube/auth-url', (req, res) => {
+  try {
+    const url = buildAuthUrl();
+    res.json({ success: true, url });
+  } catch (err: any) {
+    res.status(400).json({ success: false, message: err?.message || '生成授权链接失败' });
+  }
+});
+
+app.post('/api/ml/youtube/exchange', async (req, res) => {
+  try {
+    const { code } = req.body || {};
+    if (!code?.trim()) return res.status(400).json({ success: false, message: '请提供授权后得到的 code' });
+    const refreshToken = await exchangeCodeForRefreshToken(code.trim());
+    res.json({ success: true, message: 'refresh_token 已保存，YouTube 上传已可用', hasRefreshToken: !!refreshToken });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || '换取 refresh_token 失败' });
   }
 });
 
