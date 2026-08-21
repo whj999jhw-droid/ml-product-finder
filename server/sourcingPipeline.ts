@@ -13,6 +13,7 @@ import {
 import { search1688ByQuery, get1688ProductDetail, type Ali1688Product } from './ali1688Skill.js';
 import { calculateProfit, reverseEngineerPrice, type ProfitResult } from './profit.js';
 import { scoreCandidate, isScorePass, type ScoreBreakdown } from './scoring.js';
+import { aiEvaluateCandidate, type AIEvaluationResult } from './aiService.js';
 import {
   createSourcingRun,
   updateSourcingRun,
@@ -237,7 +238,33 @@ async function processOneCandidate(
     return { result: null, reason: `评分未通过(total=${score.total}, profit=${score.profit}, compliance=${score.compliance})` };
   }
 
-  // 2.5 入库
+  // 2.5 AI 选品研判（可选，失败不影响入库）
+  let aiEvaluation: AIEvaluationResult | undefined;
+  try {
+    aiEvaluation = await aiEvaluateCandidate({
+      site: enriched.site,
+      title: enriched.title,
+      categoryName: enriched.categoryName,
+      priceUsd: enriched.priceUsd,
+      soldQuantity: enriched.soldQuantity,
+      dailySales: enriched.dailySales,
+      sourceTitle: source.title,
+      sourcePriceCny: source.price,
+      listingPriceUsd: listingPrice,
+      netProfitRate: profit.netProfitRate,
+      scoreTotal: score.total,
+      scoreDemand: score.demand,
+      scoreCompetition: score.competition,
+      scoreProfit: score.profit,
+      scoreLogistics: score.logistics,
+      scoreCompliance: score.compliance,
+    });
+    console.log(`[SourcingPipeline] 候选 ${raw.itemId} AI 研判: pass=${aiEvaluation.pass} score=${aiEvaluation.score} reason=${aiEvaluation.reason}`);
+  } catch (err: any) {
+    console.warn(`[SourcingPipeline] 候选 ${raw.itemId} AI 研判失败:`, err?.message || err);
+  }
+
+  // 2.6 入库
   const dbId = insertCandidate({
     run_id: runId,
     site: enriched.site,
@@ -277,6 +304,7 @@ async function processOneCandidate(
     score_logistics: score.logistics,
     score_compliance: score.compliance,
     score_total: score.total,
+    ai_evaluation_json: aiEvaluation ? JSON.stringify(aiEvaluation) : null,
     status: 'pending',
   });
 

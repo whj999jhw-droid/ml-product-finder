@@ -192,6 +192,8 @@ CREATE TABLE IF NOT EXISTS candidates (
   score_logistics REAL,
   score_compliance REAL,
   score_total REAL,
+  -- AI 选品研判结果（JSON）
+  ai_evaluation_json TEXT,
   -- 审核工作流
   status TEXT NOT NULL DEFAULT 'pending',
   reject_reason TEXT,
@@ -336,8 +338,19 @@ export function getCachedOrders(storeId: string): { orders: any[]; counts: { tot
           fd = extractHandlingDeadline(o, null, r.site || o.site || '');
           o.handlingDeadline = fd.deadline;
         }
-        o.remainingHours = fd.remainingHours;
-        o.remainingHoursText = fd.remainingHoursText;
+        // 已发货 / 已取消订单不展示履约倒计时：强制清掉，避免旧缓存残留的 handlingDeadline
+        // 被 recalcHandlingDeadline 误算成「已超时」（与 attachFulfillmentDeadline 行为一致）。
+        // 这是「已发货订单在手机端显示未发货+已超时」的根因：mlStatus 已是 shipped，但
+        // handlingDeadline 残留导致 remainingHours 为负。PC 端靠 mlStatus 分 tab 隐藏了，
+        // 移动端列表直接展示履约行，因此暴露出来。
+        if (o.mlStatus && o.mlStatus !== 'unshipped') {
+          o.handlingDeadline = null;
+          o.remainingHours = null;
+          o.remainingHoursText = '—';
+        } else {
+          o.remainingHours = fd.remainingHours;
+          o.remainingHoursText = fd.remainingHoursText;
+        }
         return o;
       } catch {
         return null;
@@ -470,8 +483,16 @@ export function getSyncOrdersSince(sinceIso: string | null): any[] {
         fd = extractHandlingDeadline(o, null, r.site || o.site || '');
         o.handlingDeadline = fd.deadline;
       }
-      o.remainingHours = fd.remainingHours;
-      o.remainingHoursText = fd.remainingHoursText;
+      // 已发货 / 已取消订单不展示履约倒计时（与 getCachedOrders 一致），避免残留 handlingDeadline
+      // 被误算成「已超时」。移动端 orders/recent 直接依赖 remainingHoursText 渲染履约行。
+      if (o.mlStatus && o.mlStatus !== 'unshipped') {
+        o.handlingDeadline = null;
+        o.remainingHours = null;
+        o.remainingHoursText = '—';
+      } else {
+        o.remainingHours = fd.remainingHours;
+        o.remainingHoursText = fd.remainingHoursText;
+      }
       // 保留数据库元信息，便于调用方使用
       return { ...r, order_json: JSON.stringify(o), ...o };
     } catch {

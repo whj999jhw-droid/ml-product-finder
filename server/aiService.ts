@@ -943,3 +943,124 @@ export async function translateOrderTexts(
     return {};
   }
 }
+
+// ============ AI 选品研判 ============
+
+export interface AIEvaluationInput {
+  site: string;
+  title: string;
+  categoryName?: string;
+  priceUsd: number;
+  soldQuantity: number;
+  dailySales: number;
+  sourceTitle?: string;
+  sourcePriceCny?: number;
+  listingPriceUsd?: number;
+  netProfitRate?: number;
+  scoreTotal?: number;
+  scoreDemand?: number;
+  scoreCompetition?: number;
+  scoreProfit?: number;
+  scoreLogistics?: number;
+  scoreCompliance?: number;
+  trendKeywords?: string[];
+}
+
+export interface AIEvaluationResult {
+  pass: boolean;
+  score: number;
+  reason: string;
+  risks: string[];
+  suggestions: string[];
+  used: 'ai' | 'fallback';
+  error?: string;
+}
+
+/**
+ * 让 LLM 对候选商品做一次「值不值得做」的研判。
+ * 输入包含 ML 竞品信息、1688 货源、利润、五维评分和站点热搜词。
+ * 输出 JSON：{ pass, score, reason, risks, suggestions }。
+ * LLM 失败时返回 fallback 结果（按规则评分通过即 pass），不阻断流水线。
+ */
+export async function aiEvaluateCandidate(input: AIEvaluationInput): Promise<AIEvaluationResult> {
+  const cfg = getLlmConfig();
+  if (!cfg) {
+    return fallbackEvaluation(input);
+  }
+
+  const lang = langOfSite(input.site);
+  const langNameText = langName(lang);
+  const trendText = (input.trendKeywords || []).slice(0, 10).join(', ') || 'N/A';
+
+  const systemPrompt = `You are a cross-border e-commerce product selection expert for Mercado Libre.
+Evaluate whether the following candidate product is worth sourcing and selling.
+Respond ONLY in JSON format, no explanation, no markdown code block.
+
+JSON schema:
+{
+  "pass": boolean,        // true if recommended, false if too risky or low value
+  "score": number,        // 0.0~1.0 overall confidence
+  "reason": string,       // concise Chinese reason for the decision (≤80 chars)
+  "risks": string[],      // 0-3 main risks in Chinese
+  "suggestions": string[] // 0-3 actionable suggestions in Chinese
+}
+
+Rules:
+- Prefer products with daily sales ≥1, net profit rate ≥15%, and clear logistics data.
+- Be cautious with heavy/bulky items, extremely low margins, or generic titles lacking product specifics.
+- If the title is only a broad category name (e.g. "Hogar, Muebles y Jardín"), score low and explain "标题过大类，缺具体商品信息".`;
+
+  const prompt = `请研判以下 Mercado Libre ${input.site} 候选商品是否值得做：
+
+站点：${input.site}
+商品标题（${langNameText}）：${input.title}
+类目：${input.categoryName || 'N/A'}
+竞品售价：$${input.priceUsd?.toFixed(2) || 'N/A'}
+累计销量：${input.soldQuantity || 'N/A'}
+日均销量：${input.dailySales?.toFixed(2) || 'N/A'}
+1688 货源标题：${input.sourceTitle || 'N/A'}
+1688 采购价（CNY）：${input.sourcePriceCny?.toFixed(2) || 'N/A'}
+建议售价：$${input.listingPriceUsd?.toFixed(2) || 'N/A'}
+净利率：${input.netProfitRate !== undefined ? `${(input.netProfitRate * 100).toFixed(1)}%` : 'N/A'}
+五维评分：总分 ${input.scoreTotal ?? 'N/A'}（需求 ${input.scoreDemand ?? 'N/A'} / 竞争 ${input.scoreCompetition ?? 'N/A'} / 利润 ${input.scoreProfit ?? 'N/A'} / 物流 ${input.scoreLogistics ?? 'N/A'} / 合规 ${input.scoreCompliance ?? 'N/A'}）
+站点热搜词参考：${trendText}
+
+请按 systemPrompt 要求只返回 JSON。`;
+
+  try {
+    const raw = await llmGenerate({
+      prompt,
+      systemPrompt,
+      timeoutMs: 20000,
+      jsonMode: true,
+      temperature: 0.3,
+    });
+    const parsed = extractJsonObject(raw) as Partial<AIEvaluationResult> | undefined;
+    if (!parsed || typeof parsed.pass !== 'boolean' || typeof parsed.score !== 'number') {
+      return { ...fallbackEvaluation(input), used: 'fallback', error: `LLM 返回格式异常: ${raw.slice(0, 200)}` };
+    }
+    return {
+      pass: parsed.pass,
+      score: Math.max(0, Math.min(1, parsed.score)),
+      reason: String(parsed.reason || '').slice(0, 120) || (parsed.pass ? 'AI 研判通过' : 'AI 研判不通过'),
+      risks: Array.isArray(parsed.risks) ? parsed.risks.slice(0, 3).map(String) : [],
+      suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions.slice(0, 3).map(String) : [],
+      used: 'ai',
+    };
+  } catch (err: any) {
+    console.error('[aiEvaluateCandidate] LLM 研判失败：', err?.message || err);
+    return { ...fallbackEvaluation(input), used: 'fallback', error: err?.message || String(err) };
+  }
+}
+
+function fallbackEvaluation(input: AIEvaluationInput): AIEvaluationResult {
+  const pass = (input.scoreTotal ?? 0) >= 0.6 && (input.scoreCompliance ?? 1) > 0;
+  return {
+    pass,
+    score: input.scoreTotal ?? 0,
+    reason: pass ? '规则评分通过（LLM 未配置或失败）' : '规则评分未通过（LLM 未配置或失败）',
+    risks: [],
+    suggestions: [],
+    used: 'fallback',
+  };
+}

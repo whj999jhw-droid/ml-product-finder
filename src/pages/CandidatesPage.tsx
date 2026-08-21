@@ -50,6 +50,20 @@ interface Store {
   enabled: boolean;
 }
 
+function parseAiEvaluation(raw: string | undefined | null): { pass: boolean; score: number; reason: string } | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      pass: !!parsed.pass,
+      score: typeof parsed.score === 'number' ? parsed.score : 0,
+      reason: String(parsed.reason || ''),
+    };
+  } catch {
+    return null;
+  }
+}
+
 interface SourcingRun {
   id: string;
   status: 'running' | 'done' | 'failed';
@@ -399,6 +413,24 @@ export function CandidatesPage() {
           {row.score_total?.toFixed(2)}
         </Tag>
       ),
+    },
+    {
+      colKey: 'ai_evaluation_json',
+      title: 'AI 研判',
+      width: 120,
+      cell: ({ row }) => {
+        const ev = parseAiEvaluation(row.ai_evaluation_json);
+        if (!ev) return <span className="text-gray-400">-</span>;
+        return (
+          <div className="text-xs">
+            <Tag theme={ev.pass ? 'success' : 'danger'} size="small">
+              {ev.pass ? '通过' : '不通过'}
+            </Tag>
+            {ev.score > 0 && <span className="ml-1 text-gray-500">{ev.score.toFixed(2)}</span>}
+            {ev.reason && <div className="mt-1 text-gray-500 truncate max-w-[200px]" title={ev.reason}>{ev.reason}</div>}
+          </div>
+        );
+      },
     },
     {
       colKey: 'status',
