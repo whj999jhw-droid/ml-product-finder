@@ -98,7 +98,7 @@ pm2 save
 
 你有 Cloudflare 上的域名时，用 `cloudflared` 在本机开一条隧道，把 `https://子域.你的域名` 永久映射到 `localhost:3000`，回调地址**永不变**，比 localtunnel 稳定得多。
 
-**前提**：域名已加到 Cloudflare（NS 指向 Cloudflare）。本工具已确认 `w999w.dpdns.org` 在 Cloudflare 上，子域用 `ml-callback`，即回调地址固定为 `https://ml-callback.w999w.dpdns.org/api/ml/oauth/store-callback`。
+**前提**：域名已加到 Cloudflare（NS 指向 Cloudflare）。本工具已确认 `w999w.dpdns.org` 在 Cloudflare 上，子域用 `ml`，即回调地址固定为 `https://ml.w999w.dpdns.org/api/ml/oauth/store-callback`。
 
 **① 安装 cloudflared**（Windows，用已装好的 node 环境旁的管理终端 / PowerShell）：
 ```powershell
@@ -121,7 +121,7 @@ cloudflared tunnel create ml-product-finder
 
 **④ 把子域 `ml-callback.你的域名` 指向这条隧道（只需一次，自动建 DNS CNAME）**：
 ```powershell
-cloudflared tunnel route dns ml-product-finder ml-callback.w999w.dpdns.org
+cloudflared tunnel route dns ml-product-finder ml.w999w.dpdns.org
 ```
 
 **⑤ 写一份配置文件 `~\cloudflared\config.yml`**（让隧道指向本机 3000）：
@@ -129,7 +129,7 @@ cloudflared tunnel route dns ml-product-finder ml-callback.w999w.dpdns.org
 tunnel: ml-product-finder
 credentials-file: C:\Users\whj87\.cloudflared\<上一步的id>.json
 ingress:
-  - hostname: ml-callback.w999w.dpdns.org
+  - hostname: ml.w999w.dpdns.org
     service: http://localhost:3000
   - service: http_status:404
 ```
@@ -142,14 +142,14 @@ cloudflared tunnel run ml-product-finder
 
 **⑦ 设环境变量并重启后端**：
 ```
-ML_REDIRECT_URI=https://ml-callback.w999w.dpdns.org/api/ml/oauth/store-callback
+ML_REDIRECT_URI=https://ml.w999w.dpdns.org/api/ml/oauth/store-callback
 ```
 重启 `tsx server/index.ts` 后，网页「授权回调设置」会显示「固定回调域名模式」，回调地址即为上面这个、永久不变。
 
-> **为什么重启后还是 loca.lt？** 99% 是 `ML_REDIRECT_URI` 没真正传进后端进程。Windows PowerShell 必须在**启动后端的同一个窗口**里设：`$env:ML_REDIRECT_URI="https://ml-callback.w999w.dpdns.org/api/ml/oauth/store-callback"`，然后再跑 `npx tsx server/index.ts`。换窗口、只改文件不重启、拼写错误，都会让旧值继续生效。重启后刷新页面，如果仍显示 loca.lt，请打开浏览器 F12 → Network → 看 `/api/ml/oauth/tunnel` 返回里的 `fixedRedirect` 字段是否为 `true`。
+> **为什么重启后还是 loca.lt？** 99% 是 `ML_REDIRECT_URI` 没真正传进后端进程。Windows PowerShell 必须在**启动后端的同一个窗口**里设：`$env:ML_REDIRECT_URI="https://ml.w999w.dpdns.org/api/ml/oauth/store-callback"`，然后再跑 `npx tsx server/index.ts`。换窗口、只改文件不重启、拼写错误，都会让旧值继续生效。重启后刷新页面，如果仍显示 loca.lt，请打开浏览器 F12 → Network → 看 `/api/ml/oauth/tunnel` 返回里的 `fixedRedirect` 字段是否为 `true`。
 
 **快速验证隧道是否通**（不用走完整授权）：
-- 浏览器打开 `https://ml-callback.w999w.dpdns.org/api/ml/oauth/store-callback`
+- 浏览器打开 `https://ml.w999w.dpdns.org/api/ml/oauth/store-callback`
   - 看到「缺少授权码或状态参数」→ 隧道和回调路由都通了，去美客多后台把上面地址加进「重定向 URI」即可。
   - 看到无法连接/超时 → 隧道没在跑（回去执行 ⑥）或 DNS 未生效（等几分钟）。
 - 建议先 `npx vite build` 一次，让 `dist/` 是最新代码；这样用域名访问时整站都能正常加载。

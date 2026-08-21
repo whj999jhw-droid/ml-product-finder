@@ -58,9 +58,9 @@ export function StoreManagementPage() {
   // OAuth 回调地址状态（自动探测固定域名 / 临时隧道回退）
   const [cb, setCb] = useState<CallbackStatus>({
     mode: 'fixed',
-    uri: 'https://ml-callback.w999w.dpdns.org/api/ml/oauth/store-callback',
+    uri: 'https://ml.w999w.dpdns.org/api/ml/oauth/store-callback',
     reachable: false,
-    fixedDomain: 'https://ml-callback.w999w.dpdns.org/api/ml/oauth/store-callback',
+    fixedDomain: 'https://ml.w999w.dpdns.org/api/ml/oauth/store-callback',
     notice: '',
     tunnelRunning: false,
     tunnelUrl: '',
@@ -164,7 +164,7 @@ export function StoreManagementPage() {
         mode: d.mode || 'fixed',
         uri: d.callbackUrl || '',
         reachable: !!d.reachable,
-        fixedDomain: 'https://ml-callback.w999w.dpdns.org/api/ml/oauth/store-callback',
+        fixedDomain: 'https://ml.w999w.dpdns.org/api/ml/oauth/store-callback',
         notice: d.notice || '',
         tunnelRunning: d.mode === 'tunnel',
         tunnelUrl: d.tunnelUrl || '',
@@ -466,7 +466,7 @@ export function StoreManagementPage() {
               {cb.tunnelRunning ? '停止隧道' : '手动启动隧道（临时）'}
             </Button>
             <span className="text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>
-              固定域名 = https://ml-callback.w999w.dpdns.org/api/ml/oauth/store-callback（cloudflared 自定义域名）
+              固定域名 = https://ml.w999w.dpdns.org/api/ml/oauth/store-callback（cloudflared 自定义域名）
             </span>
           </div>
         </Space>

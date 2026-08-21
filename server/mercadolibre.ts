@@ -355,7 +355,7 @@ export function getTunnelCallbackUrl(): string {
 // 项目统一使用 cloudflared 自定义域名，OAuth 回调地址固定不变。
 // 启动时自动探测该域名是否可达（cloudflared 是否运行），不可达则自动退回到 localtunnel 临时地址，
 // 并提示用户去美客多后台把「重定向 URI」改成临时地址。
-export const DEFAULT_FIXED_REDIRECT_URI = 'https://ml-callback.w999w.dpdns.org/api/ml/oauth/store-callback';
+export const DEFAULT_FIXED_REDIRECT_URI = 'https://ml.w999w.dpdns.org/api/ml/oauth/store-callback';
 
 export type RedirectMode = 'env' | 'fixed' | 'tunnel';
 
@@ -400,7 +400,7 @@ async function probeRedirectReachable(baseUrl: string, timeoutMs = 6000): Promis
 /**
  * 解析当前生效的 OAuth 回调地址（带自动探测 + 自动回退）：
  * 1. 显式设置 ML_REDIRECT_URI 环境变量 → 直接用（mode='env'，优先级最高）
- * 2. 否则探测默认固定域名 ml-callback.w999w.dpdns.org 是否可达
+ * 2. 否则探测默认固定域名 ml.w999w.dpdns.org 是否可达
  *    - 可达 → 用固定域名（mode='fixed'）；若之前起过隧道则顺手关掉
  *    - 不可达 → 自动启动 localtunnel，用临时地址（mode='tunnel'，并附提示）
  */

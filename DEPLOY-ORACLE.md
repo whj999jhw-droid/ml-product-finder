@@ -389,7 +389,7 @@ cloudflared tunnel list
 ```
 
 > **备选：想直接复用本机那套隧道/域名（美客多后台零改动）？**
-> 如果你决定**不再用本机跑项目**，可以在服务器上直接复用本机的隧道凭证：把本机 `C:\Users\whj87\.cloudflared\` 里的 `*.json`（隧道 ID 文件）和 `cert.pem` 传到服务器的 `~/.cloudflared/`，然后 `cloudflared tunnel run ml-product-finder` 就能用。**同一个隧道不要同时在本机和服务器跑**，否则请求会被随机分到两台机器（时而通时而 530）。复用模式下，下文所有 `ml-finder-server` / `ml-callback-server` 都要换成 `ml-product-finder` / `ml-callback.w999w.dpdns.org`，且**第 4 步 DNS 路由不用做**（已存在）。
+> 如果你决定**不再用本机跑项目**，可以在服务器上直接复用本机的隧道凭证：把本机 `C:\Users\whj87\.cloudflared\` 里的 `*.json`（隧道 ID 文件）和 `cert.pem` 传到服务器的 `~/.cloudflared/`，然后 `cloudflared tunnel run ml-product-finder` 就能用。**同一个隧道不要同时在本机和服务器跑**，否则请求会被随机分到两台机器（时而通时而 530）。复用模式下，下文所有 `ml-finder-server` / `ml-callback-server` 都要换成 `ml-product-finder` / `ml.w999w.dpdns.org`，且**第 4 步 DNS 路由不用做**（已存在）。
 
 ### 第 4 步：把子域名绑到隧道（DNS 路由）
 ```bash
