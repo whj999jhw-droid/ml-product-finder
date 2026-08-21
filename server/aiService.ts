@@ -243,7 +243,7 @@ function chatCompletionsUrl(baseUrl: string): string {
     return normalized;
   }
   // 已包含 /v1 /v2 /v3 /v4 等版本路径：直接追加 chat/completions
-  if (\/v\\d+$/i.test(normalized)) {
+  if (/\/v\d+$/i.test(normalized)) {
     return `${normalized}/chat/completions`;
   }
   // 默认按 OpenAI 规范补 /v1
