@@ -1275,9 +1275,16 @@ app.get('/api/mobile/orders/recent', (req, res) => {
           : o.paid_amount != null
             ? `${o.currency_id || ''} ${typeof o.paid_amount === 'object' ? o.paid_amount.amount : o.paid_amount}`.trim()
             : '';
-      // 按当前保存的物流状态重新分类，修复早期 classify 错误导致「已发货仍显示超时」
-      const category = orders.classifyOrder(o, o.shipStatus || o.shipping?.status);
-      const isShipped = category === 'shipped';
+      // 以持久化的 mlStatus（与 PC 端一致的权威分类）为主，物流状态为辅重新判定，
+      // 修复「已发货订单在手机端仍显示未发货+已超时」：mlStatus 已是 shipped/cancelled
+      // 时不再依赖可能缺失的 shipStatus，直接按已发货处理。
+      const persisted = o.mlStatus || '';
+      const reclass = orders.classifyOrder(o, o.shipStatus || o.shipping?.status);
+      const finalCategory =
+        persisted === 'shipped' || persisted === 'cancelled' ? persisted : reclass;
+      const isShipped = finalCategory === 'shipped';
+      const isCancelled = finalCategory === 'cancelled';
+      const noFulfill = isShipped || isCancelled;
       return {
         storeId: r.store_id,
         storeName: store?.nickname || store?.site || r.store_id,
@@ -1285,14 +1292,15 @@ app.get('/api/mobile/orders/recent', (req, res) => {
         orderId: String(o.id),
         dateCreated: o.date_created || r.created_at,
         status: o.status || '',
+        mlStatus: finalCategory,
         total,
         buyer: o.buyer?.nickname || o.buyer?.id || '',
         itemCount: items.length,
         itemTitles: items.slice(0, 3).map((it: any) => it.item?.title || it.title || ''),
         syncSaved: r.source === 'sync',
-        handlingDeadline: isShipped ? null : (o.handlingDeadline || null),
-        remainingHours: isShipped ? null : (o.remainingHours ?? null),
-        remainingHoursText: isShipped ? '—' : (o.remainingHoursText || '—'),
+        handlingDeadline: noFulfill ? null : (o.handlingDeadline || null),
+        remainingHours: noFulfill ? null : (o.remainingHours ?? null),
+        remainingHoursText: noFulfill ? '—' : (o.remainingHoursText || '—'),
       };
     });
     res.json({ success: true, since, count: out.length, orders: out });
@@ -2567,6 +2575,22 @@ app.post('/api/ml/llm-config/test', async (req, res) => {
       }
       providers = saved;
     }
+
+    // 测试时允许「Api Key 留空=使用已保存的 Key」，避免编辑 baseUrl/model 时必须重新输入 Key
+    const savedProviders = getLlmProviders();
+    providers = providers.map((p) => {
+      if (p.apiKey) return p;
+      const baseUrl = (p.baseUrl || '').replace(/\/+$/, '').trim();
+      const match = savedProviders.find(
+        (s) =>
+          (s.baseUrl || '').replace(/\/+$/, '').trim() === baseUrl &&
+          (s.model || '').trim() === (p.model || '').trim()
+      );
+      if (match?.apiKey) {
+        return { ...p, apiKey: match.apiKey };
+      }
+      return p;
+    });
 
     const perProvider: Array<{
       name: string;
