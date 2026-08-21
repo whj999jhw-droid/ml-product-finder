@@ -20,19 +20,25 @@ interface Candidate {
   ml_price_usd: number;
   ml_thumbnail: string;
   ml_permalink: string;
+  ml_category_name?: string;
+  ali1688_title?: string;
   ali1688_price_cny: number;
   ali1688_url: string;
   ali1688_image_url: string;
+  ali1688_supplier?: string;
+  source_title?: string;
   listing_price_usd: number;
   profit_net_usd: number;
   profit_rate: number;
   roi: number;
+  cost_breakdown_json?: string;
   score_total: number;
   score_demand: number;
   score_competition: number;
   score_profit: number;
   score_logistics: number;
   score_compliance: number;
+  ai_evaluation_json?: string;
   status: 'pending' | 'approved' | 'rejected' | 'published';
   reject_reason: string;
   weight_kg: number;
@@ -583,38 +589,132 @@ export function CandidatesPage() {
       <Dialog
         visible={publishOpen}
         onClose={() => setPublishOpen(false)}
-        header="一键上架"
-        onConfirm={handlePublish}
-        confirmLoading={publishing}
+        header="商品详情预览"
+        width={720}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setPublishOpen(false)}>
+              取消
+            </Button>
+            <Button theme="success" loading={publishing} onClick={handlePublish}>
+              确认上架
+            </Button>
+          </div>
+        }
       >
-        <div className="space-y-4">
-          <p>选择要上架的目标店铺：</p>
-          <div className="space-y-2 max-h-60 overflow-auto">
-            {stores
-              .filter((s) => s.enabled && s.authorized)
-              .map((s) => (
-                <div key={s.id} className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={selectedStoreIds.includes(s.id)}
-                    onChange={(e) => {
-                      if (e.target.checked) {
-                        setSelectedStoreIds((prev) => [...prev, s.id]);
-                      } else {
-                        setSelectedStoreIds((prev) => prev.filter((id) => id !== s.id));
-                      }
+        {publishRow && (
+          <div className="space-y-4 max-h-[70vh] overflow-auto pr-2">
+            {/* 基本信息 */}
+            <div className="flex gap-4">
+              <div className="flex-shrink-0">
+                {publishRow.ali1688_image_url || publishRow.ml_thumbnail ? (
+                  <img
+                    src={publishRow.ali1688_image_url || publishRow.ml_thumbnail}
+                    alt=""
+                    className="w-32 h-32 object-cover rounded border border-gray-100"
+                    onError={(e) => {
+                      const img = e.target as HTMLImageElement;
+                      img.onerror = null;
+                      img.style.display = 'none';
                     }}
                   />
-                  <span>{s.nickname}</span>
-                  <Tag size="small">{s.site}</Tag>
+                ) : (
+                  <div className="w-32 h-32 rounded bg-gray-100 flex items-center justify-center text-sm text-gray-400">
+                    无图
+                  </div>
+                )}
+              </div>
+              <div className="flex-1 space-y-1 text-sm">
+                <div className="font-medium text-base">{publishRow.ml_title || publishRow.ali1688_title}</div>
+                <div className="text-gray-500">
+                  站点：<Tag size="small">{publishRow.site}</Tag>
+                  {publishRow.ml_category_name && <span className="ml-2">类目：{publishRow.ml_category_name}</span>}
                 </div>
-              ))}
+                <div className="text-gray-500">
+                  竞品售价：<span className="text-blue-600 font-medium">${publishRow.ml_price_usd?.toFixed(2)}</span>
+                  <span className="ml-4">建议售价：<span className="text-blue-600 font-medium">${publishRow.listing_price_usd?.toFixed(2)}</span></span>
+                </div>
+                <div className="text-gray-500">
+                  净利润：<span className="text-green-600 font-medium">${publishRow.profit_net_usd?.toFixed(2)} ({((publishRow.profit_rate || 0) * 100).toFixed(0)}%)</span>
+                  <span className="ml-4">ROI：<span className="text-green-600 font-medium">{(publishRow.roi || 0).toFixed(2)}</span></span>
+                </div>
+                <div className="text-gray-500">
+                  重量/尺寸：{(publishRow.weight_kg ? `${(publishRow.weight_kg * 1000).toFixed(0)}g` : '未知')}
+                  {publishRow.length_cm ? ` / ${publishRow.length_cm}×${publishRow.width_cm}×${publishRow.height_cm} cm` : ''}
+                </div>
+              </div>
+            </div>
+
+            {/* AI 研判 */}
+            {publishRow.ai_evaluation_json && (
+              <div className="bg-gray-50 p-3 rounded">
+                <div className="text-sm font-medium mb-1">AI 研判</div>
+                {(() => {
+                  const ev = parseAiEvaluation(publishRow.ai_evaluation_json);
+                  if (!ev) return null;
+                  return (
+                    <div className="text-sm">
+                      <Tag theme={ev.pass ? 'success' : 'danger'} size="small">{ev.pass ? '通过' : '不通过'}</Tag>
+                      <span className="ml-2 text-gray-600">{ev.reason}</span>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+
+            {/* 1688 货源 */}
+            <div>
+              <div className="text-sm font-medium mb-1">1688 货源</div>
+              <div className="text-sm text-gray-600 space-y-1">
+                {publishRow.ali1688_title && <div>标题：{publishRow.ali1688_title}</div>}
+                <div>
+                  价格：¥{publishRow.ali1688_price_cny?.toFixed(2)}
+                  {publishRow.ali1688_url && (
+                    <a href={publishRow.ali1688_url} target="_blank" rel="noreferrer" className="ml-2 text-blue-600 hover:underline">
+                      查看货源
+                    </a>
+                  )}
+                </div>
+                {publishRow.ali1688_supplier && <div>供应商：{publishRow.ali1688_supplier}</div>}
+              </div>
+            </div>
+
+            {/* 上架目标店铺 */}
+            <div>
+              <div className="text-sm font-medium mb-2">选择要上架的目标店铺：</div>
+              <div className="space-y-2 max-h-40 overflow-auto border border-gray-100 rounded p-2">
+                {stores
+                  .filter((s) => s.enabled && s.authorized)
+                  .map((s) => (
+                    <div key={s.id} className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={selectedStoreIds.includes(s.id)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedStoreIds((prev) => [...prev, s.id]);
+                          } else {
+                            setSelectedStoreIds((prev) => prev.filter((id) => id !== s.id));
+                          }
+                        }}
+                      />
+                      <span>{s.nickname}</span>
+                      <Tag size="small">{s.site}</Tag>
+                    </div>
+                  ))}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Switch value={useCbtCategory} onChange={(v) => setUseCbtCategory(v as boolean)} />
+              <span className="text-sm">使用 CBT 类目前缀（上架失败可关闭）</span>
+            </div>
+
+            <div className="text-xs text-gray-400 bg-yellow-50 p-2 rounded">
+              提示：确认上架后，系统会自动生成西/葡语标题和描述，并将图片上传至 Mercado Libre 图床后发布。
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <Switch value={useCbtCategory} onChange={(v) => setUseCbtCategory(v as boolean)} />
-            <span>使用 CBT 类目前缀（上架失败可关闭）</span>
-          </div>
-        </div>
+        )}
       </Dialog>
 
       <Dialog
