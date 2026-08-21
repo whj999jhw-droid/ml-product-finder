@@ -1349,17 +1349,25 @@ app.get('/api/mobile/orders/:storeId/:orderId', async (req, res) => {
       shippingMethod: detail.shippingMethod || '',
       buyerBilling: detail.buyerBilling || null,
       financialSummary: detail.financialSummary || null,
-      handlingDeadline: detail.fulfillment?.deadline || null,
-      remainingHours: detail.fulfillment?.remainingHours ?? null,
-      remainingHoursText: detail.fulfillment?.remainingHoursText || '—',
-      items: items.map((it: any) => ({
-        title: it.item?.title || it.title || '未知商品',
-        quantity: it.quantity || 1,
-        unitPrice: it.unit_price || it.item?.price || null,
-        sku: it.item?.seller_sku || it.item?.seller_custom_field || '',
-        itemId: it.item?.id || '',
-        images: it.itemImages || it.item?.pictures?.map((p: any) => p?.secure_url || p?.url || p).filter(Boolean) || (it.item?.thumbnail ? [it.item.thumbnail] : []) || [],
-      })),
+      // 与 web 端 OrdersPage 对齐：只有「未发货(unshipped)」才带履约剩余，
+      // 已发货/已取消一律置 null/'—'，避免 fulfillment 算出负值导致详情页误显「已超时」。
+      handlingDeadline: detail.category === 'unshipped' ? (detail.fulfillment?.deadline || null) : null,
+      remainingHours: detail.category === 'unshipped' ? (detail.fulfillment?.remainingHours ?? null) : null,
+      remainingHoursText: detail.category === 'unshipped' ? (detail.fulfillment?.remainingHoursText || '—') : '—',
+      items: items.map((it: any) => {
+        // 单价：ML 的 unit_price 是纯数字（如 6.95），但 App 端 odItemHtml 期望
+        // { currency, amount } 对象，直接透传数字会导致「×1 · undefined undefined」。
+        const amt = it.unit_price != null ? it.unit_price : (it.item?.price != null ? it.item.price : null);
+        const cur = o.currency_id || detail.currency || '';
+        return {
+          title: it.item?.title || it.title || '未知商品',
+          quantity: it.quantity || 1,
+          unitPrice: amt != null ? { currency: cur, amount: amt } : null,
+          sku: it.item?.seller_sku || it.item?.seller_custom_field || '',
+          itemId: it.item?.id || '',
+          images: it.itemImages || it.item?.pictures?.map((p: any) => p?.secure_url || p?.url || p).filter(Boolean) || (it.item?.thumbnail ? [it.item.thumbnail] : []) || [],
+        };
+      }),
     };
     res.json({
       success: true,
@@ -2578,6 +2586,30 @@ app.get('/api/ml/llm-config', (req, res) => {
     model: providers[0]?.model || '',
     // 新字段：多平台列表（按 failover 顺序）
     providers: providers.map((p) => ({ name: p.name, baseUrl: p.baseUrl, model: p.model })),
+  });
+});
+
+// AI 配置总览：环境变量兜底检测 + 平台列表 + AI 使用场景清单
+app.get('/api/ml/ai-config/status', (req, res) => {
+  const envBase = !!process.env.LLM_BASE_URL?.trim();
+  const envKey = !!process.env.LLM_API_KEY?.trim();
+  const envModel = !!process.env.LLM_MODEL?.trim();
+  const providers = getLlmProviders();
+  res.json({
+    success: true,
+    envConfigured: { baseUrl: envBase, apiKey: envKey, model: envModel },
+    // 环境变量优先级最高：只要三个都配，会覆盖文件配置并排在最前
+    envActive: envBase && envKey && envModel,
+    providerCount: providers.length,
+    providers: providers.map((p) => ({ name: p.name, baseUrl: p.baseUrl, model: p.model })),
+    // AI 在系统中的使用场景（一处配置，多处复用）
+    features: [
+      { key: 'titles', name: 'AI 标题生成', desc: '基于 1688 货源 + 竞品要素 + 站点热搜词生成西/葡语标题', fallback: '回退规则模板（沿用竞品要素重组）' },
+      { key: 'description', name: 'AI 描述生成', desc: '生成目标语言商品描述', fallback: '回退轻量模板描述' },
+      { key: 'trends', name: '热搜词翻译', desc: '把 ML Trends 热搜词翻译为中文选品术语', fallback: '不翻译，直接展示原词' },
+      { key: 'orders', name: '订单文本翻译', desc: '把订单中西/葡语标题、留言翻译为中文', fallback: '不翻译，保留原文' },
+      { key: 'evaluation', name: 'AI 选品研判', desc: '对候选商品做「值不值得做」的 LLM 研判', fallback: '回退规则评分（总分≥0.6 且合规>0 即通过）' },
+    ],
   });
 });
 

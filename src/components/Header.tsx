@@ -22,6 +22,7 @@ interface HeaderProps {
   isTrendsPage?: boolean;
   isProductAdminPage?: boolean;
   isCandidatesPage?: boolean;
+  isConfigPage?: boolean;
   sidebarOpen: boolean;
   theme: Theme;
   currentSession: Session | undefined;
@@ -43,6 +44,7 @@ export function Header({
   isTrendsPage,
   isProductAdminPage,
   isCandidatesPage,
+  isConfigPage,
   sidebarOpen,
   theme,
   currentSession,
@@ -90,7 +92,7 @@ export function Header({
           className="text-base font-semibold"
           style={{ color: 'var(--td-text-color-primary)' }}
         >
-          {isSettingsPage ? '设置' : isProductsPage ? '美客多商品抓取' : isSourcingPage ? '货源与利润（M2）' : isCandidatesPage ? 'AI 选品' : isListingPage ? '合规上架（M3）' : isStoresPage ? '店铺管理' : isOrdersPage ? '订单管理' : isNotificationsPage ? '通知设置' : isTrendsPage ? '热搜词' : isProductAdminPage ? '商品管理' : (currentSession?.title || APP_CONFIG.name)}
+          {isSettingsPage ? '设置' : isConfigPage ? '配置中心' : isProductsPage ? '美客多商品抓取' : isSourcingPage ? '货源与利润（M2）' : isCandidatesPage ? 'AI 选品' : isListingPage ? '合规上架（M3）' : isStoresPage ? '店铺管理' : isOrdersPage ? '订单管理' : isNotificationsPage ? '通知设置' : isTrendsPage ? '热搜词' : isProductAdminPage ? '商品管理' : (currentSession?.title || APP_CONFIG.name)}
         </h1>
         {!isSettingsPage && !isProductsPage && currentSession && (
           <Tag size="small" variant="outline">

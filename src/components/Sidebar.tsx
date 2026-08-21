@@ -1,5 +1,5 @@
 import { Button, Tooltip } from 'tdesign-react';
-import { AddIcon, DeleteIcon, SettingIcon, NotificationIcon } from 'tdesign-icons-react';
+import { AddIcon, DeleteIcon, SettingIcon, NotificationIcon, ToolsIcon } from 'tdesign-icons-react';
 import { confirmDialog } from '../utils/dialog';
 import { Bot, ShoppingBag, Flame } from 'lucide-react';
 import { APP_CONFIG } from '../config';
@@ -19,6 +19,7 @@ interface SidebarProps {
   isTrendsPage?: boolean;
   isProductAdminPage?: boolean;
   isCandidatesPage?: boolean;
+  isConfigPage?: boolean;
   isMobile?: boolean;
   sidebarOpen: boolean;
   agents: Agent[];
@@ -30,12 +31,11 @@ interface SidebarProps {
   onOpenProducts: () => void;
   onOpenSourcing: () => void;
   onOpenListing: () => void;
-  onOpenStores?: () => void;
   onOpenOrders?: () => void;
-  onOpenNotifications?: () => void;
   onOpenTrends?: () => void;
   onOpenProductAdmin?: () => void;
   onOpenCandidates?: () => void;
+  onOpenConfig?: () => void;
 }
 
 export function Sidebar({
@@ -51,6 +51,7 @@ export function Sidebar({
   isTrendsPage,
   isProductAdminPage,
   isCandidatesPage,
+  isConfigPage,
   isMobile,
   sidebarOpen,
   agents,
@@ -62,12 +63,11 @@ export function Sidebar({
   onOpenProducts,
   onOpenSourcing,
   onOpenListing,
-  onOpenStores,
   onOpenOrders,
-  onOpenNotifications,
   onOpenTrends,
   onOpenProductAdmin,
   onOpenCandidates,
+  onOpenConfig,
 }: SidebarProps) {
   return (
     <aside 
@@ -144,15 +144,6 @@ export function Sidebar({
         </Button>
         <Button 
           icon={<ShoppingBag size={16} />}
-          onClick={onOpenStores}
-          block
-          variant={isStoresPage ? 'outline' : 'text'}
-          theme={isStoresPage ? 'primary' : 'default'}
-        >
-          店铺管理
-        </Button>
-        <Button 
-          icon={<ShoppingBag size={16} />}
           onClick={onOpenOrders}
           block
           variant={isOrdersPage ? 'outline' : 'text'}
@@ -161,13 +152,13 @@ export function Sidebar({
           订单管理
         </Button>
         <Button 
-          icon={<NotificationIcon />}
-          onClick={onOpenNotifications}
+          icon={<ToolsIcon size={16} />}
+          onClick={onOpenConfig}
           block
-          variant={isNotificationsPage ? 'outline' : 'text'}
-          theme={isNotificationsPage ? 'primary' : 'default'}
+          variant={isConfigPage ? 'outline' : 'text'}
+          theme={isConfigPage ? 'primary' : 'default'}
         >
-          通知设置
+          配置中心
         </Button>
         <Button 
           icon={<Flame size={16} />}

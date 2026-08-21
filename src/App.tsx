@@ -22,6 +22,7 @@ import { TrendsPage } from './pages/TrendsPage';
 import { NotificationSettingsPage } from './pages/NotificationSettingsPage';
 import { ProductManagerPage } from './pages/ProductManagerPage';
 import { CandidatesPage } from './pages/CandidatesPage';
+import { ConfigPage } from './pages/ConfigPage';
 
 function App() {
   return (
@@ -38,6 +39,7 @@ function App() {
       <Route path="/trends" element={<AppContent />} />
       <Route path="/product-admin" element={<AppContent />} />
       <Route path="/candidates" element={<AppContent />} />
+      <Route path="/config" element={<AppContent />} />
     </Routes>
   );
 }
@@ -56,6 +58,7 @@ function AppContent() {
   const isTrendsPage = location.pathname === '/trends';
   const isProductAdminPage = location.pathname === '/product-admin';
   const isCandidatesPage = location.pathname === '/candidates';
+  const isConfigPage = location.pathname === '/config';
 
   // Hooks
   const { theme, toggleTheme } = useTheme();
@@ -168,16 +171,8 @@ function AppContent() {
     navigate('/listing');
   }, [navigate]);
 
-  const handleOpenStores = useCallback(() => {
-    navigate('/stores');
-  }, [navigate]);
-
   const handleOpenOrders = useCallback(() => {
     navigate('/orders');
-  }, [navigate]);
-
-  const handleOpenNotifications = useCallback(() => {
-    navigate('/notifications');
   }, [navigate]);
 
   const handleOpenTrends = useCallback(() => {
@@ -190,6 +185,10 @@ function AppContent() {
 
   const handleOpenCandidates = useCallback(() => {
     navigate('/candidates');
+  }, [navigate]);
+
+  const handleOpenConfig = useCallback(() => {
+    navigate('/config');
   }, [navigate]);
 
   // 移动端检测：≤767px 视为手机，侧边栏切换为抽屉模式
@@ -242,6 +241,7 @@ function AppContent() {
         isTrendsPage={isTrendsPage}
         isProductAdminPage={isProductAdminPage}
         isCandidatesPage={isCandidatesPage}
+        isConfigPage={isConfigPage}
         sidebarOpen={sidebarOpen}
         agents={agents}
         getAgent={getAgent}
@@ -252,12 +252,11 @@ function AppContent() {
         onOpenProducts={handleOpenProducts}
         onOpenSourcing={handleOpenSourcing}
         onOpenListing={handleOpenListing}
-        onOpenStores={handleOpenStores}
         onOpenOrders={handleOpenOrders}
-        onOpenNotifications={handleOpenNotifications}
         onOpenTrends={handleOpenTrends}
         onOpenProductAdmin={handleOpenProductAdmin}
         onOpenCandidates={handleOpenCandidates}
+        onOpenConfig={handleOpenConfig}
       />
 
       {/* 主内容区 */}
@@ -277,6 +276,7 @@ function AppContent() {
           isTrendsPage={isTrendsPage}
           isProductAdminPage={isProductAdminPage}
           isCandidatesPage={isCandidatesPage}
+          isConfigPage={isConfigPage}
           sidebarOpen={sidebarOpen}
           theme={theme}
           currentSession={currentSession}
@@ -313,6 +313,8 @@ function AppContent() {
           <ProductManagerPage />
         ) : isCandidatesPage ? (
           <CandidatesPage />
+        ) : isConfigPage ? (
+          <ConfigPage />
         ) : (
           <ChatPage
             currentSession={currentSession}
