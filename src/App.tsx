@@ -248,7 +248,6 @@ function AppContent() {
         onNewChat={handleNewChat}
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
-        onOpenSettings={handleOpenSettings}
         onOpenProducts={handleOpenProducts}
         onOpenSourcing={handleOpenSourcing}
         onOpenListing={handleOpenListing}

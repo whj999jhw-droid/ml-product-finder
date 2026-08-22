@@ -479,7 +479,8 @@ export function CandidatesPage() {
       width: 100,
       cell: ({ row }) => {
         const s = statusMap[row.status] || { label: row.status, theme: 'default' };
-        return <Tag theme={s.theme}>{s.label}</Tag>;
+        const title = row.status === 'rejected' && row.reject_reason ? row.reject_reason : undefined;
+        return <Tag theme={s.theme} title={title}>{s.label}</Tag>;
       },
     },
     {

@@ -1,5 +1,5 @@
 import { Button, Tooltip } from 'tdesign-react';
-import { AddIcon, DeleteIcon, SettingIcon, NotificationIcon, ToolsIcon } from 'tdesign-icons-react';
+import { AddIcon, DeleteIcon, NotificationIcon, ToolsIcon } from 'tdesign-icons-react';
 import { confirmDialog } from '../utils/dialog';
 import { Bot, ShoppingBag, Flame } from 'lucide-react';
 import { APP_CONFIG } from '../config';
@@ -27,7 +27,6 @@ interface SidebarProps {
   onNewChat: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
-  onOpenSettings: () => void;
   onOpenProducts: () => void;
   onOpenSourcing: () => void;
   onOpenListing: () => void;
@@ -59,7 +58,6 @@ export function Sidebar({
   onNewChat,
   onSelectSession,
   onDeleteSession,
-  onOpenSettings,
   onOpenProducts,
   onOpenSourcing,
   onOpenListing,
@@ -238,22 +236,6 @@ export function Sidebar({
             </div>
           );
         })}
-      </div>
-      
-      {/* 底部设置按钮 */}
-      <div 
-        className="p-3 border-t flex-shrink-0"
-        style={{ borderColor: 'var(--td-component-border)' }}
-      >
-        <Button 
-          icon={<SettingIcon />}
-          onClick={onOpenSettings}
-          block
-          variant={isSettingsPage ? 'outline' : 'text'}
-          theme={isSettingsPage ? 'primary' : 'default'}
-        >
-          设置
-        </Button>
       </div>
     </aside>
   );
