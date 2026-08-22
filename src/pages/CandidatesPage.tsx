@@ -11,6 +11,7 @@ import {
   Space,
   Switch,
   Link,
+  ImageViewer,
 } from 'tdesign-react';
 import type { PrimaryTableCol } from 'tdesign-react';
 
@@ -120,6 +121,11 @@ export function CandidatesPage() {
   // 上架时是否上传 YouTube 视频（填本地视频文件绝对路径）
   const [uploadYoutube, setUploadYoutube] = useState(false);
   const [youtubeVideoPath, setYoutubeVideoPath] = useState('');
+
+  // 图片大图预览
+  const [viewerVisible, setViewerVisible] = useState(false);
+  const [viewerImages, setViewerImages] = useState<string[]>([]);
+  const [viewerIndex, setViewerIndex] = useState(0);
 
   const fetchAkStatus = async () => {
     try {
@@ -334,27 +340,54 @@ export function CandidatesPage() {
     }
   };
 
+  // 从候选行提取所有可用图片 URL（支持逗号/分号/空格分隔的多图），去重后返回
+  const extractImageUrls = (row: Candidate): string[] => {
+    const parts = [row.ali1688_image_url, row.ml_thumbnail]
+      .filter(Boolean)
+      .flatMap((s) => String(s).split(/[,; ]+/))
+      .map((s) => s.trim())
+      .filter((s) => s.startsWith('http'));
+    return Array.from(new Set(parts));
+  };
+
+  const FALLBACK_IMAGE =
+    'data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22%23f3f4f6%22/><text x=%2250%22 y=%2255%22 font-size=%2212%22 fill=%22%239ca3af%22 text-anchor=%22middle%22>无图</text></svg>';
+
   const columns: PrimaryTableCol<Candidate>[] = [
     {
       colKey: 'thumbnail',
       title: '图片',
-      width: 90,
+      width: 110,
       cell: ({ row }) => {
-        const src = row.ali1688_image_url || row.ml_thumbnail;
-        return src ? (
-          <img
-            src={src}
-            alt=""
-            className="w-16 h-16 object-cover rounded border border-gray-100"
-            onError={(e) => {
-              const img = e.target as HTMLImageElement;
-              img.onerror = null;
-              img.src = 'data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22%23f3f4f6%22/><text x=%2250%22 y=%2255%22 font-size=%2212%22 fill=%22%239ca3af%22 text-anchor=%22middle%22>无图</text></svg>';
-            }}
-          />
-        ) : (
-          <div className="w-16 h-16 rounded bg-gray-100 flex items-center justify-center text-xs text-gray-400 border border-gray-100">
-            无图
+        const urls = extractImageUrls(row);
+        const handleError = (e: React.SyntheticEvent<HTMLImageElement>) => {
+          const img = e.currentTarget;
+          img.onerror = null;
+          img.src = FALLBACK_IMAGE;
+        };
+        if (urls.length === 0) {
+          return (
+            <div className="w-16 h-16 rounded bg-gray-100 flex items-center justify-center text-xs text-gray-400 border border-gray-100">
+              无图
+            </div>
+          );
+        }
+        return (
+          <div className="grid grid-cols-2 gap-1 w-[76px]">
+            {urls.slice(0, 4).map((src, idx) => (
+              <img
+                key={`${src}-${idx}`}
+                src={src}
+                alt=""
+                className="w-9 h-9 object-cover rounded border border-gray-100 cursor-pointer hover:opacity-80"
+                onError={handleError}
+                onClick={() => {
+                  setViewerImages(urls);
+                  setViewerIndex(idx);
+                  setViewerVisible(true);
+                }}
+              />
+            ))}
           </div>
         );
       },
@@ -591,6 +624,13 @@ export function CandidatesPage() {
             }}
           />
         </Loading>
+
+        <ImageViewer
+          images={viewerImages}
+          visible={viewerVisible}
+          defaultIndex={viewerIndex}
+          onClose={() => setViewerVisible(false)}
+        />
       </Card>
 
       <Dialog
