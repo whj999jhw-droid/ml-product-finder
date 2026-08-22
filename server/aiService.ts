@@ -195,7 +195,7 @@ export function saveLlmConfig(cfg: Partial<LlmProvider> | { providers?: Partial<
     }
     // apiKey 最终仍为空且不是已有配置：首次保存必须提供
     if (!apiKey) {
-      const old = existingByKey.get(`${baseUrl}|${model}`);
+      const old = existingByBoth.get(`${baseUrl}|${model}`);
       if (!old) {
         return { success: false, message: `第 ${i + 1} 个平台首次保存必须提供 apiKey` };
       }
