@@ -696,6 +696,7 @@ import {
   FetchOptions,
   fetchAllProductsAndExport,
   getCategories,
+  getCategoryAttributes,
   getExportedFiles,
   setAccessToken,
   getAccessToken,
@@ -1396,54 +1397,6 @@ app.get('/api/mobile/orders/:storeId/:orderId', async (req, res) => {
   }
 });
 
-// ========== 手机端记账同步（MercadoProfit App）==========
-app.get('/api/records', (_req, res) => {
-  try {
-    const records = db.getAccountingRecords();
-    res.json(records);
-  } catch (err: any) {
-    res.status(500).json({ success: false, message: err?.message || String(err) });
-  }
-});
-
-app.post('/api/records', (req, res) => {
-  try {
-    const record = req.body;
-    if (!record || !record.id) {
-      return res.status(400).json({ success: false, message: '缺少记录 id' });
-    }
-    const saved = db.upsertAccountingRecord(record);
-    res.json(saved);
-  } catch (err: any) {
-    res.status(500).json({ success: false, message: err?.message || String(err) });
-  }
-});
-
-app.put('/api/records/:id', (req, res) => {
-  try {
-    const record = req.body;
-    if (!record || !record.id) {
-      return res.status(400).json({ success: false, message: '缺少记录 id' });
-    }
-    if (String(record.id) !== String(req.params.id)) {
-      return res.status(400).json({ success: false, message: 'URL id 与 body id 不一致' });
-    }
-    const saved = db.upsertAccountingRecord(record);
-    res.json(saved);
-  } catch (err: any) {
-    res.status(500).json({ success: false, message: err?.message || String(err) });
-  }
-});
-
-app.delete('/api/records/:id', (req, res) => {
-  try {
-    const deleted = db.deleteAccountingRecord(req.params.id);
-    res.json({ success: true, deleted });
-  } catch (err: any) {
-    res.status(500).json({ success: false, message: err?.message || String(err) });
-  }
-});
-
 // 单个订单完整详情（含物流、商品图片），供弹窗展示
 app.get('/api/ml/orders/:id/detail', async (req, res) => {
   try {
@@ -1721,6 +1674,21 @@ app.get('/api/ml/categories/:siteId', async (req, res) => {
   } catch (error: any) {
     console.error('[ML Categories] Error:', error);
     res.status(500).json({ error: error?.message || '获取分类失败' });
+  }
+});
+
+// 获取类目属性定义（含必填项）
+app.get('/api/ml/category/:id/attributes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id || !/^ML[A-Z]?[0-9]+$/.test(id)) {
+      return res.status(400).json({ error: '无效的类目 ID' });
+    }
+    const attributes = await getCategoryAttributes(id);
+    res.json({ categoryId: id, attributes });
+  } catch (error: any) {
+    console.error('[ML Category Attributes] Error:', error);
+    res.status(500).json({ error: error?.message || '获取类目属性失败' });
   }
 });
 
@@ -2344,8 +2312,26 @@ app.post('/api/ml/candidates/:id/publish', async (req, res) => {
     if (typeof ov.lengthCm === 'number') draftOverrides.length = ov.lengthCm;
     if (typeof ov.widthCm === 'number') draftOverrides.width = ov.widthCm;
     if (typeof ov.heightCm === 'number') draftOverrides.height = ov.heightCm;
-    // 若前端直接传了覆盖售价，优先使用
+    // 类目属性（全局通用，写入每个站点的 sites_to_sell.attributes）
+    if (ov.attributeValues && typeof ov.attributeValues === 'object') {
+      draftOverrides.attributes = Object.entries(ov.attributeValues)
+        .filter(([_, v]) => v && (v as any).value_id != null || (v as any).value_name != null || Array.isArray((v as any).values))
+        .map(([id, v]) => ({ id, ...(v as any) }));
+    }
+    // 若前端直接传了覆盖售价，优先使用；否则回退到行内建议价
     const listingPriceUsd = typeof ov.listingPriceUsd === 'number' ? ov.listingPriceUsd : row.listing_price_usd;
+
+    // 逐国家/站点独立售价与 listing_type
+    const priceBySite = ov.priceBySite || {};
+    const listingTypeBySite = ov.listingTypeBySite || {};
+    const siteOverrides: Record<string, import('./publishFromCandidate.js').SiteOverride> = {};
+    for (const site of Object.keys({ ...priceBySite, ...listingTypeBySite })) {
+      const so: import('./publishFromCandidate.js').SiteOverride = {};
+      if (typeof priceBySite[site] === 'number') so.price = priceBySite[site];
+      if (typeof listingTypeBySite[site] === 'string') so.listing_type_id = listingTypeBySite[site];
+      if (draftOverrides.attributes?.length) so.attributes = draftOverrides.attributes as any;
+      siteOverrides[site] = so;
+    }
 
     const result = await publishCandidate({
       candidate: candidate as any,
@@ -2357,6 +2343,7 @@ app.post('/api/ml/candidates/:id/publish', async (req, res) => {
       useCbtCategory: req.body?.useCbtCategory ?? true,
       youtube: req.body?.youtube,
       draftOverrides,
+      siteOverrides,
     });
     res.json({ success: true, result });
   } catch (err: any) {

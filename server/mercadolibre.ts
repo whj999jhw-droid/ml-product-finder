@@ -1330,6 +1330,52 @@ export async function getCategories(siteId: string): Promise<Array<{ id: string;
   }
 }
 
+/** 类目属性值选项 */
+export interface CategoryAttributeValue {
+  id: string;
+  name: string;
+}
+
+/** 类目属性定义 */
+export interface CategoryAttribute {
+  id: string;
+  name: string;
+  required: boolean;
+  value_type: string;
+  values?: CategoryAttributeValue[];
+  tags?: Record<string, any>;
+  hint?: string;
+}
+
+/**
+ * 获取类目的属性定义（含必填项）。
+ * ML 官方端点：GET /categories/{category_id}/attributes
+ */
+export async function getCategoryAttributes(categoryId: string): Promise<CategoryAttribute[]> {
+  await ensureValidToken();
+  try {
+    const url = mlAccessToken
+      ? `${getApiBase()}/categories/${categoryId}/attributes?access_token=${encodeURIComponent(mlAccessToken)}`
+      : `${getApiBase()}/categories/${categoryId}/attributes`;
+    const data = await httpsGet(url);
+    if (Array.isArray(data)) {
+      return data.map((a: any) => ({
+        id: a.id,
+        name: a.name,
+        required: !!a.required,
+        value_type: a.value_type || 'string',
+        values: (a.values || []).map((v: any) => ({ id: v.id, name: v.name })),
+        tags: a.tags || {},
+        hint: a.hint || '',
+      }));
+    }
+    throw new Error('API 返回空数据');
+  } catch (err: any) {
+    console.warn(`[ML] 获取类目属性失败 (${categoryId}): ${err.message?.slice(0, 100)}`);
+    return [];
+  }
+}
+
 /**
  * 搜索品类下的商品 (按销量排序)
  * 策略1: 官方 API + Bearer token (category only)

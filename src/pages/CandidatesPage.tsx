@@ -26,6 +26,7 @@ interface Candidate {
   ml_price_usd: number;
   ml_thumbnail: string;
   ml_permalink: string;
+  ml_category_id?: string;
   ml_category_name?: string;
   ali1688_title?: string;
   ali1688_price_cny: number;
@@ -66,7 +67,12 @@ interface PublishDraft {
   title: string;
   description: string;
   pictureUrls: string[];
+  /** 默认售价（无逐国家覆盖时回退使用） */
   listingPriceUsd: number;
+  /** 逐国家/站点独立售价（USD） */
+  priceBySite: Record<string, number>;
+  /** 逐国家/站点独立刊登类型 */
+  listingTypeBySite: Record<string, string>;
   availableQuantity: number;
   weightKg: number;
   lengthCm: number;
@@ -76,9 +82,21 @@ interface PublishDraft {
   model: string;
   warrantyType: string;
   warrantyTime: string;
+  /** 全局默认 listingType（已被 listingTypeBySite 取代，保留兼容） */
   listingType: string;
   skuTitle: string;
   skuImageUrl: string;
+  /** 类目属性值：{ [attributeId]: { value_id|value_name|values } } */
+  attributeValues: Record<string, any>;
+}
+
+interface CategoryAttribute {
+  id: string;
+  name: string;
+  required: boolean;
+  value_type: string;
+  values?: Array<{ id: string; name: string }>;
+  hint?: string;
 }
 
 interface SiteInfo {
@@ -162,6 +180,8 @@ export function CandidatesPage() {
   const [profitBySite, setProfitBySite] = useState<Record<string, any>>({});
   const [profitLoading, setProfitLoading] = useState(false);
   const [newImageUrl, setNewImageUrl] = useState('');
+  const [categoryAttributes, setCategoryAttributes] = useState<CategoryAttribute[]>([]);
+  const [categoryAttrLoading, setCategoryAttrLoading] = useState(false);
 
   const fetchAkStatus = async () => {
     try {
@@ -366,11 +386,20 @@ export function CandidatesPage() {
     const initialSites = deduceTargetSites(initialStoreIds, row.site);
     setTargetSites(initialSites);
     const imgs = extractImageUrls(row);
+    const basePrice = row.listing_price_usd || row.ml_price_usd || 0;
+    const initialPriceBySite: Record<string, number> = {};
+    const initialListingTypeBySite: Record<string, string> = {};
+    for (const site of initialSites) {
+      initialPriceBySite[site] = basePrice;
+      initialListingTypeBySite[site] = 'bronze';
+    }
     setPublishDraft({
       title: row.ml_title || row.ali1688_title || '',
       description: buildDefaultDescription(row, row.ml_title || row.ali1688_title || ''),
       pictureUrls: imgs,
-      listingPriceUsd: row.listing_price_usd || row.ml_price_usd || 0,
+      listingPriceUsd: basePrice,
+      priceBySite: initialPriceBySite,
+      listingTypeBySite: initialListingTypeBySite,
       availableQuantity: 50,
       weightKg: row.weight_kg || 0,
       lengthCm: row.length_cm || 0,
@@ -383,11 +412,49 @@ export function CandidatesPage() {
       listingType: 'bronze',
       skuTitle: '',
       skuImageUrl: '',
+      attributeValues: {},
     });
     setProfitBySite({});
     setUploadYoutube(false);
     setYoutubeVideoPath('');
+    setCategoryAttributes([]);
+    setCategoryAttrLoading(false);
     setPublishOpen(true);
+    // 拉取类目属性
+    if (row.ml_category_id) {
+      fetchCategoryAttributes(row.ml_category_id);
+    }
+  };
+
+  const fetchCategoryAttributes = async (categoryId: string) => {
+    setCategoryAttrLoading(true);
+    try {
+      const res = await fetch(`/api/ml/category/${categoryId}/attributes`);
+      const data = await res.json();
+      if (data.attributes && Array.isArray(data.attributes)) {
+        setCategoryAttributes(data.attributes);
+        // 自动为必填属性填充已知值
+        setPublishDraft((prev) => {
+          if (!prev) return prev;
+          const values = { ...prev.attributeValues };
+          for (const attr of data.attributes) {
+            if (values[attr.id]) continue;
+            if (attr.id === 'BRAND' && prev.brand) {
+              values[attr.id] = { value_name: prev.brand };
+            } else if (attr.id === 'MODEL' && prev.model) {
+              values[attr.id] = { value_name: prev.model };
+            } else if (attr.id === 'ITEM_CONDITION') {
+              values[attr.id] = { value_id: '2230284', value_name: 'New' };
+            }
+          }
+          return { ...prev, attributeValues: values };
+        });
+      }
+    } catch (e: any) {
+      console.warn('拉取类目属性失败', e);
+    } finally {
+      setCategoryAttrLoading(false);
+    }
   };
 
   // 店铺选择变化时同步目标国家
@@ -446,7 +513,7 @@ export function CandidatesPage() {
     }
   };
 
-  // 当预览字段变化时，重新测算各国净利润
+  // 当预览字段变化时，重新测算各国净利润（使用逐国家独立售价）
   useEffect(() => {
     if (!publishDraft || !publishRow || targetSites.length === 0) return;
     let cancelled = false;
@@ -454,7 +521,7 @@ export function CandidatesPage() {
       setProfitLoading(true);
       const inputs = targetSites.map((site) => ({
         site,
-        listingPriceUsd: publishDraft.listingPriceUsd,
+        listingPriceUsd: publishDraft.priceBySite[site] ?? publishDraft.listingPriceUsd,
         purchaseCostCny: publishRow.ali1688_price_cny || 0,
         weightKg: publishDraft.weightKg || undefined,
         lengthCm: publishDraft.lengthCm || undefined,
@@ -506,6 +573,8 @@ export function CandidatesPage() {
         description: publishDraft.description,
         pictureUrls,
         listingPriceUsd: publishDraft.listingPriceUsd,
+        priceBySite: publishDraft.priceBySite,
+        listingTypeBySite: publishDraft.listingTypeBySite,
         availableQuantity: publishDraft.availableQuantity,
         weightKg: publishDraft.weightKg,
         lengthCm: publishDraft.lengthCm,
@@ -516,6 +585,7 @@ export function CandidatesPage() {
         warrantyType: publishDraft.warrantyType,
         warrantyTime: publishDraft.warrantyTime,
         listingType: publishDraft.listingType,
+        attributeValues: publishDraft.attributeValues,
       };
       const res = await fetch(`/api/ml/candidates/${publishRow.id}/publish`, {
         method: 'POST',
@@ -925,13 +995,24 @@ export function CandidatesPage() {
               </div>
             </div>
 
-            {/* 建议售价 & 库存 */}
+            {/* 默认售价 & 库存 */}
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <div className="text-sm font-medium mb-1">建议售价（USD）</div>
+                <div className="text-sm font-medium mb-1">默认售价（USD，未单独设置国家使用）</div>
                 <InputNumber
                   value={publishDraft.listingPriceUsd}
-                  onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, listingPriceUsd: Number(v) || 0 } : prev))}
+                  onChange={(v) =>
+                    setPublishDraft((prev) => {
+                      if (!prev) return prev;
+                      const price = Number(v) || 0;
+                      // 同步更新尚未单独设置的国家
+                      const priceBySite = { ...prev.priceBySite };
+                      for (const site of targetSites) {
+                        if (priceBySite[site] == null) priceBySite[site] = price;
+                      }
+                      return { ...prev, listingPriceUsd: price, priceBySite };
+                    })
+                  }
                   decimalPlaces={2}
                   min={0}
                 />
@@ -1104,6 +1185,94 @@ export function CandidatesPage() {
               </div>
             </div>
 
+            {/* 类目属性 */}
+            {categoryAttributes.length > 0 && (
+              <div>
+                <div className="text-sm font-medium mb-2">
+                  类目属性
+                  {categoryAttrLoading && <span className="ml-2 text-xs text-gray-400">加载中...</span>}
+                </div>
+                <div className="border border-gray-100 rounded p-3 space-y-3">
+                  {categoryAttributes
+                    .filter((attr) => attr.id !== 'ITEM_CONDITION')
+                    .map((attr) => (
+                      <div key={attr.id} className="grid grid-cols-12 gap-3 items-center">
+                        <div className="col-span-3 text-sm">
+                          {attr.name}
+                          {attr.required && <span className="text-red-500 ml-1">*</span>}
+                          <div className="text-xs text-gray-400">{attr.id}</div>
+                        </div>
+                        <div className="col-span-9">
+                          {attr.values && attr.values.length > 0 ? (
+                            <select
+                              value={publishDraft.attributeValues[attr.id]?.value_id || ''}
+                              onChange={(e) => {
+                                const val = attr.values?.find((v) => v.id === e.target.value);
+                                setPublishDraft((prev) => {
+                                  if (!prev) return prev;
+                                  return {
+                                    ...prev,
+                                    attributeValues: {
+                                      ...prev.attributeValues,
+                                      [attr.id]: val ? { value_id: val.id, value_name: val.name } : undefined,
+                                    },
+                                  };
+                                });
+                              }}
+                              className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
+                            >
+                              <option value="">{attr.required ? '请选择（必填）' : '请选择（可选）'}</option>
+                              {attr.values.map((v) => (
+                                <option key={v.id} value={v.id}>
+                                  {v.name}
+                                </option>
+                              ))}
+                            </select>
+                          ) : attr.value_type === 'number_unit' || attr.value_type === 'number' ? (
+                            <div className="flex gap-2">
+                              <Input
+                                value={publishDraft.attributeValues[attr.id]?.value_name || ''}
+                                onChange={(v) =>
+                                  setPublishDraft((prev) => {
+                                    if (!prev) return prev;
+                                    return {
+                                      ...prev,
+                                      attributeValues: {
+                                        ...prev.attributeValues,
+                                        [attr.id]: { value_name: String(v) },
+                                      },
+                                    };
+                                  })
+                                }
+                                placeholder={attr.hint || '如 10 cm / 500 g'}
+                                className="flex-1"
+                              />
+                            </div>
+                          ) : (
+                            <Input
+                              value={publishDraft.attributeValues[attr.id]?.value_name || ''}
+                              onChange={(v) =>
+                                setPublishDraft((prev) => {
+                                  if (!prev) return prev;
+                                  return {
+                                    ...prev,
+                                    attributeValues: {
+                                      ...prev.attributeValues,
+                                      [attr.id]: { value_name: String(v) },
+                                    },
+                                  };
+                                })
+                              }
+                              placeholder={attr.hint || '请输入'}
+                            />
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            )}
+
             {/* 描述 */}
             <div>
               <div className="flex items-center justify-between mb-1">
@@ -1122,12 +1291,13 @@ export function CandidatesPage() {
 
             {/* 目标国家与利润 */}
             <div>
-              <div className="text-sm font-medium mb-2">目标国家 / 净利润测算</div>
+              <div className="text-sm font-medium mb-2">目标国家 / 独立售价 / 净利润测算</div>
               <div className="border border-gray-100 rounded overflow-hidden">
                 <table className="w-full text-sm">
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="px-3 py-2 text-left font-medium text-gray-600">国家</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">售价（USD）</th>
                       <th className="px-3 py-2 text-left font-medium text-gray-600">产品类型</th>
                       <th className="px-3 py-2 text-left font-medium text-gray-600">净利润</th>
                       <th className="px-3 py-2 text-left font-medium text-gray-600">利润率</th>
@@ -1139,13 +1309,40 @@ export function CandidatesPage() {
                     {targetSites.map((site) => {
                       const info = siteInfos[site];
                       const p = profitBySite[site];
+                      const sitePrice = publishDraft.priceBySite[site] ?? publishDraft.listingPriceUsd;
+                      const siteType = publishDraft.listingTypeBySite[site] ?? publishDraft.listingType;
                       return (
                         <tr key={site} className="border-t">
                           <td className="px-3 py-2">{info ? `${info.name} (${site})` : site}</td>
                           <td className="px-3 py-2">
+                            <InputNumber
+                              value={sitePrice}
+                              onChange={(v) =>
+                                setPublishDraft((prev) => {
+                                  if (!prev) return prev;
+                                  return {
+                                    ...prev,
+                                    priceBySite: { ...prev.priceBySite, [site]: Number(v) || 0 },
+                                  };
+                                })
+                              }
+                              decimalPlaces={2}
+                              min={0}
+                              style={{ width: 110 }}
+                            />
+                          </td>
+                          <td className="px-3 py-2">
                             <select
-                              value={publishDraft.listingType}
-                              onChange={(e) => setPublishDraft((prev) => (prev ? { ...prev, listingType: e.target.value } : prev))}
+                              value={siteType}
+                              onChange={(e) =>
+                                setPublishDraft((prev) => {
+                                  if (!prev) return prev;
+                                  return {
+                                    ...prev,
+                                    listingTypeBySite: { ...prev.listingTypeBySite, [site]: e.target.value },
+                                  };
+                                })
+                              }
                               className="border border-gray-300 rounded px-2 py-1 text-sm"
                             >
                               <option value="bronze">Classic（bronze）</option>
@@ -1165,7 +1362,7 @@ export function CandidatesPage() {
                           </td>
                           <td className="px-3 py-2">{p ? `${(p.netProfitRate * 100).toFixed(1)}%` : '-'}</td>
                           <td className="px-3 py-2">{p ? p.roi.toFixed(2) : '-'}</td>
-                          <td className="px-3 py-2">{p ? `${(p.costBreakdown.commission / p.listingPriceUsd * 100).toFixed(0)}%` : '-'}</td>
+                          <td className="px-3 py-2">{p && p.listingPriceUsd ? `${(p.costBreakdown.commission / p.listingPriceUsd * 100).toFixed(0)}%` : '-'}</td>
                         </tr>
                       );
                     })}

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { ReactNode } from 'react';
-import { Card, Tabs, Table, Tag, Dialog, Button, Loading, MessagePlugin, Space, Image } from 'tdesign-react';
+import { Card, Tabs, Table, Tag, Dialog, Button, Loading, MessagePlugin, Space, Image, ImageViewer } from 'tdesign-react';
 import { ShopIcon, RefreshIcon, TranslateIcon } from 'tdesign-icons-react';
 
 interface StoreRow {
@@ -123,6 +123,10 @@ export function OrdersPage() {
   const [ordersError, setOrdersError] = useState<Record<string, string>>({});
   const [translated, setTranslated] = useState<Record<string, string>>({});
   const [translating, setTranslating] = useState(false);
+  // 商品图片预览
+  const [viewerVisible, setViewerVisible] = useState(false);
+  const [viewerImages, setViewerImages] = useState<string[]>([]);
+  const [viewerIndex, setViewerIndex] = useState(0);
   // 顶部「后台同步新增 X 条」提示：每店铺未读的新增（sync）订单数
   const [newCounts, setNewCounts] = useState<Record<string, number>>({});
   const loadingStoresRef = useRef<Set<string>>(new Set());
@@ -504,32 +508,83 @@ export function OrdersPage() {
                   {
                     colKey: 'image',
                     title: '图片',
-                    width: 70,
-                    cell: ({ row }: any) =>
-                      row.itemThumbnail || row.item?.thumbnail ? (
-                        <Image
-                          src={row.itemThumbnail || row.item?.thumbnail}
-                          style={{ width: 48, height: 48, objectFit: 'cover', borderRadius: 4 }}
-                          fit="cover"
-                          alt=""
-                        />
-                      ) : (
+                    width: 140,
+                    cell: ({ row }: any) => {
+                      const pictures = (row.item?.pictures || []).map((p: any) => p.secure_url || p.url).filter(Boolean);
+                      const images: string[] =
+                        (row.itemImages?.length ? row.itemImages : undefined) ||
+                        (pictures.length ? pictures : undefined) ||
+                        [row.itemThumbnail || row.item?.thumbnail].filter(Boolean);
+                      if (!images.length) {
+                        return (
+                          <div
+                            style={{
+                              width: 48,
+                              height: 48,
+                              borderRadius: 4,
+                              background: 'var(--td-bg-color-component)',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              color: 'var(--td-text-color-placeholder)',
+                              fontSize: 12,
+                            }}
+                          >
+                            无图
+                          </div>
+                        );
+                      }
+                      const visibleImages = images.slice(0, 4);
+                      const more = images.length - visibleImages.length;
+                      return (
                         <div
                           style={{
-                            width: 48,
-                            height: 48,
-                            borderRadius: 4,
-                            background: 'var(--td-bg-color-component)',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            color: 'var(--td-text-color-placeholder)',
-                            fontSize: 12,
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(2, 48px)',
+                            gap: 4,
+                            position: 'relative',
                           }}
                         >
-                          无图
+                          {visibleImages.map((src: string, idx: number) => (
+                            <Image
+                              key={idx}
+                              src={src}
+                              style={{ width: 48, height: 48, objectFit: 'cover', borderRadius: 4, cursor: 'pointer' }}
+                              fit="cover"
+                              alt=""
+                              onClick={() => {
+                                setViewerImages(images);
+                                setViewerIndex(idx);
+                                setViewerVisible(true);
+                              }}
+                            />
+                          ))}
+                          {more > 0 && (
+                            <div
+                              style={{
+                                width: 48,
+                                height: 48,
+                                borderRadius: 4,
+                                background: 'rgba(0,0,0,0.5)',
+                                color: '#fff',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                fontSize: 12,
+                                cursor: 'pointer',
+                              }}
+                              onClick={() => {
+                                setViewerImages(images);
+                                setViewerIndex(4);
+                                setViewerVisible(true);
+                              }}
+                            >
+                              +{more}
+                            </div>
+                          )}
                         </div>
-                      ),
+                      );
+                    },
                   },
                   {
                     colKey: 'title',
@@ -634,6 +689,14 @@ export function OrdersPage() {
           </div>
         )}
       </Dialog>
+
+      {/* 商品原图预览 */}
+      <ImageViewer
+        images={viewerImages}
+        visible={viewerVisible}
+        defaultIndex={viewerIndex}
+        onClose={() => setViewerVisible(false)}
+      />
     </div>
   );
 }

@@ -95,6 +95,14 @@ export function candidateToDraft(opts: CandidateToDraftOptions): ListingDraft {
   return draft;
 }
 
+/** 逐国家/站点覆盖配置 */
+export interface SiteOverride {
+  price?: number;
+  listing_type_id?: string;
+  category_id?: string;
+  attributes?: Array<{ id: string; value_id?: string; value_name?: string; values?: any[] }>;
+}
+
 export interface PublishCandidateOptions {
   candidate: RawCandidate;
   candidateDbId: number;
@@ -106,11 +114,22 @@ export interface PublishCandidateOptions {
   useCbtCategory?: boolean;
   youtube?: { enabled: boolean; videoPath: string; privacy?: 'private' | 'unlisted' | 'public'; title?: string };
   draftOverrides?: Partial<ListingDraft>;
+  /** 按目标站点覆盖售价、listing_type、类目、属性；key 为 MLM/MLB/MLC/MCO */
+  siteOverrides?: Record<string, SiteOverride>;
+}
+
+// CBT 店铺发布时复制的目标本地站点
+const CBT_TARGET_SITES = ['MCO', 'MLM', 'MLB', 'MLC'];
+
+function getStoreTargetSites(store: { site: string }): string[] {
+  if (store.site === 'CBT') return CBT_TARGET_SITES;
+  return [store.site];
 }
 
 /**
  * 一键将候选商品上架到指定/全部店铺。
  * 先为每个目标店铺创建 publish_jobs 记录，再并发上架，最后更新记录。
+ * 支持 CBT 店铺自动复制到四国，并支持逐国家独立售价/类型/属性。
  */
 export async function publishCandidate(opts: PublishCandidateOptions): Promise<BatchPublishResult> {
   const stores = getAllStores().filter((s) => s.enabled && (!opts.storeIds || opts.storeIds.includes(s.id)));
@@ -118,7 +137,7 @@ export async function publishCandidate(opts: PublishCandidateOptions): Promise<B
     throw new Error('没有可用的目标店铺，请先在「店铺管理」中添加并启用店铺');
   }
 
-  const draft = candidateToDraft({
+  const baseDraft = candidateToDraft({
     candidate: opts.candidate,
     listingPriceUsd: opts.listingPriceUsd,
     sourceImageUrl: opts.sourceImageUrl,
@@ -132,48 +151,73 @@ export async function publishCandidate(opts: PublishCandidateOptions): Promise<B
     try {
       const yt = await uploadVideoToYouTube({
         filePath: opts.youtube.videoPath,
-        title: opts.youtube.title || draft.title,
-        description: `Video demostración del producto: ${draft.title}`,
+        title: opts.youtube.title || baseDraft.title,
+        description: `Video demostración del producto: ${baseDraft.title}`,
         tags: [opts.candidate.site, opts.candidate.categoryName].filter(Boolean).slice(0, 5) as string[],
         privacy: opts.youtube.privacy || 'unlisted',
       });
-      draft.description = `${draft.description}\n\n🎥 Video demostración: ${yt.url}`;
+      baseDraft.description = `${baseDraft.description}\n\n🎥 Video demostración: ${yt.url}`;
       console.log(`[Publish] YouTube 上传成功: ${yt.url}`);
     } catch (err: any) {
       console.warn('[Publish] YouTube 上传失败（不影响上架）:', err?.message || err);
     }
   }
 
-  // 为每个目标店铺创建 pending 任务
-  const jobIdByStore: Record<string, number> = {};
+  // 为每个（店铺 × 目标站点）生成独立草稿，支持逐国家覆盖
+  const drafts: ListingDraft[] = [];
+  const jobIdByDraftIndex: Record<number, number> = {};
   for (const store of stores) {
-    const jobId = createPublishJob({
-      candidate_id: opts.candidateDbId,
-      store_id: store.id,
-      site: store.site,
-      payload_json: JSON.stringify(draft),
-    });
-    if (jobId) jobIdByStore[store.id] = jobId;
+    const targetSites = getStoreTargetSites(store);
+    for (const site of targetSites) {
+      const override = opts.siteOverrides?.[site] || {};
+      const siteDraft: ListingDraft = {
+        ...baseDraft,
+        site,
+        storeId: store.id,
+        price: override.price ?? baseDraft.price,
+        listing_type_id: override.listing_type_id ?? baseDraft.listing_type_id,
+        category_id: override.category_id ?? baseDraft.category_id,
+        sites_to_sell: [
+          {
+            site_id: site,
+            price: override.price ?? baseDraft.price,
+            listing_type_id: override.listing_type_id ?? baseDraft.listing_type_id,
+            title: baseDraft.title,
+            attributes: override.attributes,
+          },
+        ],
+      };
+      const idx = drafts.length;
+      drafts.push(siteDraft);
+      const jobId = createPublishJob({
+        candidate_id: opts.candidateDbId,
+        store_id: store.id,
+        site,
+        payload_json: JSON.stringify(siteDraft),
+      });
+      if (jobId) jobIdByDraftIndex[idx] = jobId;
+    }
   }
 
-  // 并发上架：按店铺站点分发
-  const results = await publishBatch(
-    stores.map((s) => ({ ...draft, storeId: s.id })),
-    {
-      concurrency: opts.concurrency ?? 2,
-      maxRetries: 2,
-      onProgress: (done, total, last) => {
-        if (last?.storeId && jobIdByStore[last.storeId]) {
-          updatePublishJob(jobIdByStore[last.storeId], {
+  // 并发上架
+  const results = await publishBatch(drafts, {
+    concurrency: opts.concurrency ?? 2,
+    maxRetries: 2,
+    onProgress: (done, total, last) => {
+      if (last?.storeId) {
+        const idx = drafts.findIndex((d) => d.storeId === last.storeId && d.site === last.site);
+        const jobId = idx >= 0 ? jobIdByDraftIndex[idx] : undefined;
+        if (jobId) {
+          updatePublishJob(jobId, {
             status: last.success ? 'success' : last.precheckHits?.length ? 'blocked' : 'failed',
             ml_item_id: last.itemId,
             ml_permalink: last.permalink,
             error: last.error,
           });
         }
-      },
-    }
-  );
+      }
+    },
+  });
 
   // 更新候选商品状态
   const anySuccess = results.succeeded > 0;

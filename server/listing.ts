@@ -35,6 +35,16 @@ export interface ListingDraft {
   warrantyType?: string; // 如 'Factory warranty' / 'No warranty'
   warrantyTime?: string; // 如 '90 days' / '1 year'
   listing_type_id?: string; // gold_pro / silver / bronze
+  // 类目属性（ML category attributes），会与系统默认属性合并；相同 id 时外部值优先
+  attributes?: Array<{ id: string; value_id?: string; value_name?: string; values?: any[] }>;
+  // 多国售价/类型覆盖：若提供，则覆盖默认单条 sites_to_sell，实现逐国家独立定价与 listing_type
+  sites_to_sell?: Array<{
+    site_id: string;
+    price: number;
+    listing_type_id?: string;
+    title?: string;
+    attributes?: Array<{ id: string; value_id?: string; value_name?: string; values?: any[] }>;
+  }>;
 }
 
 export interface PrecheckResult {
@@ -117,18 +127,29 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
   }
 
   // attributes：品牌 / 模型 / 成色 / 包裹尺寸重量（CBT 用 PACKAGE_*，不用 shipping.dimensions）
-  const attributes: any[] = [];
-  attributes.push({ id: 'BRAND', value_name: draft.brand || 'Generic' });
-  if (draft.model) attributes.push({ id: 'MODEL', value_name: draft.model });
+  const baseAttributes: any[] = [];
+  baseAttributes.push({ id: 'BRAND', value_name: draft.brand || 'Generic' });
+  if (draft.model) baseAttributes.push({ id: 'MODEL', value_name: draft.model });
   // CBT 用 ITEM_CONDITION attribute 替代旧 condition 字段（New 的 value_id 为官方值 2230284）
-  attributes.push({ id: 'ITEM_CONDITION', value_id: '2230284', value_name: 'New' });
+  baseAttributes.push({ id: 'ITEM_CONDITION', value_id: '2230284', value_name: 'New' });
   const addPkg = (id: string, val: number | undefined, unit: string) => {
-    if (val != null && val > 0) attributes.push({ id, value_name: `${val} ${unit}` });
+    if (val != null && val > 0) baseAttributes.push({ id, value_name: `${val} ${unit}` });
   };
   addPkg('PACKAGE_HEIGHT', draft.height, 'cm');
   addPkg('PACKAGE_WIDTH', draft.width, 'cm');
   addPkg('PACKAGE_LENGTH', draft.length, 'cm');
   addPkg('PACKAGE_WEIGHT', draft.weight, 'g');
+
+  // 合并外部传入的类目属性（相同 id 外部优先）
+  const mergeAttributes = (extra?: any[]) => {
+    const map = new Map<string, any>();
+    for (const a of baseAttributes) map.set(a.id, a);
+    for (const a of extra || []) {
+      if (a?.id) map.set(a.id, a);
+    }
+    return Array.from(map.values());
+  };
+  const attributes = mergeAttributes(draft.attributes);
 
   // CBT 创建：POST /global/items，价格按国家写在 sites_to_sell（USD）
   // 保修（sale_terms）一般可选：仅当调用方提供保修信息时才发送，避免对不需要保修的类目强制填值
@@ -147,15 +168,25 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
     attributes,
     // 仅在有保修信息时发送 sale_terms（保修在 CBT 一般可选）
     ...(saleTerms.length ? { sale_terms: saleTerms } : {}),
-    sites_to_sell: [
-      {
-        site_id: draft.site,
-        logistic_type: 'remote',
-        title: draft.title, // 本地站点标题（MVP 先用全局标题，后续可逐站本地化）
-        price: draft.price, // USD
-        listing_type_id: draft.listing_type_id || 'bronze',
-      },
-    ],
+    sites_to_sell:
+      draft.sites_to_sell && draft.sites_to_sell.length > 0
+        ? draft.sites_to_sell.map((s) => ({
+            site_id: s.site_id,
+            logistic_type: 'remote',
+            title: s.title || draft.title,
+            price: s.price,
+            listing_type_id: s.listing_type_id || draft.listing_type_id || 'bronze',
+            ...(s.attributes?.length ? { attributes: mergeAttributes(s.attributes) } : {}),
+          }))
+        : [
+            {
+              site_id: draft.site,
+              logistic_type: 'remote',
+              title: draft.title,
+              price: draft.price,
+              listing_type_id: draft.listing_type_id || 'bronze',
+            },
+          ],
   };
 
   const resp = await fetch('https://api.mercadolibre.com/global/items', {
