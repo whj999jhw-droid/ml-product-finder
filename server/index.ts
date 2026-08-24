@@ -1322,6 +1322,16 @@ app.get('/api/mobile/orders/:storeId/:orderId', async (req, res) => {
     const store = stores.getStoreRaw(req.params.storeId);
     if (!store) return res.status(404).json({ success: false, message: '店铺不存在' });
     const detail = await orders.fetchOrderDetail(store, req.params.orderId);
+    // 与移动端列表接口(/recent)及 web 端对齐：详情的 category 优先信任持久化缓存的 mlStatus，
+    // 避免 fetchOrderDetail 实时 classifyOrder 与 all-orders 不一致导致「已发货却显示未发货+已超时」。
+    let persistedMlStatus = '';
+    try {
+      const cached = db.getCachedOrders(store.id).orders.find((x: any) => String(x.id) === String(req.params.orderId));
+      if (cached && cached.mlStatus) persistedMlStatus = cached.mlStatus;
+    } catch { /* 忽略缓存读取失败 */ }
+    if (persistedMlStatus === 'shipped' || persistedMlStatus === 'cancelled') {
+      detail.category = persistedMlStatus as any;
+    }
     // 短信/Webhook 正文（含商品图 markdown、纯文本、邮件 HTML），即短信渠道实际展示的内容
     const sms = await notify.buildOrderNotify(store, detail.order);
     const o = detail.order;
@@ -1381,6 +1391,54 @@ app.get('/api/mobile/orders/:storeId/:orderId', async (req, res) => {
       // 便于手机端直接展示的扁平结构
       summary,
     });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+// ========== 手机端记账同步（MercadoProfit App）==========
+app.get('/api/records', (_req, res) => {
+  try {
+    const records = db.getAccountingRecords();
+    res.json(records);
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+app.post('/api/records', (req, res) => {
+  try {
+    const record = req.body;
+    if (!record || !record.id) {
+      return res.status(400).json({ success: false, message: '缺少记录 id' });
+    }
+    const saved = db.upsertAccountingRecord(record);
+    res.json(saved);
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+app.put('/api/records/:id', (req, res) => {
+  try {
+    const record = req.body;
+    if (!record || !record.id) {
+      return res.status(400).json({ success: false, message: '缺少记录 id' });
+    }
+    if (String(record.id) !== String(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'URL id 与 body id 不一致' });
+    }
+    const saved = db.upsertAccountingRecord(record);
+    res.json(saved);
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+app.delete('/api/records/:id', (req, res) => {
+  try {
+    const deleted = db.deleteAccountingRecord(req.params.id);
+    res.json({ success: true, deleted });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err?.message || String(err) });
   }
@@ -2269,15 +2327,36 @@ app.post('/api/ml/candidates/:id/publish', async (req, res) => {
       widthCm: row.width_cm,
       heightCm: row.height_cm,
     };
+    // 前端预览时可能覆盖标题/描述/图片/价格/库存/重量尺寸/品牌/型号/保修等
+    const ov = req.body?.draft || {};
+    const draftOverrides: Partial<any> = {};
+    if (typeof ov.title === 'string') draftOverrides.title = ov.title;
+    if (typeof ov.description === 'string') draftOverrides.description = ov.description;
+    if (Array.isArray(ov.pictureUrls)) draftOverrides.pictureUrls = ov.pictureUrls.filter((u: any) => typeof u === 'string' && u.startsWith('http'));
+    if (typeof ov.availableQuantity === 'number') draftOverrides.available_quantity = ov.availableQuantity;
+    if (typeof ov.brand === 'string') draftOverrides.brand = ov.brand;
+    if (typeof ov.model === 'string') draftOverrides.model = ov.model;
+    if (typeof ov.warrantyType === 'string') draftOverrides.warrantyType = ov.warrantyType;
+    if (typeof ov.warrantyTime === 'string') draftOverrides.warrantyTime = ov.warrantyTime;
+    if (typeof ov.listingType === 'string') draftOverrides.listing_type_id = ov.listingType;
+    // 前端传 kg/cm，后端 ListingDraft 用 g/cm
+    if (typeof ov.weightKg === 'number') draftOverrides.weight = Math.round(ov.weightKg * 1000);
+    if (typeof ov.lengthCm === 'number') draftOverrides.length = ov.lengthCm;
+    if (typeof ov.widthCm === 'number') draftOverrides.width = ov.widthCm;
+    if (typeof ov.heightCm === 'number') draftOverrides.height = ov.heightCm;
+    // 若前端直接传了覆盖售价，优先使用
+    const listingPriceUsd = typeof ov.listingPriceUsd === 'number' ? ov.listingPriceUsd : row.listing_price_usd;
+
     const result = await publishCandidate({
       candidate: candidate as any,
       candidateDbId: id,
-      listingPriceUsd: row.listing_price_usd,
+      listingPriceUsd,
       sourceImageUrl: row.ali1688_image_url,
-      brand: 'Generic',
+      brand: ov.brand || 'Generic',
       storeIds: req.body?.storeIds,
       useCbtCategory: req.body?.useCbtCategory ?? true,
       youtube: req.body?.youtube,
+      draftOverrides,
     });
     res.json({ success: true, result });
   } catch (err: any) {

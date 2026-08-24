@@ -295,8 +295,8 @@ async function processOneCandidate(
     adAcosRate: 0.05,
   }, targetNetRate);
 
-  // 如果反推价超过竞品 1.5 倍，说明利润空间不够，改用竞品价格测算
-  const listingPrice = suggestedPrice > 0 && suggestedPrice <= enriched.priceUsd * 1.5 ? suggestedPrice : enriched.priceUsd;
+  // 如果反推价超过竞品 2 倍，说明利润空间不够，改用竞品价格测算；否则保留反推价以保证目标净利
+  const listingPrice = suggestedPrice > 0 && suggestedPrice <= enriched.priceUsd * 2 ? suggestedPrice : enriched.priceUsd;
 
   const profit = await calculateProfit({
     site: enriched.site,

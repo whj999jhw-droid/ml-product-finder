@@ -44,19 +44,21 @@ export interface CandidateToDraftOptions {
   brand?: string;
   availableQuantity?: number;
   useCbtCategory?: boolean;
+  /** 前端覆盖字段（单位与 ListingDraft 一致：重量 g，尺寸 cm） */
+  overrides?: Partial<ListingDraft>;
 }
 
 /**
  * 把候选商品转换为 CBT ListingDraft
  */
 export function candidateToDraft(opts: CandidateToDraftOptions): ListingDraft {
-  const { candidate, listingPriceUsd, sourceImageUrl, brand, availableQuantity, useCbtCategory } = opts;
+  const { candidate, listingPriceUsd, sourceImageUrl, brand, availableQuantity, useCbtCategory, overrides } = opts;
   const titles = generateTitles({ competitorTitle: candidate.title, site: candidate.site, count: 3 });
   const bestTitle = titles.find((t) => t.safe)?.title || titles[0]?.title || candidate.title;
 
   const categoryId = useCbtCategory ? toCbtCategoryId(candidate.site, candidate.categoryId) : candidate.categoryId;
 
-  return {
+  const draft: ListingDraft = {
     site: candidate.site,
     title: bestTitle,
     category_id: categoryId,
@@ -71,6 +73,26 @@ export function candidateToDraft(opts: CandidateToDraftOptions): ListingDraft {
     length: candidate.lengthCm,
     listing_type_id: 'bronze',
   };
+
+  if (overrides) {
+    if (overrides.title != null) draft.title = overrides.title;
+    if (overrides.category_id != null) draft.category_id = overrides.category_id;
+    if (overrides.price != null) draft.price = overrides.price;
+    if (overrides.available_quantity != null) draft.available_quantity = overrides.available_quantity;
+    if (overrides.description != null) draft.description = overrides.description;
+    if (overrides.pictureUrls != null) draft.pictureUrls = overrides.pictureUrls;
+    if (overrides.brand != null) draft.brand = overrides.brand;
+    if (overrides.model != null) draft.model = overrides.model;
+    if (overrides.weight != null) draft.weight = overrides.weight;
+    if (overrides.height != null) draft.height = overrides.height;
+    if (overrides.width != null) draft.width = overrides.width;
+    if (overrides.length != null) draft.length = overrides.length;
+    if (overrides.warrantyType != null) draft.warrantyType = overrides.warrantyType;
+    if (overrides.warrantyTime != null) draft.warrantyTime = overrides.warrantyTime;
+    if (overrides.listing_type_id != null) draft.listing_type_id = overrides.listing_type_id;
+  }
+
+  return draft;
 }
 
 export interface PublishCandidateOptions {
@@ -83,6 +105,7 @@ export interface PublishCandidateOptions {
   concurrency?: number;
   useCbtCategory?: boolean;
   youtube?: { enabled: boolean; videoPath: string; privacy?: 'private' | 'unlisted' | 'public'; title?: string };
+  draftOverrides?: Partial<ListingDraft>;
 }
 
 /**
@@ -101,6 +124,7 @@ export async function publishCandidate(opts: PublishCandidateOptions): Promise<B
     sourceImageUrl: opts.sourceImageUrl,
     brand: opts.brand,
     useCbtCategory: opts.useCbtCategory,
+    overrides: opts.draftOverrides,
   });
 
   // 加分项：上架前把商品视频上传到 YouTube，并把链接写进商品描述

@@ -8,7 +8,7 @@ import type { Ali1688Product } from './ali1688Skill.js';
 import type { ProfitResult } from './profit.js';
 import { checkBannedWords } from './bannedWords.js';
 
-export const SCORE_THRESHOLD = 0.6;
+export const SCORE_THRESHOLD = 0.55;
 
 export interface ScoreBreakdown {
   demand: number; // 0~1
@@ -85,10 +85,9 @@ export function scoreCandidate(input: ScoringInput): ScoreBreakdown {
     compliance = 0;
     reasons.push(`合规风险：${banned.message}`);
   } else {
-    // 数据完整度：重量/尺寸缺失扣 0.2
+    // 数据完整度：重量/尺寸缺失不再重扣（利润测算已按默认 0.3kg 兜底）
     if (!cw || cw <= 0) {
-      compliance -= 0.2;
-      reasons.push('缺少重量数据，合规分扣 0.2');
+      reasons.push('缺少重量数据，按默认重量测算');
     }
     // 售价过低（< 5 USD）易被平台风控
     if (candidate.priceUsd < 5) {
