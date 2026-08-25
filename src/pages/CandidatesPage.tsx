@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import {
   Button,
   Card,
@@ -85,8 +85,10 @@ interface PublishDraft {
   warrantyTime: string;
   /** 全局默认 listingType（已被 listingTypeBySite 取代，保留兼容） */
   listingType: string;
-  skuTitle: string;
-  skuImageUrl: string;
+  /** 多 SKU：标题来自 1688 SKU 标题，图片来自 1688 SKU 图片（取不到回退主图） */
+  skus: { title: string; imageUrl: string }[];
+  /** 1688 货源链接，方便手动核对重量/尺寸 */
+  ali1688Url?: string;
   /** 类目属性值：{ [attributeId]: { value_id|value_name|values } } */
   attributeValues: Record<string, any>;
   /** 类目 ID（可编辑，覆盖原候选类目） */
@@ -184,6 +186,13 @@ export function CandidatesPage() {
   const [siteInfos, setSiteInfos] = useState<Record<string, SiteInfo>>({});
   const [profitBySite, setProfitBySite] = useState<Record<string, any>>({});
   const [profitLoading, setProfitLoading] = useState(false);
+  // 目标净利润（USD，按站点独立）：用户直接填写，系统据此反推售价（运费按重量/尺寸自动测算）
+  const [targetNetBySite, setTargetNetBySite] = useState<Record<string, number>>({});
+  // 用 ref 让后台自动填充在读到最新 draft/targetSites，避免闭包过期
+  const publishDraftRef = useRef<PublishDraft | null>(null);
+  const targetSitesRef = useRef<string[]>([]);
+  useEffect(() => { publishDraftRef.current = publishDraft; }, [publishDraft]);
+  useEffect(() => { targetSitesRef.current = targetSites; }, [targetSites]);
   const [newImageUrl, setNewImageUrl] = useState('');
   const [categoryAttributes, setCategoryAttributes] = useState<CategoryAttribute[]>([]);
   const [categoryAttrLoading, setCategoryAttrLoading] = useState(false);
@@ -447,29 +456,30 @@ export function CandidatesPage() {
       initialPriceBySite[site] = basePrice;
       initialListingTypeBySite[site] = 'gold_special';
     }
-    setPublishDraft({
+    const draft: PublishDraft = {
       title: row.ml_title || row.ali1688_title || '',
       description: buildDefaultDescription(row, row.ml_title || row.ali1688_title || ''),
       pictureUrls: imgs,
       listingPriceUsd: basePrice,
       priceBySite: initialPriceBySite,
       listingTypeBySite: initialListingTypeBySite,
-      availableQuantity: 50,
+      availableQuantity: 3,
       weightKg: row.weight_kg || 0,
       lengthCm: row.length_cm || 0,
       widthCm: row.width_cm || 0,
       heightCm: row.height_cm || 0,
       brand: 'Generic',
       model: '',
-      warrantyType: '',
+      warrantyType: 'No warranty',
       warrantyTime: '',
       listingType: 'gold_special',
-      skuTitle: '',
-      skuImageUrl: '',
+      skus: [],
+      ali1688Url: row.ali1688_url || '',
       attributeValues: {},
       categoryId: row.ml_category_id || '',
       categoryName: row.ml_category_name || '',
-    });
+    };
+    setPublishDraft(draft);
     setProfitBySite({});
     setUploadYoutube(false);
     setYoutubeVideoPath('');
@@ -487,6 +497,8 @@ export function CandidatesPage() {
       fetchCategoryAttributes(row.ml_category_id);
       fetchCategoryPath(row.ml_category_id);
     }
+    // 后台自动：补充 1688 重量/尺寸/SKU + AI 编辑图片 + 按目标净利润反推售价（无需手动点击）
+    autoFillPublish(row, draft, initialSites);
   };
 
   const fetchCategoryAttributes = async (categoryId: string) => {
@@ -645,40 +657,125 @@ export function CandidatesPage() {
     fetchCategoryAttributes(cat.id);
   };
 
-  // ============ 从 1688 详情补充重量/尺寸/SKU ============
+  // ============ 从 1688 详情补充重量/尺寸/SKU（后台自动调用，无需手动点击） ============
+  const [aliFilling, setAliFilling] = useState(false);
+  const fetch1688DetailCore = async (row: Candidate) => {
+    const res = await fetch(`/api/ml/candidates/${row.id}/1688-detail`, { method: 'POST' });
+    const data = await res.json();
+    if (!data.success) return null;
+    return data;
+  };
+  const apply1688Detail = (data: any) => {
+    setPublishDraft((prev) => {
+      if (!prev) return prev;
+      const next: typeof prev = { ...prev };
+      if (typeof data.weightKg === 'number') next.weightKg = data.weightKg;
+      if (typeof data.lengthCm === 'number') next.lengthCm = data.lengthCm;
+      if (typeof data.widthCm === 'number') next.widthCm = data.widthCm;
+      if (typeof data.heightCm === 'number') next.heightCm = data.heightCm;
+      if (Array.isArray(data.skus) && data.skus.length) next.skus = data.skus;
+      else if (Array.isArray(data.skuList) && data.skuList.length) {
+        next.skus = data.skuList.map((t: string) => ({ title: t, imageUrl: prev.pictureUrls[0] || '' }));
+      }
+      if (data.ali1688Url) next.ali1688Url = data.ali1688Url;
+      return next;
+    });
+    return data;
+  };
   const handleFetch1688Detail = async () => {
     if (!publishRow) return;
     try {
-      const res = await fetch(`/api/ml/candidates/${publishRow.id}/1688-detail`, { method: 'POST' });
-      const data = await res.json();
-      if (!data.success) {
-        MessagePlugin.warning(data.message || '未获取到 1688 详情');
+      const data = await fetch1688DetailCore(publishRow);
+      if (!data) {
+        MessagePlugin.warning('未获取到 1688 详情（可能该候选无 1688 商品 ID 或 AK 未配置）');
         return;
       }
-      setPublishDraft((prev) => {
-        if (!prev) return prev;
-        const next = { ...prev };
-        if (typeof data.weightKg === 'number') next.weightKg = data.weightKg;
-        if (typeof data.lengthCm === 'number') next.lengthCm = data.lengthCm;
-        if (typeof data.widthCm === 'number') next.widthCm = data.widthCm;
-        if (typeof data.heightCm === 'number') next.heightCm = data.heightCm;
-        if (data.skuTitle) next.skuTitle = data.skuTitle;
-        else if (data.skuList?.length && !next.skuTitle) next.skuTitle = data.skuList[0];
-        return next;
-      });
+      apply1688Detail(data);
       MessagePlugin.success('已从 1688 详情补充重量/尺寸/SKU');
     } catch (e: any) {
       MessagePlugin.error(e?.message || '补充失败');
     }
   };
 
+  // ============ 打开弹窗时后台自动：补充 1688 重量/尺寸/SKU + AI 编辑图片 + 反推净利润售价 ============
+  const autoFillPublish = async (row: Candidate, draft: PublishDraft, sites: string[]) => {
+    // 1) 补充 1688 重量/尺寸/SKU（失败不影响主流程）
+    setAliFilling(true);
+    try {
+      const data = await fetch1688DetailCore(row);
+      if (data) apply1688Detail(data);
+    } catch {
+      /* 忽略：1688 不可用时仍可用手动填写 */
+    } finally {
+      setAliFilling(false);
+    }
+    // 2) 自动 AI 编辑图片（去背景+白底+水印，符合美客多要求），失败则保留原图
+    if (draft.pictureUrls.length > 0) {
+      try {
+        await autoAiEditImages(draft.pictureUrls);
+      } catch {
+        /* 忽略 */
+      }
+    }
+    // 3) 按默认目标净利润（竞品价 20%）反推各站点售价，运费由重量/尺寸自动测算
+    try {
+      const purchaseCostCny = row.ali1688_price_cny || 0;
+      for (const site of sites) {
+        const suggestedTarget = Math.max(0.5, Math.round((draft.priceBySite[site] ?? draft.listingPriceUsd) * 0.2 * 100) / 100);
+        await reverseNetProfit(site, suggestedTarget, {
+          purchaseCostCny,
+          weightKg: draft.weightKg,
+          lengthCm: draft.lengthCm,
+          widthCm: draft.widthCm,
+          heightCm: draft.heightCm,
+        });
+      }
+    } catch {
+      /* 忽略 */
+    }
+  };
+
+  // ============ 按目标净利润反推售价（运费按重量/尺寸自动测算） ============
+  const reverseNetProfit = async (
+    site: string,
+    targetNetProfitUsd: number,
+    dims: { purchaseCostCny: number; weightKg?: number; lengthCm?: number; widthCm?: number; heightCm?: number }
+  ) => {
+    if (!targetNetProfitUsd || targetNetProfitUsd <= 0) return;
+    try {
+      const res = await fetch('/api/ml/profit/reverse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          site,
+          targetNetProfitUsd,
+          purchaseCostCny: dims.purchaseCostCny || 0,
+          weightKg: dims.weightKg || undefined,
+          lengthCm: dims.lengthCm || undefined,
+          widthCm: dims.widthCm || undefined,
+          heightCm: dims.heightCm || undefined,
+          taxMode: 'direct_import',
+          adAcosRate: 0.05,
+        }),
+      });
+      const data = await res.json();
+      if (data.success && Number.isFinite(data.listingPriceUsd)) {
+        setPublishDraft((prev) =>
+          prev ? { ...prev, priceBySite: { ...prev.priceBySite, [site]: data.listingPriceUsd } } : prev
+        );
+        setTargetNetBySite((prev) => ({ ...prev, [site]: targetNetProfitUsd }));
+      }
+    } catch {
+      /* 忽略反推失败 */
+    }
+  };
+
   // ============ 图片 AI 编辑（去背景+白底+水印）后回传美客多公网 URL ============
   const [aiEditing, setAiEditing] = useState(false);
-  const handleAiEditImages = async () => {
-    if (!publishRow || !publishDraft || publishDraft.pictureUrls.length === 0) {
-      MessagePlugin.warning('请先有可用图片');
-      return;
-    }
+  const autoAiEditImages = async (images?: string[]) => {
+    if (!publishRow) return;
+    const srcs = images && images.length ? images : publishDraft?.pictureUrls || [];
+    if (srcs.length === 0) return;
     setAiEditing(true);
     try {
       const res = await fetch('/api/ml/listing/prepare-images', {
@@ -686,7 +783,7 @@ export function CandidatesPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           site: publishRow.site,
-          sourceImages: publishDraft.pictureUrls,
+          sourceImages: srcs,
           mode: 'ai',
           watermarkText: publishRow.site,
         }),
@@ -694,15 +791,19 @@ export function CandidatesPage() {
       const data = await res.json();
       if (data.success && Array.isArray(data.pictures) && data.pictures.length) {
         setPublishDraft((prev) => (prev ? { ...prev, pictureUrls: data.pictures } : prev));
-        MessagePlugin.success(`AI 编辑完成，已生成 ${data.pictures.length} 张美客多图`);
-      } else {
-        MessagePlugin.warning(data.message || 'AI 编辑失败，可改用「直传」模式');
       }
-    } catch (e: any) {
-      MessagePlugin.error(e?.message || 'AI 编辑失败');
+    } catch {
+      /* 后台自动编辑失败则保留原图，不阻断上架 */
     } finally {
       setAiEditing(false);
     }
+  };
+  const handleAiEditImages = async () => {
+    if (!publishDraft || publishDraft.pictureUrls.length === 0) {
+      MessagePlugin.warning('请先有可用图片');
+      return;
+    }
+    await autoAiEditImages();
   };
 
   // ============ 批量上架 ============
@@ -898,8 +999,11 @@ export function CandidatesPage() {
     setPublishing(true);
     try {
       const pictureUrls = [...publishDraft.pictureUrls];
-      if (publishDraft.skuImageUrl.trim().startsWith('http') && !pictureUrls.includes(publishDraft.skuImageUrl.trim())) {
-        pictureUrls.push(publishDraft.skuImageUrl.trim());
+      // 把每个 SKU 的图片（若有）一并上架，最多补充到 6 张
+      for (const sku of publishDraft.skus) {
+        if (sku.imageUrl && sku.imageUrl.startsWith('http') && !pictureUrls.includes(sku.imageUrl) && pictureUrls.length < 6) {
+          pictureUrls.push(sku.imageUrl);
+        }
       }
       const draftPayload = {
         title: publishDraft.title,
@@ -914,10 +1018,11 @@ export function CandidatesPage() {
         widthCm: publishDraft.widthCm,
         heightCm: publishDraft.heightCm,
         brand: publishDraft.brand,
-        model: publishDraft.model || publishDraft.skuTitle,
+        model: publishDraft.model || (publishDraft.skus[0]?.title ?? ''),
         warrantyType: publishDraft.warrantyType,
         warrantyTime: publishDraft.warrantyTime,
         listingType: publishDraft.listingType,
+        skus: publishDraft.skus,
         attributeValues: publishDraft.attributeValues,
         categoryId: publishDraft.categoryId,
       };
@@ -1680,15 +1785,25 @@ export function CandidatesPage() {
             {/* 商品图片 */}
             <div>
               <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium">商品图片（默认采集自 1688，点击可放大）</span>
+                <span className="text-sm font-medium">商品图片（自动采集自 1688，已在后台 AI 处理，点击可放大）</span>
                 <Space>
-                  <Button size="small" variant="outline" onClick={handleFetch1688Detail}>
-                    从1688补充重量/尺寸/SKU
-                  </Button>
-                  <Button size="small" variant="outline" loading={aiEditing} onClick={handleAiEditImages}>
-                    AI 编辑图片
+                  {aliFilling && <span className="text-xs text-gray-400">从1688补充中…</span>}
+                  {aiEditing && <span className="text-xs text-gray-400">AI 编辑中…</span>}
+                  <Button size="small" variant="text" theme="primary" loading={aliFilling} onClick={handleFetch1688Detail}>
+                    重新获取1688信息
                   </Button>
                 </Space>
+              </div>
+              <div className="text-xs text-gray-500 mb-2">
+                打开弹窗时已自动：①从1688读取重量/尺寸/SKU；②调用 AI 去背景+白底+水印（符合美客多要求）；③按目标净利润反推售价。无需手动操作。
+                {publishDraft.ali1688Url && (
+                  <span className="ml-1">
+                    货源：
+                    <a href={publishDraft.ali1688Url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline break-all">
+                      1688 商品链接
+                    </a>
+                  </span>
+                )}
               </div>
               <div className="flex flex-wrap gap-2 mb-2">
                 {publishDraft.pictureUrls.map((url, idx) => (
@@ -1746,24 +1861,71 @@ export function CandidatesPage() {
               </div>
             </div>
 
-            {/* SKU */}
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <div className="text-sm font-medium mb-1">SKU 标题（型号）</div>
-                <Input
-                  value={publishDraft.skuTitle}
-                  onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, skuTitle: String(v) } : prev))}
-                  placeholder="如未填写，将使用商品标题"
-                />
+            {/* SKU（一个或多个，标题/图片自动来自 1688） */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-medium">SKU（规格，可从 1688 自动识别多个）</span>
+                <Button
+                  size="small"
+                  variant="text"
+                  theme="primary"
+                  onClick={() =>
+                    setPublishDraft((prev) =>
+                      prev ? { ...prev, skus: [...prev.skus, { title: '', imageUrl: '' }] } : prev
+                    )
+                  }
+                >
+                  添加 SKU
+                </Button>
               </div>
-              <div>
-                <div className="text-sm font-medium mb-1">SKU 图片 URL</div>
-                <Input
-                  value={publishDraft.skuImageUrl}
-                  onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, skuImageUrl: String(v) } : prev))}
-                  placeholder="https://..."
-                />
-              </div>
+              {publishDraft.skus.length === 0 ? (
+                <div className="text-xs text-gray-400 mb-2">
+                  未从 1688 识别到 SKU（可能无 1688 商品 ID 或 AK 未配置）。可在「重新获取1688信息」后自动填充，或手动添加。
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {publishDraft.skus.map((sku, idx) => (
+                    <div key={idx} className="flex items-center gap-2 border border-gray-100 rounded p-2">
+                      <div
+                        className="w-12 h-12 border rounded overflow-hidden cursor-pointer flex-shrink-0"
+                        onClick={() => {
+                          if (sku.imageUrl) {
+                            setViewerImages([sku.imageUrl]);
+                            setViewerIndex(0);
+                            setViewerVisible(true);
+                          }
+                        }}
+                      >
+                        {sku.imageUrl ? (
+                          <img src={sku.imageUrl} alt="" className="w-full h-full object-cover" onError={(e) => { (e.currentTarget as HTMLImageElement).src = FALLBACK_IMAGE; }} />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-gray-300 text-xs">无图</div>
+                        )}
+                      </div>
+                      <Input
+                        value={sku.title}
+                        onChange={(v) =>
+                          setPublishDraft((prev) =>
+                            prev ? { ...prev, skus: prev.skus.map((s, i) => (i === idx ? { ...s, title: String(v) } : s)) } : prev
+                          )
+                        }
+                        placeholder="SKU 标题（型号/规格）"
+                        className="flex-1"
+                      />
+                      <Button
+                        size="small"
+                        variant="text"
+                        theme="danger"
+                        onClick={() =>
+                          setPublishDraft((prev) => (prev ? { ...prev, skus: prev.skus.filter((_, i) => i !== idx) } : prev))
+                        }
+                      >
+                        删
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* 重量尺寸 */}
@@ -1951,13 +2113,17 @@ export function CandidatesPage() {
 
             {/* 目标国家与利润 */}
             <div>
-              <div className="text-sm font-medium mb-2">目标国家 / 独立售价 / 净利润测算</div>
+              <div className="text-sm font-medium mb-2">
+                目标国家 / 目标净利润 / 自动反推售价（运费按重量+尺寸自动测算）
+                <span className="text-xs text-gray-400 ml-2">直接填「目标净利润」，系统自动算出上架售价（美客多按净收入要求填净利润）</span>
+              </div>
               <div className="border border-gray-100 rounded overflow-hidden">
                 <table className="w-full text-sm">
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="px-3 py-2 text-left font-medium text-gray-600">国家</th>
-                      <th className="px-3 py-2 text-left font-medium text-gray-600">售价（USD）</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">目标净利润（USD）</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">反推售价（USD）</th>
                       <th className="px-3 py-2 text-left font-medium text-gray-600">产品类型</th>
                       <th className="px-3 py-2 text-left font-medium text-gray-600">净利润</th>
                       <th className="px-3 py-2 text-left font-medium text-gray-600">利润率</th>
@@ -1971,25 +2137,29 @@ export function CandidatesPage() {
                       const p = profitBySite[site];
                       const sitePrice = publishDraft.priceBySite[site] ?? publishDraft.listingPriceUsd;
                       const siteType = publishDraft.listingTypeBySite[site] ?? publishDraft.listingType;
+                      const targetNet = targetNetBySite[site];
                       return (
                         <tr key={site} className="border-t">
                           <td className="px-3 py-2">{info ? `${info.name} (${site})` : site}</td>
                           <td className="px-3 py-2">
                             <InputNumber
-                              value={sitePrice}
+                              value={targetNet ?? undefined}
                               onChange={(v) =>
-                                setPublishDraft((prev) => {
-                                  if (!prev) return prev;
-                                  return {
-                                    ...prev,
-                                    priceBySite: { ...prev.priceBySite, [site]: Number(v) || 0 },
-                                  };
+                                reverseNetProfit(site, Number(v) || 0, {
+                                  purchaseCostCny: publishRow ? publishRow.ali1688_price_cny || 0 : 0,
+                                  weightKg: publishDraft.weightKg,
+                                  lengthCm: publishDraft.lengthCm,
+                                  widthCm: publishDraft.widthCm,
+                                  heightCm: publishDraft.heightCm,
                                 })
                               }
                               decimalPlaces={2}
                               min={0}
-                              style={{ width: 110 }}
+                              style={{ width: 120 }}
                             />
+                          </td>
+                          <td className="px-3 py-2">
+                            <span className="text-blue-600 font-medium">${sitePrice.toFixed(2)}</span>
                           </td>
                           <td className="px-3 py-2">
                             <select

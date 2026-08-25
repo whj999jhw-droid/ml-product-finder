@@ -93,6 +93,11 @@ export function candidateToDraft(opts: CandidateToDraftOptions): ListingDraft {
     if (overrides.warrantyTime != null) draft.warrantyTime = overrides.warrantyTime;
     if (overrides.listing_type_id != null) draft.listing_type_id = overrides.listing_type_id;
     if (overrides.seller_custom_field != null) draft.seller_custom_field = overrides.seller_custom_field;
+    if (Array.isArray(overrides.skus)) {
+      draft.skus = overrides.skus;
+      // 未填 model 时，用第一个 SKU 标题作为型号
+      if (!draft.model && overrides.skus[0]?.title) draft.model = overrides.skus[0].title;
+    }
   }
 
   return draft;

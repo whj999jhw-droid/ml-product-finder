@@ -164,7 +164,9 @@ function AiConfigPanel() {
       <Card title="LLM 平台（多平台自动 failover）" headerBordered>
         <div className="space-y-3">
           {providers.map((p, i) => (
-            <div key={i} className="border border-gray-100 rounded p-2 space-y-2">
+            <div key={i} className="border border-gray-100 rounded p-3 space-y-3">
+              <div className="text-xs font-medium text-gray-500">平台 {i + 1}</div>
+              {/* 第一行：平台名 · 链接 · API Key */}
               <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center">
                 <Input
                   className="md:col-span-2"
@@ -174,11 +176,11 @@ function AiConfigPanel() {
                   placeholder="平台名"
                 />
                 <Input
-                  className="md:col-span-4"
+                  className="md:col-span-6"
                   size="small"
                   value={p.baseUrl}
                   onChange={(v) => updateProvider(i, { baseUrl: v as string })}
-                  placeholder="https://.../v1"
+                  placeholder="链接 / baseUrl（https://.../v1）"
                 />
                 <Input
                   className="md:col-span-3"
@@ -187,13 +189,6 @@ function AiConfigPanel() {
                   value={p.apiKey}
                   onChange={(v) => updateProvider(i, { apiKey: v as string })}
                   placeholder={status ? '留空=复用已保存' : 'API Key'}
-                />
-                <Input
-                  className="md:col-span-2"
-                  size="small"
-                  value={p.models}
-                  onChange={(v) => updateProvider(i, { models: v as string })}
-                  placeholder="模型1, 模型2"
                 />
                 <Button
                   className="md:col-span-1"
@@ -204,9 +199,20 @@ function AiConfigPanel() {
                   onClick={() => setProviders((prev) => prev.filter((_, idx) => idx !== i))}
                 />
               </div>
+              {/* 第二行：多个模型，逗号隔开 */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500 shrink-0">模型（逗号隔开）</span>
+                <Input
+                  className="flex-1"
+                  size="small"
+                  value={p.models}
+                  onChange={(v) => updateProvider(i, { models: v as string })}
+                  placeholder="gpt-4o, gpt-4o-mini, deepseek-chat"
+                />
+              </div>
               <div className="text-xs text-gray-400">
-                第一行：平台名 · 链接(baseUrl) · API Key（修改其他项时留空即复用已保存的 Key，不会丢失）；
-                第二行模型栏：多个模型用<strong>逗号</strong>隔开（如 gpt-4o, gpt-4o-mini, deepseek-chat），会按序自动 failover。
+                第一行填平台名 / 链接(baseUrl) / API Key（修改其他项时 Key 留空即复用已保存，不会丢失）；
+                第二行多个模型用<strong>逗号</strong>隔开，会按序自动 failover。
               </div>
             </div>
           ))}

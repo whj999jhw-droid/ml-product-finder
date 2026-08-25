@@ -396,6 +396,54 @@ export async function reverseEngineerPrice(
   return round2(fixedCost / (1 - variableRate));
 }
 
+/**
+ * 按目标净利润（绝对金额 USD）反推建议售价（USD）。
+ * 公式：price × (1 − variableRate) − fixedCost = targetNetProfit
+ *       即 price = (fixedCost + targetNetProfit) / (1 − variableRate)
+ * 运费（logisticsFee + 头程）由重量与尺寸自动决定（计费重 = max(实重, 体积重)，体积重 = L×W×H/5000）。
+ * @param targetNetProfitUsd 目标净利润金额（USD），如 5 表示每件净赚 5 美元
+ */
+export async function priceForTargetNetProfit(
+  input: Omit<ProductInput, 'listingPriceUsd'>,
+  targetNetProfitUsd: number
+): Promise<number> {
+  const site = (input.site || 'MLM').toUpperCase();
+  const rates = getSiteRates()[site] || DEFAULT_SITE_RATES.MLM;
+  const cnyUsd = input.cnyUsd ?? (await getCnyUsd());
+
+  const weightKg = input.weightKg || 0;
+  const volumeWeightKg =
+    input.lengthCm && input.widthCm && input.heightCm
+      ? (input.lengthCm * input.widthCm * input.heightCm) / VOLUME_DIVISOR
+      : 0;
+  const chargeableWeightKg = Math.max(weightKg, volumeWeightKg) || weightKg || 0.3;
+
+  const taxMode: TaxMode = input.taxMode ?? 'direct_import';
+  const taxRate = site === 'MLM' ? MX_TAX_MODE_RATES[taxMode] ?? 0 : rates.taxRate;
+  const adAcosRate = input.adAcosRate ?? 0.05;
+
+  const logisticsFee = rates.logisticsBaseUsd + rates.logisticsPerKgUsd * chargeableWeightKg;
+  const firstLegCny =
+    input.firstLegShippingCny != null && input.firstLegShippingCny > 0
+      ? input.firstLegShippingCny
+      : rates.firstLegPerKgCny * chargeableWeightKg;
+  const firstLegFee = firstLegCny * cnyUsd;
+  const purchaseCost = (input.purchaseCostCny || 0) * cnyUsd;
+
+  const fixedCost = logisticsFee + firstLegFee + purchaseCost;
+  const variableRate =
+    rates.commissionRate +
+    rates.pagoFeeRate +
+    taxRate +
+    adAcosRate +
+    rates.returnRate * rates.returnLossFactor +
+    rates.exchangeLossRate +
+    rates.withdrawalFeeRate;
+
+  if (variableRate >= 1) return Infinity;
+  return round2((fixedCost + targetNetProfitUsd) / (1 - variableRate));
+}
+
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }

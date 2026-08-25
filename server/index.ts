@@ -2365,6 +2365,16 @@ app.post('/api/ml/candidates/:id/publish', async (req, res) => {
         .filter(([_, v]) => v && (v as any).value_id != null || (v as any).value_name != null || Array.isArray((v as any).values))
         .map(([id, v]) => ({ id, ...(v as any) }));
     }
+    // 多 SKU（标题/图片，自动从 1688 填充）：写入 ListingDraft.skus
+    if (Array.isArray(ov.skus) && ov.skus.length) {
+      draftOverrides.skus = ov.skus
+        .filter((s: any) => s && typeof s.title === 'string')
+        .map((s: any) => ({ title: String(s.title), imageUrl: typeof s.imageUrl === 'string' ? s.imageUrl : '' }));
+    }
+    // 卖家自定义 SKU 编号（美客多 seller_sku）：前端可显式传入，否则由后端 generateSellerSku 自动生成
+    if (typeof ov.sellerCustomField === 'string' && ov.sellerCustomField.trim()) {
+      draftOverrides.seller_custom_field = ov.sellerCustomField.trim();
+    }
     // 若前端直接传了覆盖售价，优先使用；否则回退到行内建议价
     const listingPriceUsd = typeof ov.listingPriceUsd === 'number' ? ov.listingPriceUsd : row.listing_price_usd;
 
@@ -2497,6 +2507,9 @@ app.post('/api/ml/candidates/:id/1688-detail', async (req, res) => {
     // 合并所有 item 的 all_info 文本做解析（与妙手一致：多来源对比确认）
     const allInfos = Object.values(detail.details || {}).map((d: any) => d?.all_info || '').join('\n');
     const parsed = parse1688Physical(allInfos);
+    // SKU 结构化：标题来自 1688，图片取不到时回退商品主图（便于后台自动 AI 编辑后展示）
+    const fallbackImg = row.ali1688_image_url || '';
+    const skus = parsed.skuList.map((t) => ({ title: t, imageUrl: fallbackImg }));
     res.json({
       success: true,
       weightKg: parsed.weightKg,
@@ -2505,6 +2518,8 @@ app.post('/api/ml/candidates/:id/1688-detail', async (req, res) => {
       heightCm: parsed.heightCm,
       skuTitle: row.ali1688_title || '',
       skuList: parsed.skuList,
+      skus,
+      ali1688Url: row.ali1688_url || (productId ? `https://detail.1688.com/offer/${productId}.html` : ''),
       rawText: allInfos.slice(0, 2000),
     });
   } catch (err: any) {
@@ -2540,13 +2555,13 @@ function parse1688Physical(text: string): {
       lengthCm = parseFloat(dim2[1]); widthCm = parseFloat(dim2[2]); heightCm = parseFloat(dim2[3]);
     }
   }
-  // SKU 列表：匹配「sku」「规格」附近的型号/标题片段（粗略抽取，最多 10 条）
+  // SKU 列表：匹配「sku」「规格」「型号」「颜色」「尺码」等附近的型号/标题片段（粗略抽取，最多 10 条）
   const skuList: string[] = [];
-  const skuRe = /(sku|规格|型号)[^\n]{0,40}/gi;
+  const skuRe = /(sku|规格|型号|颜色|尺码|尺寸)[^\n:：]{0,6}[:：]?\s*([^\n]{1,40})/gi;
   let m: RegExpExecArray | null;
   while ((m = skuRe.exec(text)) && skuList.length < 10) {
-    const s = m[0].trim();
-    if (s.length > 3) skuList.push(s);
+    const s = (m[2] || m[0]).trim().replace(/^[:：\s]+/, '');
+    if (s.length > 1 && !skuList.includes(s)) skuList.push(s);
   }
   return { weightKg, lengthCm, widthCm, heightCm, skuList };
 }
@@ -3338,6 +3353,40 @@ app.post('/api/ml/profit/batch', async (req, res) => {
     res.json({ success: true, results });
   } catch (err: any) {
     res.json({ success: false, message: err?.message || '批量测算失败' });
+  }
+});
+
+// 按目标净利润（绝对金额）反推建议售价：运费按重量/尺寸自动测算
+app.post('/api/ml/profit/reverse', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const site = String(b.site || 'MLM').toUpperCase();
+    const targetNetProfitUsd = Number(b.targetNetProfitUsd);
+    if (!Number.isFinite(targetNetProfitUsd) || targetNetProfitUsd <= 0) {
+      return res.status(400).json({ success: false, message: '请填写有效的目标净利润（>0）' });
+    }
+    const price = await profit.priceForTargetNetProfit(
+      {
+        site,
+        listingPriceUsd: 0,
+        purchaseCostCny: Number(b.purchaseCostCny) || 0,
+        firstLegShippingCny: b.firstLegShippingCny != null ? Number(b.firstLegShippingCny) : undefined,
+        weightKg: b.weightKg != null ? Number(b.weightKg) : undefined,
+        lengthCm: b.lengthCm != null ? Number(b.lengthCm) : undefined,
+        widthCm: b.widthCm != null ? Number(b.widthCm) : undefined,
+        heightCm: b.heightCm != null ? Number(b.heightCm) : undefined,
+        taxMode: b.taxMode || 'direct_import',
+        adAcosRate: b.adAcosRate != null ? Number(b.adAcosRate) : 0.05,
+        cnyUsd: b.cnyUsd != null ? Number(b.cnyUsd) : undefined,
+      },
+      targetNetProfitUsd
+    );
+    if (!Number.isFinite(price)) {
+      return res.json({ success: false, message: '无法反推售价（成本占比过高，变动费率≥100%）' });
+    }
+    res.json({ success: true, listingPriceUsd: price });
+  } catch (err: any) {
+    res.json({ success: false, message: err?.message || '反推售价失败' });
   }
 });
 

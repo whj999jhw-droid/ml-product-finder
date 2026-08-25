@@ -30,6 +30,8 @@ export interface ListingDraft {
   model?: string; // 模型（可选，对应 MODEL attribute）
   /** 卖家自定义 SKU 编号（美客多 seller_custom_field / seller_sku）。不传则自动生成 */
   seller_custom_field?: string;
+  /** 多 SKU（规格）：标题来自 1688 SKU 标题，图片来自 1688 SKU 图片（取不到时回退主图） */
+  skus?: Array<{ title: string; imageUrl: string }>;
   weight?: number;
   height?: number;
   width?: number;
@@ -160,6 +162,19 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
   };
   const attributes = mergeAttributes(draft.attributes);
 
+  // 多 SKU（规格）：把 1688 识别到的 SKU 标题附到描述，便于买家与后台核对；图片写入 pictureUrls
+  let descriptionText = draft.description || '';
+  if (draft.skus && draft.skus.length) {
+    const skuLines = draft.skus.map((s, i) => `${i + 1}. ${s.title || '-'}`).join('\n');
+    descriptionText = `${descriptionText}\n\nEspecificaciones disponibles (SKU):\n${skuLines}`;
+    // 把每个 SKU 的图片（若有且为公网地址）一并加入图床，最多补充到 6 张
+    for (const s of draft.skus) {
+      if (s.imageUrl && s.imageUrl.startsWith('http') && draft.pictureUrls.length < 6 && !draft.pictureUrls.includes(s.imageUrl)) {
+        draft.pictureUrls.push(s.imageUrl);
+      }
+    }
+  }
+
   // CBT 创建：POST /global/items，价格按国家写在 sites_to_sell（USD）
   // 保修（sale_terms）一般可选：仅当调用方提供保修信息时才发送，避免对不需要保修的类目强制填值
   const saleTerms: any[] = [];
@@ -172,7 +187,7 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
     catalog_listing: false,
     category_id: draft.category_id,
     available_quantity: draft.available_quantity,
-    description: { plain_text: draft.description },
+    description: { plain_text: descriptionText },
     pictures,
     // 卖家自定义 SKU 编号：自动生成或调用方传入；用于与美客多后台 seller_sku 对应追踪
     seller_custom_field: draft.seller_custom_field || generateSellerSku(draft.site),
