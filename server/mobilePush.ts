@@ -36,6 +36,9 @@ interface DeviceRecord {
   platform: 'ios' | 'android' | 'other';
   token: string;
   appVersion?: string;
+  // 应用包名：安卓 v1=com.mercadoprofit，v2=com.mercadoprofit.v2
+  // 推送网关据此选对应的极光应用凭证（一个包名 = 一个 AppKey）
+  pkg?: string;
   updatedAt: string;
 }
 

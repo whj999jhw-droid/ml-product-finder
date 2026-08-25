@@ -63,7 +63,8 @@ function envProvider(): LlmProvider | null {
   return { name: '环境变量 LLM_*', baseUrl, apiKey, model };
 }
 
-function loadLlmConfigFile(): LlmConfigFile | null {
+/** 读取磁盘配置原始内容（不过滤空 KEY；用于前端回填展示）。 */
+function loadLlmConfigFileRaw(): LlmConfigFile | null {
   ensureDataDir();
   if (!fs.existsSync(LLM_CONFIG_FILE)) return null;
   try {
@@ -71,10 +72,9 @@ function loadLlmConfigFile(): LlmConfigFile | null {
     const parsed = JSON.parse(raw) as LegacyLlmConfig & LlmConfigFile;
     // 新版：providers 数组
     if (Array.isArray(parsed.providers) && parsed.providers.length > 0) {
-      const providers = parsed.providers
-        .map((p) => ({ ...p, baseUrl: normalizeBaseUrl(p.baseUrl) }))
-        .filter(isValidProvider);
-      if (providers.length) return { providers };
+      return {
+        providers: parsed.providers.map((p) => ({ ...p, baseUrl: normalizeBaseUrl(p.baseUrl) })),
+      };
     }
     // 旧版：单条配置迁移为 providers[0]
     const legacy: LlmProvider = {
@@ -83,11 +83,35 @@ function loadLlmConfigFile(): LlmConfigFile | null {
       apiKey: parsed.apiKey || parsed.LLM_API_KEY || '',
       model: parsed.model || parsed.LLM_MODEL || '',
     };
-    if (isValidProvider(legacy)) return { providers: [legacy] };
-    return {};
+    return { providers: [legacy] };
   } catch {
     return null;
   }
+}
+
+/** 读取可用于实际调用的平台（要求 baseUrl+apiKey+model 齐备）。 */
+function loadLlmConfigFile(): LlmConfigFile | null {
+  const raw = loadLlmConfigFileRaw();
+  if (!raw?.providers) return null;
+  const providers = raw.providers.filter(isValidProvider);
+  return providers.length ? { providers } : null;
+}
+
+/**
+ * 返回用于前端回填展示的已保存配置：即使 apiKey 为空也返回该平台，
+ * 这样用户在「只改 KEY / 只增模型」时不至于把 endpoint/model 也清掉。
+ * 出于安全与「留空即复用」语义，apiKey 永不随响应返回明文。
+ */
+export function getLlmConfigForDisplay(): { providers: { name: string; baseUrl: string; model: string }[] } {
+  const raw = loadLlmConfigFileRaw();
+  if (!raw?.providers) return { providers: [] };
+  return {
+    providers: raw.providers.map((p) => ({
+      name: p.name || '',
+      baseUrl: normalizeBaseUrl(p.baseUrl) || p.baseUrl || '',
+      model: p.model || '',
+    })),
+  };
 }
 
 function writeLlmConfigFile(file: LlmConfigFile): void {
@@ -164,9 +188,39 @@ export function saveLlmConfig(cfg: Partial<LlmProvider> | { providers?: Partial<
     existingByBoth.set(`${b}|${(p.model || '').trim()}`, p);
   }
 
-  const finalProviders: LlmProvider[] = [];
+  // 展开「同一 baseUrl+key 对应多个 model」：每个 model 生成一条独立 provider，
+  // 这样运行期 failover 会自动跨平台、跨模型尝试；存储格式与运行期保持不变。
+  const expanded: LlmProvider[] = [];
   for (let i = 0; i < providers.length; i++) {
     const p = providers[i];
+    const baseUrl = normalizeBaseUrl(p.baseUrl || '');
+    const apiKey = (p.apiKey || '').trim();
+    const rawModels = (p as any).models ?? p.model;
+    const modelList = (Array.isArray(rawModels)
+      ? rawModels
+      : String(rawModels || '').split(/[,，]/)
+    )
+      .map((m: any) => String(m).trim())
+      .filter(Boolean);
+    if (!baseUrl || modelList.length === 0) {
+      return {
+        success: false,
+        message: `第 ${i + 1} 个平台必须填写 baseUrl 与至少一个 model（多个 model 用逗号隔开）`,
+      };
+    }
+    modelList.forEach((m: string, idx: number) => {
+      expanded.push({
+        name: modelList.length > 1 ? `${p.name || '平台'} · ${m}` : (p.name || `平台 ${i + 1}`).trim(),
+        baseUrl,
+        apiKey,
+        model: m,
+      });
+    });
+  }
+
+  const finalProviders: LlmProvider[] = [];
+  for (let i = 0; i < expanded.length; i++) {
+    const p = expanded[i];
     const baseUrl = normalizeBaseUrl(p.baseUrl || '');
     const model = (p.model || '').trim();
     let apiKey = (p.apiKey || '').trim();
@@ -175,9 +229,6 @@ export function saveLlmConfig(cfg: Partial<LlmProvider> | { providers?: Partial<
       const oldBoth = existingByBoth.get(`${baseUrl}|${model}`);
       const oldBase = existingByBase.get(baseUrl);
       apiKey = oldBoth?.apiKey || oldBase?.apiKey || '';
-    }
-    if (!baseUrl || !model) {
-      return { success: false, message: `第 ${i + 1} 个平台必须填写 baseUrl 和 model` };
     }
     if (baseUrl.includes('...')) {
       return {
@@ -202,7 +253,7 @@ export function saveLlmConfig(cfg: Partial<LlmProvider> | { providers?: Partial<
       apiKey = old.apiKey;
     }
     finalProviders.push({
-      name: (p.name || `平台 ${i + 1}`).trim(),
+      name: p.name || `平台 ${i + 1}`,
       baseUrl,
       apiKey,
       model,

@@ -24,6 +24,7 @@ import {
 } from './db.js';
 import { getAllStores } from './stores.js';
 import { publishCandidate } from './publishFromCandidate.js';
+import { get1688ProductDetail } from './ali1688Skill.js';
 import { configure1688AK, check1688Config } from './ali1688Skill.js';
 import {
   isYouTubeConfigured,
@@ -697,6 +698,9 @@ import {
   fetchAllProductsAndExport,
   getCategories,
   getCategoryAttributes,
+  getCategory,
+  searchCategories,
+  predictCategory,
   getExportedFiles,
   setAccessToken,
   getAccessToken,
@@ -754,6 +758,7 @@ import {
   aiGenerateDescriptionsBatch,
   getLlmConfig,
   getLlmProviders,
+  getLlmConfigForDisplay,
   saveLlmConfig,
   findSavedApiKey,
   translateTrendsKeywords,
@@ -1692,6 +1697,46 @@ app.get('/api/ml/category/:id/attributes', async (req, res) => {
   }
 });
 
+// 类目全路径（path_from_root）
+app.get('/api/ml/category/:id/path', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const cat = await getCategory(id);
+    if (!cat) return res.status(404).json({ success: false, message: '类目不存在或无法访问' });
+    res.json({ success: true, category: cat });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error?.message || '获取类目路径失败' });
+  }
+});
+
+// 类目关键词搜索
+app.get('/api/ml/categories/:siteId/search', async (req, res) => {
+  try {
+    const { siteId } = req.params;
+    const q = (req.query.q as string) || '';
+    if (!ML_SITES[siteId as MLSiteCode]) return res.status(400).json({ success: false, message: '无效站点' });
+    if (!q.trim()) return res.json({ success: true, categories: [] });
+    const categories = await searchCategories(siteId, q);
+    res.json({ success: true, categories });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error?.message || '类目搜索失败' });
+  }
+});
+
+// 类目推荐（按标题预测）
+app.get('/api/ml/categories/:siteId/predict', async (req, res) => {
+  try {
+    const { siteId } = req.params;
+    const title = (req.query.title as string) || '';
+    if (!ML_SITES[siteId as MLSiteCode]) return res.status(400).json({ success: false, message: '无效站点' });
+    if (!title.trim()) return res.json({ success: true, categories: [] });
+    const categories = await predictCategory(siteId, title);
+    res.json({ success: true, categories });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error?.message || '类目推荐失败' });
+  }
+});
+
 // 获取已导出的文件列表
 app.get('/api/ml/files', (req, res) => {
   try {
@@ -2307,6 +2352,8 @@ app.post('/api/ml/candidates/:id/publish', async (req, res) => {
     if (typeof ov.warrantyType === 'string') draftOverrides.warrantyType = ov.warrantyType;
     if (typeof ov.warrantyTime === 'string') draftOverrides.warrantyTime = ov.warrantyTime;
     if (typeof ov.listingType === 'string') draftOverrides.listing_type_id = ov.listingType;
+    // 前端可覆盖类目（编辑类目后重新上架时使用）
+    if (typeof ov.categoryId === 'string' && ov.categoryId.trim()) draftOverrides.category_id = ov.categoryId.trim();
     // 前端传 kg/cm，后端 ListingDraft 用 g/cm
     if (typeof ov.weightKg === 'number') draftOverrides.weight = Math.round(ov.weightKg * 1000);
     if (typeof ov.lengthCm === 'number') draftOverrides.length = ov.lengthCm;
@@ -2348,6 +2395,227 @@ app.post('/api/ml/candidates/:id/publish', async (req, res) => {
     res.json({ success: true, result });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err?.message || '上架失败' });
+  }
+});
+
+// 批量上架：一次提交多个候选，逐个上架到指定/全部店铺
+app.post('/api/ml/candidates/batch-publish', async (req, res) => {
+  try {
+    const ids: number[] = Array.isArray(req.body?.ids) ? req.body.ids.map((x: any) => Number(x)).filter((n: number) => Number.isFinite(n)) : [];
+    if (ids.length === 0) return res.status(400).json({ success: false, message: '请选择至少一个候选商品' });
+    const storeIds: string[] = req.body?.storeIds;
+    const useCbtCategory = req.body?.useCbtCategory ?? true;
+    const youtube = req.body?.youtube;
+    const draftTemplate = req.body?.draft || {};
+
+    const perResult: Record<number, any> = {};
+    let totalSucceeded = 0;
+    let totalFailed = 0;
+    for (const id of ids) {
+      const row = getCandidateById(id);
+      if (!row) {
+        perResult[id] = { success: false, message: '候选不存在' };
+        totalFailed++;
+        continue;
+      }
+      try {
+        const candidate = {
+          site: row.site,
+          itemId: row.ml_item_id,
+          title: row.ml_title,
+          priceUsd: row.ml_price_usd,
+          currency: row.ml_currency,
+          soldQuantity: row.ml_sold_quantity,
+          categoryId: row.ml_category_id,
+          categoryName: row.ml_category_name,
+          permalink: row.ml_permalink,
+          thumbnail: row.ml_thumbnail,
+          sellerId: row.ml_seller_id ? Number(row.ml_seller_id) : undefined,
+          sellerCountry: '',
+          listingDate: row.ml_listing_date,
+          condition: 'new',
+          daysListed: 1,
+          dailySales: 0,
+          rawItem: {},
+          weightKg: row.weight_kg,
+          lengthCm: row.length_cm,
+          widthCm: row.width_cm,
+          heightCm: row.height_cm,
+        };
+        const ov: any = {};
+        if (typeof draftTemplate.title === 'string') ov.title = draftTemplate.title;
+        if (typeof draftTemplate.description === 'string') ov.description = draftTemplate.description;
+        if (Array.isArray(draftTemplate.pictureUrls)) ov.pictureUrls = draftTemplate.pictureUrls.filter((u: any) => typeof u === 'string' && u.startsWith('http'));
+        if (typeof draftTemplate.availableQuantity === 'number') ov.availableQuantity = draftTemplate.availableQuantity;
+        if (typeof draftTemplate.brand === 'string') ov.brand = draftTemplate.brand;
+        if (typeof draftTemplate.model === 'string') ov.model = draftTemplate.model;
+        if (typeof draftTemplate.listingType === 'string') ov.listing_type_id = draftTemplate.listingType;
+        // 前端可覆盖类目（批量编辑类目后重新上架时使用）
+        if (typeof draftTemplate.categoryId === 'string' && draftTemplate.categoryId.trim()) ov.category_id = draftTemplate.categoryId.trim();
+        if (typeof draftTemplate.weightKg === 'number') ov.weightKg = draftTemplate.weightKg;
+        if (typeof draftTemplate.lengthCm === 'number') ov.lengthCm = draftTemplate.lengthCm;
+        if (typeof draftTemplate.widthCm === 'number') ov.widthCm = draftTemplate.widthCm;
+        if (typeof draftTemplate.heightCm === 'number') ov.heightCm = draftTemplate.heightCm;
+        const listingPriceUsd = typeof draftTemplate.listingPriceUsd === 'number' ? draftTemplate.listingPriceUsd : row.listing_price_usd;
+        const r = await publishCandidate({
+          candidate: candidate as any,
+          candidateDbId: id,
+          listingPriceUsd,
+          sourceImageUrl: row.ali1688_image_url,
+          brand: ov.brand || 'Generic',
+          storeIds,
+          useCbtCategory,
+          youtube,
+          draftOverrides: ov,
+        });
+        perResult[id] = { success: r.succeeded > 0, result: r };
+        totalSucceeded += r.succeeded;
+        totalFailed += r.failed + r.blocked;
+      } catch (err: any) {
+        perResult[id] = { success: false, message: err?.message || '上架失败' };
+        totalFailed++;
+      }
+    }
+    res.json({ success: true, totalSucceeded, totalFailed, perResult });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || '批量上架失败' });
+  }
+});
+
+// 从 1688 详情补充重量/尺寸/SKU 信息（多来源对比确认）
+app.post('/api/ml/candidates/:id/1688-detail', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const row = getCandidateById(id);
+    if (!row) return res.status(404).json({ success: false, message: '候选不存在' });
+    const productId = row.ali1688_product_id || (req.body?.productId as string);
+    if (!productId) return res.status(400).json({ success: false, message: '该候选无 1688 商品 ID，无法补充' });
+    const detail = await get1688ProductDetail(productId);
+    if (!detail.success) {
+      return res.status(200).json({ success: false, message: detail.message || '1688 详情获取失败', raw: detail.raw });
+    }
+    // 合并所有 item 的 all_info 文本做解析（与妙手一致：多来源对比确认）
+    const allInfos = Object.values(detail.details || {}).map((d: any) => d?.all_info || '').join('\n');
+    const parsed = parse1688Physical(allInfos);
+    res.json({
+      success: true,
+      weightKg: parsed.weightKg,
+      lengthCm: parsed.lengthCm,
+      widthCm: parsed.widthCm,
+      heightCm: parsed.heightCm,
+      skuTitle: row.ali1688_title || '',
+      skuList: parsed.skuList,
+      rawText: allInfos.slice(0, 2000),
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || '1688 补充失败' });
+  }
+});
+
+// 解析 1688 all_info 文本中的重量/尺寸/SKU（容错：匹配不到返回空）
+function parse1688Physical(text: string): {
+  weightKg?: number;
+  lengthCm?: number;
+  widthCm?: number;
+  heightCm?: number;
+  skuList: string[];
+} {
+  if (!text) return { skuList: [] };
+  // 重量：支持「毛重 500g」「净重 0.5kg」「重量 1.2千克」等
+  let weightKg: number | undefined;
+  const wg = text.match(/(?:毛重|净重|重量|货重)[^\d]{0,6}(\d+(?:\.\d+)?)\s*(g|克|kg|千克|公斤)/i);
+  if (wg) {
+    const v = parseFloat(wg[1]);
+    const unit = wg[2].toLowerCase();
+    weightKg = unit === 'kg' || unit === '千克' || unit === '公斤' ? v : v / 1000;
+  }
+  // 尺寸：支持「长 10cm 宽 8cm 高 5cm」「尺寸 10*8*5cm」「规格 10x8x5」
+  let lengthCm: number | undefined, widthCm: number | undefined, heightCm: number | undefined;
+  const dim = text.match(/(?:长|尺寸)[^\d]{0,4}(\d+(?:\.\d+)?)\s*(?:cm|厘米)?[^\d]{0,6}(?:宽)[^\d]{0,4}(\d+(?:\.\d+)?)\s*(?:cm|厘米)?[^\d]{0,6}(?:高|厚)[^\d]{0,4}(\d+(?:\.\d+)?)/i);
+  if (dim) {
+    lengthCm = parseFloat(dim[1]); widthCm = parseFloat(dim[2]); heightCm = parseFloat(dim[3]);
+  } else {
+    const dim2 = text.match(/(\d+(?:\.\d+)?)\s*[×x*]\s*(\d+(?:\.\d+)?)\s*[×x*]\s*(\d+(?:\.\d+)?)\s*(?:cm|厘米|mm|毫米)?/i);
+    if (dim2) {
+      lengthCm = parseFloat(dim2[1]); widthCm = parseFloat(dim2[2]); heightCm = parseFloat(dim2[3]);
+    }
+  }
+  // SKU 列表：匹配「sku」「规格」附近的型号/标题片段（粗略抽取，最多 10 条）
+  const skuList: string[] = [];
+  const skuRe = /(sku|规格|型号)[^\n]{0,40}/gi;
+  let m: RegExpExecArray | null;
+  while ((m = skuRe.exec(text)) && skuList.length < 10) {
+    const s = m[0].trim();
+    if (s.length > 3) skuList.push(s);
+  }
+  return { weightKg, lengthCm, widthCm, heightCm, skuList };
+}
+
+// 已上架商品列表（「已上架」tab 数据）
+app.get('/api/ml/published-items', async (req, res) => {
+  try {
+    const site = req.query.site as string | undefined;
+    const storeId = req.query.storeId as string | undefined;
+    const { rows, total } = db.getPublishedItems({ site, storeId, limit: 200 });
+    res.json({ success: true, rows, total });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || '获取已上架商品失败' });
+  }
+});
+
+// 修改已上架商品（标题、描述、重量、长宽高、净利润、图片等美客多允许修改的字段）
+app.post('/api/ml/published-items/:id/edit', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const item = db.getPublishedItemById(id);
+    if (!item) return res.status(404).json({ success: false, message: '已上架记录不存在' });
+    const store = stores.getStoreRaw(item.store_id);
+    if (!store) return res.status(404).json({ success: false, message: '关联店铺不存在' });
+
+    const body = req.body || {};
+    // 组装 products.updateStoreItem 所需的 payload
+    const payload: any = {};
+    if (typeof body.title === 'string' && body.title.trim()) payload.title = body.title.trim();
+    if (typeof body.description === 'string') payload.description = body.description;
+    if (Array.isArray(body.pictureUrls) && body.pictureUrls.length) {
+      payload.pictures = body.pictureUrls.filter((u: any) => typeof u === 'string' && u.trim()).map((u: string) => ({ url: u.trim() }));
+    }
+    if (typeof body.brand === 'string' && body.brand.trim()) payload.brand = body.brand.trim();
+    if (typeof body.model === 'string') payload.model = body.model;
+    if (typeof body.weightKg === 'number') payload.weight = String(body.weightKg * 1000);
+    if (typeof body.lengthCm === 'number') payload.length = String(body.lengthCm);
+    if (typeof body.widthCm === 'number') payload.width = String(body.widthCm);
+    if (typeof body.heightCm === 'number') payload.height = String(body.heightCm);
+    if (typeof body.availableQuantity === 'number') payload.available_quantity = String(body.availableQuantity);
+    if (body.priceBySite && typeof body.priceBySite === 'object') {
+      payload.sites_to_sell = Object.entries(body.priceBySite).map(([siteId, v]: any) => ({
+        site_id: siteId,
+        price: Number(v.price),
+        listing_type_id: v.listingType,
+        net_proceeds: !!v.netProceeds,
+      }));
+    }
+
+    const result = await products.updateStoreItem(store, item.ml_item_id, payload);
+
+    // 同步回本地库
+    const patch: any = {};
+    if (payload.title) patch.title = payload.title;
+    if (payload.description !== undefined) patch.description = payload.description;
+    if (payload.pictures) patch.picture_urls = (payload.pictures as any[]).map((p) => p.url).join('|');
+    if (payload.brand) patch.brand = payload.brand;
+    if (payload.model) patch.model = payload.model;
+    if (payload.weight) patch.weight = Number(payload.weight);
+    if (payload.length) patch.length = Number(payload.length);
+    if (payload.width) patch.width = Number(payload.width);
+    if (payload.height) patch.height = Number(payload.height);
+    if (payload.available_quantity) patch.available_quantity = Number(payload.available_quantity);
+    if (payload.sites_to_sell) patch.price_by_site = JSON.stringify(payload.sites_to_sell);
+    db.updatePublishedItem(id, patch);
+
+    res.json({ success: true, result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || '修改已上架商品失败' });
   }
 });
 
@@ -2643,15 +2911,17 @@ app.get('/api/ml/trends/:site', async (req, res) => {
 
 // 查询 LLM 配置状态（apiKey 不返回；baseUrl 必须返回完整值，否则前端回填会损坏配置）
 app.get('/api/ml/llm-config', (req, res) => {
-  const providers = getLlmProviders();
+  const usable = getLlmProviders(); // 仅供运行调用的可用平台（要求 apiKey 齐备）
+  const saved = getLlmConfigForDisplay(); // 已保存平台（含空 KEY，用于前端回填）
+  const providers = saved.providers.length ? saved.providers : usable.map((p) => ({ name: p.name, baseUrl: p.baseUrl, model: p.model }));
   res.json({
     success: true,
-    configured: providers.length > 0,
+    configured: usable.length > 0,
     // 兼容旧前端字段（单平台）
     baseUrl: providers[0]?.baseUrl || '',
     model: providers[0]?.model || '',
     // 新字段：多平台列表（按 failover 顺序）
-    providers: providers.map((p) => ({ name: p.name, baseUrl: p.baseUrl, model: p.model })),
+    providers,
   });
 });
 
@@ -2660,7 +2930,9 @@ app.get('/api/ml/ai-config/status', (req, res) => {
   const envBase = !!process.env.LLM_BASE_URL?.trim();
   const envKey = !!process.env.LLM_API_KEY?.trim();
   const envModel = !!process.env.LLM_MODEL?.trim();
-  const providers = getLlmProviders();
+  const usable = getLlmProviders();
+  const saved = getLlmConfigForDisplay();
+  const providers = saved.providers.length ? saved.providers : usable.map((p) => ({ name: p.name, baseUrl: p.baseUrl, model: p.model }));
   res.json({
     success: true,
     envConfigured: { baseUrl: envBase, apiKey: envKey, model: envModel },
@@ -2710,6 +2982,22 @@ app.post('/api/ml/llm-config/test', async (req, res) => {
     if (!Array.isArray(providers) && body.baseUrl && body.apiKey && body.model) {
       providers = [{ name: body.name || '测试平台', baseUrl: body.baseUrl, apiKey: body.apiKey, model: body.model }];
     }
+
+    // 展开「同一 baseUrl+key 对应多个 model」：每个 model 独立测试
+    providers = (() => {
+      const out: any[] = [];
+      for (const p of providers || []) {
+        const baseUrl = (p.baseUrl || '').replace(/\/+$/, '').trim();
+        const rawModels = p.models ?? p.model;
+        const modelList = (Array.isArray(rawModels)
+          ? rawModels
+          : String(rawModels || '').split(/[,，]/)
+        ).map((m: any) => String(m).trim()).filter(Boolean);
+        if (!baseUrl || modelList.length === 0) continue;
+        modelList.forEach((m: string) => out.push({ ...p, baseUrl, model: m }));
+      }
+      return out;
+    })();
 
     // 如果请求没带 providers，使用已保存配置
     if (!Array.isArray(providers) || providers.length === 0) {

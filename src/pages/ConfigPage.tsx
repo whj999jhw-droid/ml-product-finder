@@ -18,7 +18,8 @@ interface LlmProviderForm {
   name: string;
   baseUrl: string;
   apiKey: string;
-  model: string;
+  /** 多个模型用逗号隔开，如 gpt-4o, gpt-4o-mini, deepseek-chat */
+  models: string;
 }
 
 interface FeatureInfo {
@@ -58,15 +59,31 @@ function AiConfigPanel() {
     try {
       const res = await fetch('/api/ml/llm-config');
       const data = await res.json();
-      const list: LlmProviderForm[] = (data.providers || []).map((p: any) => ({
-        name: p.name || '',
-        baseUrl: p.baseUrl || '',
-        apiKey: '', // 出于安全不回显 Key；留空=复用已保存
-        model: p.model || '',
-      }));
-      setProviders(list.length ? list : [{ name: '平台 1', baseUrl: '', apiKey: '', model: '' }]);
+      const raw: any[] = data.providers || [];
+      // 合并「同一 baseUrl 的多个 model」为一条表单记录（models 用逗号拼接）
+      const byBase = new Map<string, LlmProviderForm>();
+      for (const p of raw) {
+        const base = (p.baseUrl || '').trim();
+        if (!base) continue;
+        const key = base;
+        const existing = byBase.get(key);
+        if (existing) {
+          if (p.model && !existing.models.split(/[,，]/).map((m: string) => m.trim()).includes(p.model)) {
+            existing.models = `${existing.models}, ${p.model}`;
+          }
+        } else {
+          byBase.set(key, {
+            name: p.name || '平台 1',
+            baseUrl: p.baseUrl || '',
+            apiKey: '', // 出于安全不回显 Key；留空=复用已保存
+            models: p.model || '',
+          });
+        }
+      }
+      const list = Array.from(byBase.values());
+      setProviders(list.length ? list : [{ name: '平台 1', baseUrl: '', apiKey: '', models: '' }]);
     } catch {
-      setProviders([{ name: '平台 1', baseUrl: '', apiKey: '', model: '' }]);
+      setProviders([{ name: '平台 1', baseUrl: '', apiKey: '', models: '' }]);
     }
   };
 
@@ -147,47 +164,53 @@ function AiConfigPanel() {
       <Card title="LLM 平台（多平台自动 failover）" headerBordered>
         <div className="space-y-3">
           {providers.map((p, i) => (
-            <div key={i} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center border border-gray-100 rounded p-2">
-              <Input
-                className="md:col-span-2"
-                size="small"
-                value={p.name}
-                onChange={(v) => updateProvider(i, { name: v as string })}
-                placeholder="平台名"
-              />
-              <Input
-                className="md:col-span-5"
-                size="small"
-                value={p.baseUrl}
-                onChange={(v) => updateProvider(i, { baseUrl: v as string })}
-                placeholder="https://.../v1"
-              />
-              <Input
-                className="md:col-span-3"
-                size="small"
-                type="password"
-                value={p.apiKey}
-                onChange={(v) => updateProvider(i, { apiKey: v as string })}
-                placeholder={status ? '留空=复用已保存' : 'API Key'}
-              />
-              <Input
-                className="md:col-span-1"
-                size="small"
-                value={p.model}
-                onChange={(v) => updateProvider(i, { model: v as string })}
-                placeholder="model"
-              />
-              <Button
-                className="md:col-span-1"
-                size="small"
-                variant="text"
-                theme="danger"
-                icon={<DeleteIcon />}
-                onClick={() => setProviders((prev) => prev.filter((_, idx) => idx !== i))}
-              />
+            <div key={i} className="border border-gray-100 rounded p-2 space-y-2">
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center">
+                <Input
+                  className="md:col-span-2"
+                  size="small"
+                  value={p.name}
+                  onChange={(v) => updateProvider(i, { name: v as string })}
+                  placeholder="平台名"
+                />
+                <Input
+                  className="md:col-span-4"
+                  size="small"
+                  value={p.baseUrl}
+                  onChange={(v) => updateProvider(i, { baseUrl: v as string })}
+                  placeholder="https://.../v1"
+                />
+                <Input
+                  className="md:col-span-3"
+                  size="small"
+                  type="password"
+                  value={p.apiKey}
+                  onChange={(v) => updateProvider(i, { apiKey: v as string })}
+                  placeholder={status ? '留空=复用已保存' : 'API Key'}
+                />
+                <Input
+                  className="md:col-span-2"
+                  size="small"
+                  value={p.models}
+                  onChange={(v) => updateProvider(i, { models: v as string })}
+                  placeholder="模型1, 模型2"
+                />
+                <Button
+                  className="md:col-span-1"
+                  size="small"
+                  variant="text"
+                  theme="danger"
+                  icon={<DeleteIcon />}
+                  onClick={() => setProviders((prev) => prev.filter((_, idx) => idx !== i))}
+                />
+              </div>
+              <div className="text-xs text-gray-400">
+                第一行：平台名 · 链接(baseUrl) · API Key（修改其他项时留空即复用已保存的 Key，不会丢失）；
+                第二行模型栏：多个模型用<strong>逗号</strong>隔开（如 gpt-4o, gpt-4o-mini, deepseek-chat），会按序自动 failover。
+              </div>
             </div>
           ))}
-          <Button size="small" variant="dashed" icon={<AddIcon />} onClick={() => setProviders((prev) => [...prev, { name: `平台 ${prev.length + 1}`, baseUrl: '', apiKey: '', model: '' }])}>
+          <Button size="small" variant="dashed" icon={<AddIcon />} onClick={() => setProviders((prev) => [...prev, { name: `平台 ${prev.length + 1}`, baseUrl: '', apiKey: '', models: '' }])}>
             添加平台
           </Button>
           <div className="flex items-center gap-2 pt-1">

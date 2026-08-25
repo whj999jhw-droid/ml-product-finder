@@ -89,6 +89,10 @@ interface PublishDraft {
   skuImageUrl: string;
   /** 类目属性值：{ [attributeId]: { value_id|value_name|values } } */
   attributeValues: Record<string, any>;
+  /** 类目 ID（可编辑，覆盖原候选类目） */
+  categoryId?: string;
+  /** 类目名称（展示用） */
+  categoryName?: string;
 }
 
 interface CategoryAttribute {
@@ -187,6 +191,39 @@ export function CandidatesPage() {
   const [publishResult, setPublishResult] = useState<any>(null);
   const [resultOpen, setResultOpen] = useState(false);
 
+  // 顶部 Tab：候选列表 / 已上架
+  const [activeTab, setActiveTab] = useState<'candidates' | 'published'>('candidates');
+  const [siteFilter, setSiteFilter] = useState('');
+
+  // 批量上架
+  const [selectedRowIds, setSelectedRowIds] = useState<(string | number)[]>([]);
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchStoreIds, setBatchStoreIds] = useState<string[]>([]);
+  const [batchListingType, setBatchListingType] = useState('gold_special');
+  const [batching, setBatching] = useState(false);
+  const [batchResult, setBatchResult] = useState<any>(null);
+  const [batchResultOpen, setBatchResultOpen] = useState(false);
+
+  // 已上架 tab
+  const [publishedRows, setPublishedRows] = useState<any[]>([]);
+  const [publishedLoading, setPublishedLoading] = useState(false);
+  const [publishedSiteFilter, setPublishedSiteFilter] = useState('');
+  const [publishedStoreFilter, setPublishedStoreFilter] = useState('');
+
+  // 已上架商品编辑
+  const [editOpen, setEditOpen] = useState(false);
+  const [editItem, setEditItem] = useState<any>(null);
+  const [editDraft, setEditDraft] = useState<any>(null);
+  const [editing, setEditing] = useState(false);
+
+  // 上架弹窗内：类目可编辑（全路径 / 搜索 / 推荐）
+  const [catSearch, setCatSearch] = useState('');
+  const [catResults, setCatResults] = useState<{ id: string; name: string }[]>([]);
+  const [catPredict, setCatPredict] = useState<{ id: string; name: string }[]>([]);
+  const [catLoading, setCatLoading] = useState(false);
+  const [catPath, setCatPath] = useState('');
+  const [catError, setCatError] = useState('');
+
   const fetchAkStatus = async () => {
     try {
       const res = await fetch('/api/ml/ali1688/config');
@@ -241,7 +278,6 @@ export function CandidatesPage() {
   };
 
   useEffect(() => {
-    fetchRows();
     fetchStores();
     fetchAkStatus();
     fetchYouTubeStatus();
@@ -254,6 +290,16 @@ export function CandidatesPage() {
     // 轮询不应依赖 status；status 只是表格筛选条件
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 筛选联动：状态/站点/顶部 Tab 变化时自动刷新对应列表
+  useEffect(() => {
+    if (activeTab === 'candidates') {
+      fetchRows();
+    } else {
+      fetchPublishedItems();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, siteFilter, activeTab, publishedSiteFilter, publishedStoreFilter]);
 
   useEffect(() => {
     if (!latestRun || latestRun.status !== 'running') {
@@ -277,7 +323,11 @@ export function CandidatesPage() {
   const fetchRows = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/ml/candidates?status=${status}&limit=100`);
+      const params = new URLSearchParams();
+      if (status) params.set('status', status);
+      if (siteFilter) params.set('site', siteFilter);
+      params.set('limit', '100');
+      const res = await fetch(`/api/ml/candidates?${params.toString()}`);
       const data = await res.json();
       if (data.success) {
         setRows(dedupCandidates(data.rows || []));
@@ -417,16 +467,25 @@ export function CandidatesPage() {
       skuTitle: '',
       skuImageUrl: '',
       attributeValues: {},
+      categoryId: row.ml_category_id || '',
+      categoryName: row.ml_category_name || '',
     });
     setProfitBySite({});
     setUploadYoutube(false);
     setYoutubeVideoPath('');
     setCategoryAttributes([]);
     setCategoryAttrLoading(false);
+    setCatSearch('');
+    setCatResults([]);
+    setCatPredict([]);
+    setCatError('');
+    setCatPath('');
+    setAiEditing(false);
     setPublishOpen(true);
-    // 拉取类目属性
+    // 拉取类目属性 + 全路径
     if (row.ml_category_id) {
       fetchCategoryAttributes(row.ml_category_id);
+      fetchCategoryPath(row.ml_category_id);
     }
   };
 
@@ -504,7 +563,7 @@ export function CandidatesPage() {
           site: publishRow.site,
           sourceTitle: publishRow.ali1688_title,
           sourcePriceCNY: publishRow.ali1688_price_cny,
-          categoryName: publishRow.ml_category_name,
+          categoryName: publishDraft.categoryName || publishRow.ml_category_name,
           brand: publishDraft.brand,
         }),
       });
@@ -514,6 +573,276 @@ export function CandidatesPage() {
       }
     } catch (e: any) {
       MessagePlugin.error(e?.message || '描述生成失败');
+    }
+  };
+
+  // ============ 类目可编辑：全路径 / 关键词搜索 / 类目推荐 ============
+  const fetchCategoryPath = async (categoryId: string) => {
+    if (!categoryId) {
+      setCatPath('');
+      return;
+    }
+    try {
+      const res = await fetch(`/api/ml/category/${categoryId}/path`);
+      const data = await res.json();
+      if (data.success && data.category?.path_from_root?.length) {
+        setCatPath(data.category.path_from_root.map((p: any) => p.name).join(' > '));
+      } else {
+        setCatPath('');
+      }
+    } catch {
+      setCatPath('');
+    }
+  };
+
+  const searchCategory = async (q: string) => {
+    if (!publishRow || !q.trim()) {
+      setCatResults([]);
+      return;
+    }
+    setCatLoading(true);
+    try {
+      const res = await fetch(`/api/ml/categories/${publishRow.site}/search?q=${encodeURIComponent(q.trim())}`);
+      const data = await res.json();
+      if (data.success) setCatResults(data.categories || []);
+    } catch {
+      setCatResults([]);
+    } finally {
+      setCatLoading(false);
+    }
+  };
+
+  const predictCategoryForTitle = async () => {
+    if (!publishRow || !publishDraft?.title) {
+      MessagePlugin.warning('请先填写标题再获取推荐类目');
+      return;
+    }
+    setCatLoading(true);
+    setCatError('');
+    try {
+      const res = await fetch(`/api/ml/categories/${publishRow.site}/predict?title=${encodeURIComponent(publishDraft.title)}`);
+      const data = await res.json();
+      if (data.success && (data.categories || []).length) {
+        setCatPredict(data.categories.slice(0, 8));
+      } else {
+        setCatError('未找到推荐类目，可尝试修改标题或手动搜索');
+        setCatPredict([]);
+      }
+    } catch (e: any) {
+      setCatError(e?.message || '类目推荐失败');
+    } finally {
+      setCatLoading(false);
+    }
+  };
+
+  const onSelectCategory = (cat: { id: string; name: string }) => {
+    setPublishDraft((prev) => (prev ? { ...prev, categoryId: cat.id, categoryName: cat.name } : prev));
+    setCatSearch('');
+    setCatResults([]);
+    setCatPredict([]);
+    setCatError('');
+    fetchCategoryPath(cat.id);
+    fetchCategoryAttributes(cat.id);
+  };
+
+  // ============ 从 1688 详情补充重量/尺寸/SKU ============
+  const handleFetch1688Detail = async () => {
+    if (!publishRow) return;
+    try {
+      const res = await fetch(`/api/ml/candidates/${publishRow.id}/1688-detail`, { method: 'POST' });
+      const data = await res.json();
+      if (!data.success) {
+        MessagePlugin.warning(data.message || '未获取到 1688 详情');
+        return;
+      }
+      setPublishDraft((prev) => {
+        if (!prev) return prev;
+        const next = { ...prev };
+        if (typeof data.weightKg === 'number') next.weightKg = data.weightKg;
+        if (typeof data.lengthCm === 'number') next.lengthCm = data.lengthCm;
+        if (typeof data.widthCm === 'number') next.widthCm = data.widthCm;
+        if (typeof data.heightCm === 'number') next.heightCm = data.heightCm;
+        if (data.skuTitle) next.skuTitle = data.skuTitle;
+        else if (data.skuList?.length && !next.skuTitle) next.skuTitle = data.skuList[0];
+        return next;
+      });
+      MessagePlugin.success('已从 1688 详情补充重量/尺寸/SKU');
+    } catch (e: any) {
+      MessagePlugin.error(e?.message || '补充失败');
+    }
+  };
+
+  // ============ 图片 AI 编辑（去背景+白底+水印）后回传美客多公网 URL ============
+  const [aiEditing, setAiEditing] = useState(false);
+  const handleAiEditImages = async () => {
+    if (!publishRow || !publishDraft || publishDraft.pictureUrls.length === 0) {
+      MessagePlugin.warning('请先有可用图片');
+      return;
+    }
+    setAiEditing(true);
+    try {
+      const res = await fetch('/api/ml/listing/prepare-images', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          site: publishRow.site,
+          sourceImages: publishDraft.pictureUrls,
+          mode: 'ai',
+          watermarkText: publishRow.site,
+        }),
+      });
+      const data = await res.json();
+      if (data.success && Array.isArray(data.pictures) && data.pictures.length) {
+        setPublishDraft((prev) => (prev ? { ...prev, pictureUrls: data.pictures } : prev));
+        MessagePlugin.success(`AI 编辑完成，已生成 ${data.pictures.length} 张美客多图`);
+      } else {
+        MessagePlugin.warning(data.message || 'AI 编辑失败，可改用「直传」模式');
+      }
+    } catch (e: any) {
+      MessagePlugin.error(e?.message || 'AI 编辑失败');
+    } finally {
+      setAiEditing(false);
+    }
+  };
+
+  // ============ 批量上架 ============
+  const openBatchPublish = () => {
+    if (selectedRowIds.length === 0) {
+      MessagePlugin.warning('请先勾选要上架的商品');
+      return;
+    }
+    const initial = stores.filter((s) => s.enabled && s.authorized).map((s) => s.id);
+    setBatchStoreIds(initial);
+    setBatchListingType('gold_special');
+    setBatchResult(null);
+    setBatchOpen(true);
+  };
+
+  const handleBatchPublish = async () => {
+    if (batchStoreIds.length === 0) {
+      MessagePlugin.warning('请至少选择一个目标店铺');
+      return;
+    }
+    setBatching(true);
+    try {
+      const res = await fetch('/api/ml/candidates/batch-publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ids: selectedRowIds.map((x) => Number(x)),
+          storeIds: batchStoreIds,
+          useCbtCategory,
+          draft: { listingType: batchListingType },
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setBatchResult(data);
+        setBatchResultOpen(true);
+        setSelectedRowIds([]);
+        if (data.totalSucceeded > 0) fetchRows();
+      } else {
+        MessagePlugin.error(data.message || '批量上架失败');
+      }
+    } catch (e: any) {
+      MessagePlugin.error(e?.message || '网络错误');
+    } finally {
+      setBatching(false);
+    }
+  };
+
+  // ============ 已上架商品列表 / 编辑 ============
+  const fetchPublishedItems = async () => {
+    setPublishedLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (publishedSiteFilter) params.set('site', publishedSiteFilter);
+      if (publishedStoreFilter) params.set('storeId', publishedStoreFilter);
+      const res = await fetch(`/api/ml/published-items?${params.toString()}`);
+      const data = await res.json();
+      if (data.success) {
+        setPublishedRows(data.rows || []);
+      } else {
+        MessagePlugin.error(data.message || '获取已上架商品失败');
+      }
+    } catch (e: any) {
+      MessagePlugin.error(e?.message || '网络错误');
+    } finally {
+      setPublishedLoading(false);
+    }
+  };
+
+  const openEditPublished = (item: any) => {
+    setEditItem(item);
+    let priceBySite: Record<string, any> = {};
+    try {
+      const arr = JSON.parse(item.price_by_site || '[]');
+      if (Array.isArray(arr)) {
+        arr.forEach((s: any) => {
+          priceBySite[s.site_id] = {
+            price: s.price,
+            listingType: s.listing_type_id,
+            netProceeds: !!s.net_proceeds,
+          };
+        });
+      }
+    } catch {
+      /* ignore */
+    }
+    setEditDraft({
+      title: item.title || '',
+      description: item.description || '',
+      pictureUrls: (item.picture_urls || '').split('|').filter(Boolean),
+      brand: item.brand || 'Generic',
+      model: item.model || '',
+      weightKg: item.weight ? Number(item.weight) / 1000 : 0,
+      lengthCm: item.length ? Number(item.length) : 0,
+      widthCm: item.width ? Number(item.width) : 0,
+      heightCm: item.height ? Number(item.height) : 0,
+      availableQuantity: item.available_quantity || 50,
+      priceBySite,
+      newImageUrl: '',
+    });
+    setEditOpen(true);
+  };
+
+  const handleEditPublishedSave = async () => {
+    if (!editItem || !editDraft) return;
+    setEditing(true);
+    try {
+      const pictureUrls = [...editDraft.pictureUrls];
+      if (editDraft.newImageUrl?.trim().startsWith('http') && !pictureUrls.includes(editDraft.newImageUrl.trim())) {
+        pictureUrls.push(editDraft.newImageUrl.trim());
+      }
+      const res = await fetch(`/api/ml/published-items/${editItem.id}/edit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: editDraft.title,
+          description: editDraft.description,
+          pictureUrls,
+          brand: editDraft.brand,
+          model: editDraft.model,
+          weightKg: editDraft.weightKg,
+          lengthCm: editDraft.lengthCm,
+          widthCm: editDraft.widthCm,
+          heightCm: editDraft.heightCm,
+          availableQuantity: editDraft.availableQuantity,
+          priceBySite: editDraft.priceBySite,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        MessagePlugin.success('已更新已上架商品');
+        setEditOpen(false);
+        fetchPublishedItems();
+      } else {
+        MessagePlugin.error(data.message || '修改失败');
+      }
+    } catch (e: any) {
+      MessagePlugin.error(e?.message || '网络错误');
+    } finally {
+      setEditing(false);
     }
   };
 
@@ -590,6 +919,7 @@ export function CandidatesPage() {
         warrantyTime: publishDraft.warrantyTime,
         listingType: publishDraft.listingType,
         attributeValues: publishDraft.attributeValues,
+        categoryId: publishDraft.categoryId,
       };
       const res = await fetch(`/api/ml/candidates/${publishRow.id}/publish`, {
         method: 'POST',
@@ -718,6 +1048,12 @@ export function CandidatesPage() {
     'data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22%23f3f4f6%22/><text x=%2250%22 y=%2255%22 font-size=%2212%22 fill=%22%239ca3af%22 text-anchor=%22middle%22>无图</text></svg>';
 
   const columns: PrimaryTableCol<Candidate>[] = [
+    {
+      colKey: 'row-select',
+      type: 'multiple',
+      width: 48,
+      title: '',
+    },
     {
       colKey: 'thumbnail',
       title: '图片',
@@ -967,64 +1303,244 @@ export function CandidatesPage() {
         {renderRunStatus()}
       </Card>
 
-      <Card title="AI 选品候选列表" headerBordered>
-        <div className="flex items-center justify-between mb-4">
-          <Space>
-            <Button theme="primary" loading={running} onClick={handleRun}>
-              立即扫描选品
-            </Button>
-            <Button variant="outline" onClick={fetchRows}>
-              刷新
-            </Button>
-            <Link
-              href="#/config"
-              theme="primary"
-              size="small"
-              suffixIcon={akStatus.configured ? undefined : undefined}
-            >
-              {akStatus.configured ? '1688 AK 已配置' : '配置 1688 AK'}
-            </Link>
-            <Link href="#/config" theme="primary" size="small">
-              {ytConfigured ? 'YouTube 已授权' : '配置 YouTube'}
-            </Link>
-          </Space>
-          <Select
-            value={status}
-            onChange={(v) => setStatus(v as string)}
-            options={[
-              { label: '全部', value: '' },
-              { label: '待审核', value: 'pending' },
-              { label: '已通过', value: 'approved' },
-              { label: '已拒绝', value: 'rejected' },
-              { label: '已上架', value: 'published' },
-            ]}
-            style={{ width: 140 }}
-          />
-        </div>
+      {/* 顶部 Tab：候选列表 / 已上架 */}
+      <div className="flex gap-1 mb-4 bg-gray-100 rounded-lg p-1 w-max max-w-full overflow-x-auto">
+        <button
+          onClick={() => setActiveTab('candidates')}
+          className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
+            activeTab === 'candidates' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-600'
+          }`}
+        >
+          AI 选品候选
+        </button>
+        <button
+          onClick={() => setActiveTab('published')}
+          className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
+            activeTab === 'published' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-600'
+          }`}
+        >
+          已上架商品
+        </button>
+      </div>
 
-        <Loading loading={loading} size="small">
-          <Table
-            data={rows}
-            columns={columns}
-            rowKey="id"
-            bordered
-            hover
-            stripe
-            pagination={{
-              defaultCurrent: 1,
-              defaultPageSize: 20,
-              total: rows.length,
-            }}
-          />
-        </Loading>
+      {activeTab === 'candidates' ? (
+        <Card title="AI 选品候选列表" headerBordered>
+          <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
+            <Space>
+              <Button theme="primary" loading={running} onClick={handleRun}>
+                立即扫描选品
+              </Button>
+              <Button variant="outline" onClick={fetchRows}>
+                刷新
+              </Button>
+              <Link href="#/config" theme="primary" size="small">
+                {akStatus.configured ? '1688 AK 已配置' : '配置 1688 AK'}
+              </Link>
+              <Link href="#/config" theme="primary" size="small">
+                {ytConfigured ? 'YouTube 已授权' : '配置 YouTube'}
+              </Link>
+            </Space>
+            <Space>
+              <Select
+                value={status}
+                onChange={(v) => setStatus(v as string)}
+                options={[
+                  { label: '全部状态', value: '' },
+                  { label: '待审核', value: 'pending' },
+                  { label: '已通过', value: 'approved' },
+                  { label: '已拒绝', value: 'rejected' },
+                  { label: '已上架', value: 'published' },
+                ]}
+                style={{ width: 130 }}
+              />
+              <Select
+                value={siteFilter}
+                onChange={(v) => setSiteFilter(v as string)}
+                options={[
+                  { label: '全部站点', value: '' },
+                  ...Object.keys(siteInfos).map((code) => ({
+                    label: `${siteInfos[code].name} (${code})`,
+                    value: code,
+                  })),
+                ]}
+                style={{ width: 150 }}
+                placeholder="站点筛选"
+              />
+            </Space>
+          </div>
 
-        <ImageViewer
-          images={viewerImages}
-          visible={viewerVisible}
-          defaultIndex={viewerIndex}
-          onClose={() => setViewerVisible(false)}
-        />
-      </Card>
+          <Loading loading={loading} size="small">
+            <Table
+              data={rows}
+              columns={columns}
+              rowKey="id"
+              bordered
+              hover
+              stripe
+              selectedRowKeys={selectedRowIds}
+              onSelectChange={(keys) => setSelectedRowIds(keys as (string | number)[])}
+              pagination={{
+                defaultCurrent: 1,
+                defaultPageSize: 20,
+                total: rows.length,
+              }}
+            />
+          </Loading>
+
+          {/* 批量操作吸底栏 */}
+          {selectedRowIds.length > 0 && (
+            <div className="sticky bottom-2 z-10 mt-3 flex items-center justify-between gap-3 bg-white border border-blue-200 shadow-lg rounded-lg px-4 py-2.5">
+              <span className="text-sm text-gray-700">已选 <b className="text-blue-600">{selectedRowIds.length}</b> 项</span>
+              <Space>
+                <Button variant="text" size="small" onClick={() => setSelectedRowIds([])}>
+                  取消选择
+                </Button>
+                <Button theme="success" onClick={openBatchPublish}>
+                  批量上架
+                </Button>
+              </Space>
+            </div>
+          )}
+
+          <ImageViewer
+            images={viewerImages}
+            visible={viewerVisible}
+            defaultIndex={viewerIndex}
+            onClose={() => setViewerVisible(false)}
+          />
+        </Card>
+      ) : (
+        <Card title="已上架商品（可修改标题/描述/重量/尺寸/净利润/图片）" headerBordered>
+          <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
+            <Space>
+              <Button variant="outline" onClick={fetchPublishedItems}>
+                刷新
+              </Button>
+            </Space>
+            <Space>
+              <Select
+                value={publishedSiteFilter}
+                onChange={(v) => setPublishedSiteFilter(v as string)}
+                options={[
+                  { label: '全部站点', value: '' },
+                  ...Object.keys(siteInfos).map((code) => ({
+                    label: `${siteInfos[code].name} (${code})`,
+                    value: code,
+                  })),
+                ]}
+                style={{ width: 150 }}
+                placeholder="站点筛选"
+              />
+              <Select
+                value={publishedStoreFilter}
+                onChange={(v) => setPublishedStoreFilter(v as string)}
+                options={[
+                  { label: '全部店铺', value: '' },
+                  ...stores.map((s) => ({ label: s.nickname, value: s.id })),
+                ]}
+                style={{ width: 160 }}
+                placeholder="店铺筛选"
+              />
+            </Space>
+          </div>
+
+          <Loading loading={publishedLoading} size="small">
+            {publishedRows.length === 0 ? (
+              <div className="text-sm text-gray-400 py-10 text-center">暂无已上架商品，去「AI 选品候选」标签上架吧</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border-collapse">
+                  <thead className="bg-gray-50">
+                    <tr className="text-left text-gray-600">
+                      <th className="px-3 py-2 font-medium">图片</th>
+                      <th className="px-3 py-2 font-medium">标题</th>
+                      <th className="px-3 py-2 font-medium">SKU 编号</th>
+                      <th className="px-3 py-2 font-medium">站点</th>
+                      <th className="px-3 py-2 font-medium">店铺</th>
+                      <th className="px-3 py-2 font-medium">价格</th>
+                      <th className="px-3 py-2 font-medium">重量/尺寸</th>
+                      <th className="px-3 py-2 font-medium">上架时间</th>
+                      <th className="px-3 py-2 font-medium">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {publishedRows.map((item) => {
+                      const imgs = (item.picture_urls || '').split('|').filter(Boolean);
+                      const pbs = (() => {
+                        try {
+                          const arr = JSON.parse(item.price_by_site || '[]');
+                          return Array.isArray(arr) ? arr : [];
+                        } catch {
+                          return [];
+                        }
+                      })();
+                      return (
+                        <tr key={item.id} className="border-t hover:bg-gray-50">
+                          <td className="px-3 py-2">
+                            {imgs[0] ? (
+                              <img
+                                src={imgs[0]}
+                                alt=""
+                                className="w-12 h-12 object-cover rounded border border-gray-100 cursor-pointer hover:opacity-80"
+                                onError={(e) => ((e.currentTarget as HTMLImageElement).src = FALLBACK_IMAGE)}
+                                onClick={() => {
+                                  setViewerImages(imgs);
+                                  setViewerIndex(0);
+                                  setViewerVisible(true);
+                                }}
+                              />
+                            ) : (
+                              <div className="w-12 h-12 rounded bg-gray-100 flex items-center justify-center text-xs text-gray-400">无图</div>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 max-w-[240px]">
+                            <div className="truncate" title={item.title}>{item.title || '-'}</div>
+                            {item.ml_permalink && (
+                              <a href={item.ml_permalink} target="_blank" rel="noreferrer" className="text-xs text-blue-600 hover:underline">查看</a>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-xs text-indigo-600 font-mono">{item.seller_sku || '-'}</td>
+                          <td className="px-3 py-2"><Tag size="small">{item.site}</Tag></td>
+                          <td className="px-3 py-2 text-xs">{stores.find((s) => s.id === item.store_id)?.nickname || item.store_id || '-'}</td>
+                          <td className="px-3 py-2 text-xs">
+                            {pbs.length ? (
+                              pbs.map((p: any) => (
+                                <div key={p.site_id}>{p.site_id}: ${Number(p.price || 0).toFixed(2)}</div>
+                              ))
+                            ) : (
+                              '-'
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-xs text-gray-600">
+                            {item.weight ? `${(item.weight / 1000).toFixed(2)}kg` : '-'}
+                            {item.length ? ` / ${item.length}×${item.width}×${item.height}cm` : ''}
+                          </td>
+                          <td className="px-3 py-2 text-xs text-gray-500">
+                            {item.published_at ? new Date(item.published_at).toLocaleString('zh-CN', { hour12: false }) : '-'}
+                          </td>
+                          <td className="px-3 py-2">
+                            <Button size="small" theme="primary" variant="outline" onClick={() => openEditPublished(item)}>
+                              修改
+                            </Button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Loading>
+
+          <ImageViewer
+            images={viewerImages}
+            visible={viewerVisible}
+            defaultIndex={viewerIndex}
+            onClose={() => setViewerVisible(false)}
+          />
+        </Card>
+      )}
+
 
       <Dialog
         visible={publishOpen}
@@ -1066,13 +1582,67 @@ export function CandidatesPage() {
                 <Tag size="small">{publishRow.site}</Tag>
               </div>
               <div>
-                <span className="text-gray-500">类目：</span>
-                <span>{publishRow.ml_category_name || '-'}</span>
-              </div>
-              <div>
                 <span className="text-gray-500">竞品售价：</span>
                 <span className="text-blue-600 font-medium">${publishRow.ml_price_usd?.toFixed(2)}</span>
               </div>
+            </div>
+
+            {/* 类目（可编辑：全路径 / 关键词搜索 / 推荐） */}
+            <div className="border border-gray-100 rounded p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">类目（CBT 上架类目，可修改）</span>
+                <Button size="small" variant="text" theme="primary" onClick={predictCategoryForTitle}>
+                  按标题推荐类目
+                </Button>
+              </div>
+              <div className="text-xs text-gray-500">
+                当前类目：{publishDraft.categoryName || '-'}
+                {catPath && <span className="ml-1 text-indigo-600">（{catPath}）</span>}
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  value={catSearch}
+                  onChange={(v) => {
+                    setCatSearch(String(v));
+                    searchCategory(String(v));
+                  }}
+                  placeholder="输入关键词搜索类目，如 phone / 手机"
+                  className="flex-1"
+                />
+                {catLoading && <Loading size="small" loading />}
+              </div>
+              {catResults.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {catResults.map((c) => (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => onSelectCategory(c)}
+                      className="text-xs px-2 py-1 rounded border border-gray-200 hover:border-blue-400 hover:bg-blue-50"
+                    >
+                      {c.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {catPredict.length > 0 && (
+                <div>
+                  <div className="text-xs text-gray-400 mb-1">推荐类目：</div>
+                  <div className="flex flex-wrap gap-2">
+                    {catPredict.map((c) => (
+                      <button
+                        key={c.id}
+                        type="button"
+                        onClick={() => onSelectCategory(c)}
+                        className="text-xs px-2 py-1 rounded border border-green-200 text-green-700 hover:bg-green-50"
+                      >
+                        {c.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {catError && <div className="text-xs text-orange-600">{catError}</div>}
             </div>
 
             {/* 默认售价 & 库存 */}
@@ -1109,7 +1679,17 @@ export function CandidatesPage() {
 
             {/* 商品图片 */}
             <div>
-              <div className="text-sm font-medium mb-2">商品图片</div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-medium">商品图片（默认采集自 1688，点击可放大）</span>
+                <Space>
+                  <Button size="small" variant="outline" onClick={handleFetch1688Detail}>
+                    从1688补充重量/尺寸/SKU
+                  </Button>
+                  <Button size="small" variant="outline" loading={aiEditing} onClick={handleAiEditImages}>
+                    AI 编辑图片
+                  </Button>
+                </Space>
+              </div>
               <div className="flex flex-wrap gap-2 mb-2">
                 {publishDraft.pictureUrls.map((url, idx) => (
                   <div key={`${url}-${idx}`} className="relative w-16 h-16 border rounded overflow-hidden group">
@@ -1619,6 +2199,385 @@ export function CandidatesPage() {
                 提示：预检拦截或跳过的站点不会消耗 ML API 配额。请根据失败原因修改商品信息后重试。
               </div>
             )}
+          </div>
+        )}
+      </Dialog>
+
+      {/* 批量上架弹窗 */}
+      <Dialog
+        visible={batchOpen}
+        onClose={() => setBatchOpen(false)}
+        header={`批量上架（已选 ${selectedRowIds.length} 项）`}
+        width={640}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setBatchOpen(false)}>
+              取消
+            </Button>
+            <Button theme="success" loading={batching} onClick={handleBatchPublish}>
+              确认批量上架
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-4 max-h-[70vh] overflow-auto pr-2">
+          <div className="text-xs text-gray-500 bg-blue-50 p-2 rounded">
+            批量上架将按每个候选自身的标题/图片/售价/SKU 上架到所选店铺。如需统一修改某字段，请单独打开「上架」预览。
+          </div>
+          <div>
+            <div className="text-sm font-medium mb-2">选择要上架的目标店铺：</div>
+            <div className="space-y-2 max-h-40 overflow-auto border border-gray-100 rounded p-2">
+              {stores
+                .filter((s) => s.enabled && s.authorized)
+                .map((s) => (
+                  <div key={s.id} className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={batchStoreIds.includes(s.id)}
+                      onChange={(e) => {
+                        if (e.target.checked) setBatchStoreIds((prev) => [...prev, s.id]);
+                        else setBatchStoreIds((prev) => prev.filter((id) => id !== s.id));
+                      }}
+                    />
+                    <span>{s.nickname}</span>
+                    <Tag size="small">{s.site}</Tag>
+                  </div>
+                ))}
+              {stores.filter((s) => s.enabled && s.authorized).length === 0 && (
+                <div className="text-xs text-gray-400">暂无可用店铺，请先到「店铺管理」添加并启用</div>
+              )}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <div className="text-sm font-medium mb-1">默认刊登类型（应用于所有站点）</div>
+              <select
+                value={batchListingType}
+                onChange={(e) => setBatchListingType(e.target.value)}
+                className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
+              >
+                <option value="gold_special">Classic（gold_special）</option>
+                <option value="gold_pro">Premium（gold_pro）</option>
+                <option value="gold">Gold</option>
+                <option value="silver">Silver</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <Switch value={useCbtCategory} onChange={(v) => setUseCbtCategory(v as boolean)} />
+              <span className="text-sm">使用 CBT 类目前缀</span>
+            </div>
+          </div>
+        </div>
+      </Dialog>
+
+      {/* 批量上架结果弹窗 */}
+      <Dialog
+        visible={batchResultOpen}
+        onClose={() => setBatchResultOpen(false)}
+        header="批量上架结果"
+        width={680}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setBatchResultOpen(false)}>
+              关闭
+            </Button>
+            {batchResult?.totalSucceeded > 0 && (
+              <Button theme="primary" onClick={() => { setBatchResultOpen(false); setBatchOpen(false); fetchRows(); }}>
+                确定
+              </Button>
+            )}
+          </div>
+        }
+      >
+        {batchResult && (
+          <div className="space-y-4 max-h-[70vh] overflow-auto pr-2">
+            <div className="grid grid-cols-2 gap-3 text-center">
+              <div className="bg-green-50 p-3 rounded">
+                <div className="text-xs text-green-600">成功站点数</div>
+                <div className="font-medium text-lg text-green-700">{batchResult.totalSucceeded || 0}</div>
+              </div>
+              <div className="bg-red-50 p-3 rounded">
+                <div className="text-xs text-red-600">失败站点数</div>
+                <div className="font-medium text-lg text-red-700">{batchResult.totalFailed || 0}</div>
+              </div>
+            </div>
+            {batchResult.perResult && (
+              <div>
+                <div className="text-sm font-medium mb-2">各候选明细</div>
+                <div className="border border-gray-100 rounded overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium text-gray-600">候选 ID</th>
+                        <th className="px-3 py-2 text-left font-medium text-gray-600">结果</th>
+                        <th className="px-3 py-2 text-left font-medium text-gray-600">说明</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(batchResult.perResult).map(([id, r]: any) => (
+                        <tr key={id} className="border-t">
+                          <td className="px-3 py-2 text-xs">#{id}</td>
+                          <td className="px-3 py-2">
+                            {r.success ? (
+                              <Tag theme="success" size="small">成功</Tag>
+                            ) : (
+                              <Tag theme="danger" size="small">失败</Tag>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-xs text-gray-600">
+                            {r.success
+                              ? `站点成功 ${r.result?.succeeded || 0}，失败 ${r.result?.failed || 0}`
+                              : r.message || '上架失败'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </Dialog>
+
+      {/* 已上架商品修改弹窗 */}
+      <Dialog
+        visible={editOpen}
+        onClose={() => setEditOpen(false)}
+        header="修改已上架商品"
+        width={760}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setEditOpen(false)}>
+              取消
+            </Button>
+            <Button theme="primary" loading={editing} onClick={handleEditPublishedSave}>
+              保存修改
+            </Button>
+          </div>
+        }
+      >
+        {editItem && editDraft && (
+          <div className="space-y-4 max-h-[70vh] overflow-auto pr-2">
+            <div>
+              <div className="text-sm font-medium mb-1">商品标题</div>
+              <Input
+                value={editDraft.title}
+                onChange={(v) => setEditDraft((prev: any) => (prev ? { ...prev, title: String(v) } : prev))}
+              />
+            </div>
+            <div>
+              <div className="text-sm font-medium mb-2">商品图片（点击可放大）</div>
+              <div className="flex flex-wrap gap-2 mb-2">
+                {editDraft.pictureUrls.map((url: string, idx: number) => (
+                  <div key={`${url}-${idx}`} className="relative w-16 h-16 border rounded overflow-hidden group">
+                    <img
+                      src={url}
+                      alt=""
+                      className="w-full h-full object-cover"
+                      onError={(e) => ((e.currentTarget as HTMLImageElement).src = FALLBACK_IMAGE)}
+                      onClick={() => {
+                        setViewerImages(editDraft.pictureUrls);
+                        setViewerIndex(idx);
+                        setViewerVisible(true);
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setEditDraft((prev: any) =>
+                          prev ? { ...prev, pictureUrls: prev.pictureUrls.filter((_: any, i: number) => i !== idx) } : prev
+                        )
+                      }
+                      className="absolute top-0 right-0 bg-red-500 text-white text-xs px-1 rounded-bl"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  value={editDraft.newImageUrl}
+                  onChange={(v) => setEditDraft((prev: any) => (prev ? { ...prev, newImageUrl: String(v) } : prev))}
+                  placeholder="https://...（添加图片 URL）"
+                  className="flex-1"
+                />
+                <Button
+                  size="small"
+                  onClick={() => {
+                    const url = (editDraft.newImageUrl || '').trim();
+                    if (!url.startsWith('http')) {
+                      MessagePlugin.warning('请输入有效的 http(s) 图片地址');
+                      return;
+                    }
+                    setEditDraft((prev: any) =>
+                      prev ? { ...prev, pictureUrls: Array.from(new Set([...prev.pictureUrls, url])), newImageUrl: '' } : prev
+                    );
+                  }}
+                >
+                  添加
+                </Button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <div className="text-sm font-medium mb-1">品牌</div>
+                <Input
+                  value={editDraft.brand}
+                  onChange={(v) => setEditDraft((prev: any) => (prev ? { ...prev, brand: String(v) } : prev))}
+                />
+              </div>
+              <div>
+                <div className="text-sm font-medium mb-1">型号（Model）</div>
+                <Input
+                  value={editDraft.model}
+                  onChange={(v) => setEditDraft((prev: any) => (prev ? { ...prev, model: String(v) } : prev))}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-4 gap-3">
+              <div>
+                <div className="text-sm font-medium mb-1">重量（kg）</div>
+                <InputNumber
+                  value={editDraft.weightKg}
+                  onChange={(v) => setEditDraft((prev: any) => (prev ? { ...prev, weightKg: Number(v) || 0 } : prev))}
+                  decimalPlaces={3}
+                  min={0}
+                />
+              </div>
+              <div>
+                <div className="text-sm font-medium mb-1">长（cm）</div>
+                <InputNumber
+                  value={editDraft.lengthCm}
+                  onChange={(v) => setEditDraft((prev: any) => (prev ? { ...prev, lengthCm: Number(v) || 0 } : prev))}
+                  decimalPlaces={1}
+                  min={0}
+                />
+              </div>
+              <div>
+                <div className="text-sm font-medium mb-1">宽（cm）</div>
+                <InputNumber
+                  value={editDraft.widthCm}
+                  onChange={(v) => setEditDraft((prev: any) => (prev ? { ...prev, widthCm: Number(v) || 0 } : prev))}
+                  decimalPlaces={1}
+                  min={0}
+                />
+              </div>
+              <div>
+                <div className="text-sm font-medium mb-1">高（cm）</div>
+                <InputNumber
+                  value={editDraft.heightCm}
+                  onChange={(v) => setEditDraft((prev: any) => (prev ? { ...prev, heightCm: Number(v) || 0 } : prev))}
+                  decimalPlaces={1}
+                  min={0}
+                />
+              </div>
+            </div>
+
+            <div>
+              <div className="text-sm font-medium mb-1">库存</div>
+              <InputNumber
+                value={editDraft.availableQuantity}
+                onChange={(v) => setEditDraft((prev: any) => (prev ? { ...prev, availableQuantity: Number(v) || 0 } : prev))}
+                min={1}
+              />
+            </div>
+
+            <div>
+              <div className="text-sm font-medium mb-2">逐国家售价 / 产品类型 / 净利润</div>
+              <div className="border border-gray-100 rounded overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">国家</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">售价（USD）</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">产品类型</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">净利润</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.keys(editDraft.priceBySite).map((site) => {
+                      const info = siteInfos[site];
+                      const ps = editDraft.priceBySite[site] || {};
+                      return (
+                        <tr key={site} className="border-t">
+                          <td className="px-3 py-2">{info ? `${info.name} (${site})` : site}</td>
+                          <td className="px-3 py-2">
+                            <InputNumber
+                              value={ps.price}
+                              onChange={(v) =>
+                                setEditDraft((prev: any) => ({
+                                  ...prev,
+                                  priceBySite: { ...prev.priceBySite, [site]: { ...prev.priceBySite[site], price: Number(v) || 0 } },
+                                }))
+                              }
+                              decimalPlaces={2}
+                              min={0}
+                              style={{ width: 110 }}
+                            />
+                          </td>
+                          <td className="px-3 py-2">
+                            <select
+                              value={ps.listingType}
+                              onChange={(e) =>
+                                setEditDraft((prev: any) => ({
+                                  ...prev,
+                                  priceBySite: { ...prev.priceBySite, [site]: { ...prev.priceBySite[site], listingType: e.target.value } },
+                                }))
+                              }
+                              className="border border-gray-300 rounded px-2 py-1 text-sm"
+                            >
+                              <option value="gold_special">Classic</option>
+                              <option value="gold_pro">Premium</option>
+                              <option value="gold">Gold</option>
+                              <option value="silver">Silver</option>
+                            </select>
+                          </td>
+                          <td className="px-3 py-2">
+                            <label className="flex items-center gap-1 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={!!ps.netProceeds}
+                                onChange={(e) =>
+                                  setEditDraft((prev: any) => ({
+                                    ...prev,
+                                    priceBySite: { ...prev.priceBySite, [site]: { ...prev.priceBySite[site], netProceeds: e.target.checked } },
+                                  }))
+                                }
+                              />
+                              计算净利润
+                            </label>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {Object.keys(editDraft.priceBySite).length === 0 && (
+                      <tr>
+                        <td colSpan={4} className="px-3 py-3 text-center text-xs text-gray-400">无逐国家售价（上架时未记录）</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-sm font-medium">商品描述</span>
+              </div>
+              <Textarea
+                value={editDraft.description}
+                onChange={(v) => setEditDraft((prev: any) => (prev ? { ...prev, description: String(v) } : prev))}
+                rows={4}
+              />
+            </div>
+
+            <div className="text-xs text-gray-400 bg-yellow-50 p-2 rounded">
+              提示：保存后将调用美客多修改接口更新该商品。标题、描述、图片、重量、尺寸、库存、品牌、型号及逐国家售价/净利润均可修改。
+            </div>
           </div>
         )}
       </Dialog>

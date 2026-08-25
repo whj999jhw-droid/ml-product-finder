@@ -237,6 +237,8 @@ CREATE TABLE IF NOT EXISTS candidates (
   published_at TEXT,
   -- 选入理由/趋势备注（简明展示为何选入：近期上架、日均销量、售价区间、竞争环境）
   trend_note TEXT,
+  -- 卖家自定义 SKU 编号（上架时自动生成，便于与美客多后台 seller_sku 对应追踪）
+  seller_sku TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -266,6 +268,37 @@ CREATE TABLE IF NOT EXISTS publish_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_publish_jobs_candidate ON publish_jobs(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_publish_jobs_status ON publish_jobs(status);
+
+-- 已上架商品：候选商品 -> 店铺 -> 美客多实际刊登项的映射（用于「已上架」tab 与修改）
+CREATE TABLE IF NOT EXISTS published_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  candidate_id INTEGER NOT NULL,
+  store_id TEXT NOT NULL,
+  site TEXT NOT NULL,
+  ml_item_id TEXT NOT NULL,
+  ml_permalink TEXT,
+  seller_sku TEXT,
+  title TEXT,
+  description TEXT,
+  picture_urls TEXT,
+  brand TEXT,
+  model TEXT,
+  weight REAL,
+  length REAL,
+  width REAL,
+  height REAL,
+  available_quantity INTEGER,
+  price_by_site TEXT,
+  listing_type_by_site TEXT,
+  net_proceeds_by_site TEXT,
+  published_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_published_items_candidate ON published_items(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_published_items_store ON published_items(store_id);
+CREATE INDEX IF NOT EXISTS idx_published_items_ml ON published_items(ml_item_id);
 
 -- ============ 通用配置键值表（LLM/YouTube/OAuth 等凭证） ============
 CREATE TABLE IF NOT EXISTS app_config (
@@ -316,8 +349,13 @@ CREATE TABLE IF NOT EXISTS app_config (
       } catch (e: any) {
         console.warn('[DB] 回填 trend_note 失败（不影响启动）:', e?.message || String(e));
       }
+      // 兼容旧数据库：若 candidates 表缺少 seller_sku 列则补加
+      if (!cols.find((c) => c.name === 'seller_sku')) {
+        db.exec("ALTER TABLE candidates ADD COLUMN seller_sku TEXT");
+        console.log('[DB] candidates.seller_sku 列已添加');
+      }
     } catch (e: any) {
-      console.warn('[DB] 检查/补加 trend_note 列失败:', e?.message || String(e));
+      console.warn('[DB] 检查/补加 trend_note/seller_sku 列失败:', e?.message || String(e));
     }
     console.log(`[DB] SQLite initialized at ${DB_PATH}`);
   } catch (e: any) {
@@ -719,16 +757,17 @@ export function setAppConfig(key: string, value: string | null): void {
 export function updateCandidateStatus(
   id: number,
   status: string,
-  extra?: { reject_reason?: string; reviewed_at?: string; published_at?: string }
+  extra?: { reject_reason?: string; reviewed_at?: string; published_at?: string; seller_sku?: string }
 ): void {
   if (!db) return;
   const now = new Date().toISOString();
-  db.prepare(`
-    UPDATE candidates
-    SET status = @status, reject_reason = @reject_reason, reviewed_at = @reviewed_at,
-        published_at = @published_at, updated_at = @now
-    WHERE id = @id
-  `).run({ id, status, reject_reason: extra?.reject_reason ?? null, reviewed_at: extra?.reviewed_at ?? null, published_at: extra?.published_at ?? null, now });
+  const sets: string[] = ['status = @status', 'reject_reason = @reject_reason', 'reviewed_at = @reviewed_at', 'published_at = @published_at', 'updated_at = @now'];
+  const params: any = { id, status, reject_reason: extra?.reject_reason ?? null, reviewed_at: extra?.reviewed_at ?? null, published_at: extra?.published_at ?? null, now };
+  if (extra?.seller_sku !== undefined) {
+    sets.push('seller_sku = @seller_sku');
+    params.seller_sku = extra.seller_sku;
+  }
+  db.prepare(`UPDATE candidates SET ${sets.join(', ')} WHERE id = @id`).run(params);
 }
 
 export function createPublishJob(data: { candidate_id: number; store_id: string; site: string; payload_json?: string }): number {
@@ -765,6 +804,114 @@ export function getPublishJobsByCandidate(candidateId: number): any[] {
   return db.prepare('SELECT * FROM publish_jobs WHERE candidate_id = ? ORDER BY created_at DESC').all(candidateId);
 }
 
+// ============ 卖家 SKU 编号生成 ============
+/**
+ * 生成卖家自定义 SKU 编号（美客多 seller_sku / seller_custom_field）。
+ * 规则：前缀 MLP + 站点 + 日期(YYMMDD) + 4 位随机 Base36，便于人工阅读与去重。
+ * 示例：MLP-MLM-250821-3F9K
+ */
+export function generateSellerSku(site: string, seed?: string): string {
+  const d = new Date();
+  const yy = String(d.getFullYear()).slice(2);
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
+  const sitePart = (site || 'ML').toUpperCase();
+  const seedPart = seed ? `-${seed.slice(0, 6).toUpperCase()}` : '';
+  return `MLP-${sitePart}-${yy}${mm}${dd}-${rand}${seedPart}`;
+}
+
+// ============ 已上架商品数据访问 ============
+
+export function insertPublishedItem(data: {
+  candidate_id: number;
+  store_id: string;
+  site: string;
+  ml_item_id: string;
+  ml_permalink?: string;
+  seller_sku?: string;
+  title?: string;
+  description?: string;
+  picture_urls?: string;
+  brand?: string;
+  model?: string;
+  weight?: number;
+  length?: number;
+  width?: number;
+  height?: number;
+  available_quantity?: number;
+  price_by_site?: string;
+  listing_type_by_site?: string;
+  net_proceeds_by_site?: string;
+}): number {
+  if (!db) return 0;
+  const now = new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT INTO published_items (
+      candidate_id, store_id, site, ml_item_id, ml_permalink, seller_sku,
+      title, description, picture_urls, brand, model, weight, length, width, height,
+      available_quantity, price_by_site, listing_type_by_site, net_proceeds_by_site,
+      published_at, updated_at
+    ) VALUES (
+      @candidate_id, @store_id, @site, @ml_item_id, @ml_permalink, @seller_sku,
+      @title, @description, @picture_urls, @brand, @model, @weight, @length, @width, @height,
+      @available_quantity, @price_by_site, @listing_type_by_site, @net_proceeds_by_site,
+      @published_at, @now
+    )
+  `);
+  const result = stmt.run({ ...data, picture_urls: data.picture_urls ?? null, published_at: now, now });
+  return Number(result.lastInsertRowid) || 0;
+}
+
+export function getPublishedItems(opts?: {
+  site?: string;
+  storeId?: string;
+  candidateId?: number;
+  limit?: number;
+  offset?: number;
+}): { rows: any[]; total: number } {
+  if (!db) return { rows: [], total: 0 };
+  const where: string[] = [];
+  const params: any = {};
+  if (opts?.site) { where.push('p.site = @site'); params.site = opts.site; }
+  if (opts?.storeId) { where.push('p.store_id = @storeId'); params.storeId = opts.storeId; }
+  if (opts?.candidateId) { where.push('p.candidate_id = @candidateId'); params.candidateId = opts.candidateId; }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const totalRow = db.prepare(`SELECT COUNT(*) AS c FROM published_items p ${whereSql}`).get(params);
+  const total = totalRow?.c || 0;
+  const limit = opts?.limit ?? 100;
+  const offset = opts?.offset ?? 0;
+  const rows = db.prepare(
+    `SELECT p.*, c.ml_title AS candidate_title, c.ml_category_name, c.ml_thumbnail, c.ali1688_image_url
+     FROM published_items p
+     LEFT JOIN candidates c ON c.id = p.candidate_id
+     ${whereSql} ORDER BY p.published_at DESC LIMIT @limit OFFSET @offset`
+  ).all({ ...params, limit, offset });
+  return { rows, total };
+}
+
+export function getPublishedItemById(id: number): any {
+  if (!db) return null;
+  return db.prepare('SELECT * FROM published_items WHERE id = ?').get(id);
+}
+
+export function updatePublishedItem(id: number, patch: Record<string, any>): void {
+  if (!db) return;
+  const allowed = new Set([
+    'title', 'description', 'picture_urls', 'brand', 'model', 'weight', 'length', 'width', 'height',
+    'available_quantity', 'price_by_site', 'listing_type_by_site', 'net_proceeds_by_site', 'ml_permalink',
+  ]);
+  const fields: string[] = [];
+  const params: any = { id, now: new Date().toISOString() };
+  for (const [k, v] of Object.entries(patch)) {
+    if (allowed.has(k) && v !== undefined) {
+      fields.push(`${k} = @${k}`);
+      params[k] = v;
+    }
+  }
+  if (fields.length === 0) return;
+  db.prepare(`UPDATE published_items SET ${fields.join(', ')}, updated_at = @now WHERE id = @id`).run(params);
+}
 
 export default db;
 export { db };

@@ -1377,6 +1377,138 @@ export async function getCategoryAttributes(categoryId: string): Promise<Categor
 }
 
 /**
+ * 获取类目全路径（path_from_root）。
+ * 官方端点：GET /categories/{category_id} 返回 { id, name, path_from_root: [{id,name}...] }
+ */
+export async function getCategory(categoryId: string): Promise<{ id: string; name: string; path_from_root: Array<{ id: string; name: string }> } | null> {
+  await ensureValidToken();
+  try {
+    const data = await httpsGet(`${getApiBase()}/categories/${encodeURIComponent(categoryId)}`);
+    if (!data || !data.id) return null;
+    return {
+      id: data.id,
+      name: data.name,
+      path_from_root: Array.isArray(data.path_from_root) ? data.path_from_root : [],
+    };
+  } catch (err: any) {
+    console.warn(`[ML] 获取类目全路径失败 (${categoryId}): ${err?.message?.slice(0, 100)}`);
+    return null;
+  }
+}
+
+/**
+ * 站点类目森林缓存：顶级类目 + 其直接子类目，按站点缓存 24h。
+ * 说明：当前应用凭证下 /sites/{site}/categories/search 与 /category_predictor/* 均返回 404，
+ * 因此类目搜索与「类目推荐」改为基于本地类目森林做匹配。
+ */
+interface CategoryNode {
+  id: string;
+  name: string;
+  children: CategoryNode[];
+}
+const categoryForestCache = new Map<string, { forest: CategoryNode[]; at: number }>();
+const CATEGORY_FOREST_TTL = 24 * 3600 * 1000;
+
+async function getCategoryForest(siteId: string): Promise<CategoryNode[]> {
+  const cached = categoryForestCache.get(siteId);
+  if (cached && Date.now() - cached.at < CATEGORY_FOREST_TTL) return cached.forest;
+  const top: any[] = await httpsGet(`${getApiBase()}/sites/${siteId}/categories`);
+  if (!Array.isArray(top) || top.length === 0) return [];
+  // 有界并发（6）拉取每个顶级类目的子类目，避免触发 ML 限流
+  const CONCURRENCY = 6;
+  const forest: CategoryNode[] = [];
+  for (let i = 0; i < top.length; i += CONCURRENCY) {
+    const batch = top.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(
+      batch.map(async (c: any) => {
+        try {
+          const detail: any = await httpsGet(`${getApiBase()}/categories/${encodeURIComponent(c.id)}`);
+          const children = Array.isArray(detail?.children_categories)
+            ? detail.children_categories.map((x: any) => ({ id: x.id, name: x.name, children: [] }))
+            : [];
+          return { id: c.id, name: c.name, children };
+        } catch {
+          return { id: c.id, name: c.name, children: [] };
+        }
+      })
+    );
+    forest.push(...results);
+  }
+  categoryForestCache.set(siteId, { forest, at: Date.now() });
+  return forest;
+}
+
+function flattenForest(forest: CategoryNode[]): Array<{ id: string; name: string; parentName?: string }> {
+  const out: Array<{ id: string; name: string; parentName?: string }> = [];
+  for (const node of forest) {
+    out.push({ id: node.id, name: node.name });
+    for (const ch of node.children) out.push({ id: ch.id, name: ch.name, parentName: node.name });
+  }
+  return out;
+}
+
+function labelWithParent(name: string, parentName?: string): string {
+  return parentName ? `${name}（${parentName}）` : name;
+}
+
+/**
+ * 关键词搜索类目（类目选择器用的模糊搜索）。基于站点类目森林做名称子串匹配（顶级 + 直接子类目）。
+ */
+export async function searchCategories(siteId: string, query: string): Promise<Array<{ id: string; name: string }>> {
+  await ensureValidToken();
+  try {
+    const q = (query || '').trim().toLowerCase();
+    if (!q) return [];
+    const flat = flattenForest(await getCategoryForest(siteId));
+    const seen = new Set<string>();
+    const result: Array<{ id: string; name: string }> = [];
+    for (const c of flat) {
+      if (seen.has(c.id)) continue;
+      if (c.name.toLowerCase().includes(q)) {
+        seen.add(c.id);
+        result.push({ id: c.id, name: labelWithParent(c.name, c.parentName) });
+      }
+    }
+    return result.slice(0, 30);
+  } catch (err: any) {
+    console.warn(`[ML] 类目搜索失败 (${siteId} q=${query}): ${err?.message?.slice(0, 100)}`);
+    return [];
+  }
+}
+
+/**
+ * 类目推荐（根据标题预测最合适的类目，类似妙手的类目推荐）。
+ * 官方预测接口在当前凭证下不可用，改为基于标题词与类目森林名称做相关性打分。
+ */
+export async function predictCategory(siteId: string, title: string): Promise<Array<{ id: string; name: string }>> {
+  await ensureValidToken();
+  try {
+    const t = (title || '').toLowerCase();
+    if (!t) return [];
+    const STOP = new Set(['para', 'con', 'and', 'the', 'for', 'de', 'del', 'los', 'las', 'uno', 'una', 'por', 'en']);
+    const tokens = Array.from(
+      new Set(t.split(/[^a-z0-9áéíóúñü]+/i).filter((w) => w.length >= 3 && !STOP.has(w)))
+    );
+    const flat = flattenForest(await getCategoryForest(siteId));
+    const scored: Array<{ id: string; name: string; score: number }> = [];
+    for (const c of flat) {
+      const name = c.name.toLowerCase();
+      let score = 0;
+      for (const tok of tokens) {
+        if (name.includes(tok)) score += tok.length >= 4 ? 2 : 1;
+      }
+      if (c.parentName && score > 0) score += 0.5; // 子类目更具体，权重略高
+      if (score > 0) scored.push({ id: c.id, name: labelWithParent(c.name, c.parentName), score });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, 8).map((s) => ({ id: s.id, name: s.name }));
+  } catch (err: any) {
+    console.warn(`[ML] 类目推荐失败 (${siteId} title=${title?.slice(0, 30)}): ${err?.message?.slice(0, 100)}`);
+    return [];
+  }
+}
+
+/**
  * 搜索品类下的商品 (按销量排序)
  * 策略1: 官方 API + Bearer token (category only)
  * 策略1b: 如果 403，尝试添加 q 参数（某些 ML 端点要求 q）

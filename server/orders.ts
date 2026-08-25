@@ -178,6 +178,18 @@ export async function refreshCachedOrderShipmentStatuses(
   let changed = 0;
   const updated = orders.map((o: any) => {
     const orderId = String(o.id);
+
+    // 已发货 / 已取消订单：无论物流内查是否成功，都强制清掉履约截止时间，
+    // 避免旧 handlingDeadline 残留被误算成「已超时」。这是「已发货订单在手机端
+    // 显示未发货+已超时」的根因——即使物流状态获取失败，mlStatus 已是权威分类。
+    if (o.mlStatus && o.mlStatus !== 'unshipped') {
+      if (o.handlingDeadline == null && o.remainingHours == null && o.remainingHoursText === '—') {
+        return o; // 已干净，无需写库
+      }
+      changed++;
+      return { ...o, handlingDeadline: null, remainingHours: null, remainingHoursText: '—' };
+    }
+
     const shipStatus = shipStatusMap.get(orderId);
     if (shipStatus === undefined) return o; // 内查无结果，保持原样避免误判
 

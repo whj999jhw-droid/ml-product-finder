@@ -1,7 +1,7 @@
 {
   "name": "ml-push-gateway",
   "version": "1.0.0",
-  "description": "ml-product-finder 手机 APP 新订单推送中转服务（FCM / APNs）",
+  "description": "ml-product-finder 手机 APP 新订单推送中转服务（JPush 安卓厂商通道 / FCM 安卓备选 / APNs 苹果）",
   "type": "module",
   "main": "server.js",
   "scripts": {

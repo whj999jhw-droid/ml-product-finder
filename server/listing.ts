@@ -14,6 +14,7 @@
 import { getAccessToken } from './mercadolibre.js';
 import { checkBannedWords } from './bannedWords.js';
 import { getStoreRaw, ensureStoreToken } from './stores.js';
+import { generateSellerSku } from './db.js';
 
 export interface ListingDraft {
   site: string; // MLM / MLB / MLC / MCO
@@ -27,6 +28,8 @@ export interface ListingDraft {
   pictureUrls: string[]; // 公网可访问的图片 URL（必须是你自有/已授权的图）
   brand: string; // 你的品牌或 Generic
   model?: string; // 模型（可选，对应 MODEL attribute）
+  /** 卖家自定义 SKU 编号（美客多 seller_custom_field / seller_sku）。不传则自动生成 */
+  seller_custom_field?: string;
   weight?: number;
   height?: number;
   width?: number;
@@ -171,6 +174,8 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
     available_quantity: draft.available_quantity,
     description: { plain_text: draft.description },
     pictures,
+    // 卖家自定义 SKU 编号：自动生成或调用方传入；用于与美客多后台 seller_sku 对应追踪
+    seller_custom_field: draft.seller_custom_field || generateSellerSku(draft.site),
     attributes,
     // 仅在有保修信息时发送 sale_terms（保修在 CBT 一般可选）
     ...(saleTerms.length ? { sale_terms: saleTerms } : {}),
