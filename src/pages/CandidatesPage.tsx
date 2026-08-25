@@ -15,6 +15,7 @@ import {
   Input,
   InputNumber,
   Textarea,
+  Collapse,
 } from 'tdesign-react';
 import type { PrimaryTableCol } from 'tdesign-react';
 
@@ -1651,7 +1652,8 @@ export function CandidatesPage() {
         visible={publishOpen}
         onClose={() => setPublishOpen(false)}
         header="商品详情预览"
-        width={720}
+        width={1100}
+        style={{ maxWidth: '95vw' }}
         footer={
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setPublishOpen(false)}>
@@ -1664,394 +1666,416 @@ export function CandidatesPage() {
         }
       >
         {publishRow && publishDraft && (
-          <div className="space-y-4 max-h-[70vh] overflow-auto pr-2">
-            {/* 标题 */}
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-sm font-medium">商品标题</span>
-                <Button size="small" variant="text" theme="primary" onClick={handleGenerateTitle}>
-                  生成标题
-                </Button>
-              </div>
-              <Input
-                value={publishDraft.title}
-                onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, title: String(v) } : prev))}
-                placeholder="西/葡语标题"
-              />
-            </div>
-
-            {/* 类目与站点 */}
-            <div className="flex flex-wrap gap-4 text-sm">
-              <div>
-                <span className="text-gray-500">站点：</span>
-                <Tag size="small">{publishRow.site}</Tag>
-              </div>
-              <div>
-                <span className="text-gray-500">竞品售价：</span>
-                <span className="text-blue-600 font-medium">${publishRow.ml_price_usd?.toFixed(2)}</span>
-              </div>
-            </div>
-
-            {/* 类目（可编辑：全路径 / 关键词搜索 / 推荐） */}
-            <div className="border border-gray-100 rounded p-3 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium">类目（CBT 上架类目，可修改）</span>
-                <Button size="small" variant="text" theme="primary" onClick={predictCategoryForTitle}>
-                  按标题推荐类目
-                </Button>
-              </div>
-              <div className="text-xs text-gray-500">
-                当前类目：{publishDraft.categoryName || '-'}
-                {catPath && <span className="ml-1 text-indigo-600">（{catPath}）</span>}
-              </div>
-              <div className="flex gap-2">
-                <Input
-                  value={catSearch}
-                  onChange={(v) => {
-                    setCatSearch(String(v));
-                    searchCategory(String(v));
-                  }}
-                  placeholder="输入关键词搜索类目，如 phone / 手机"
-                  className="flex-1"
-                />
-                {catLoading && <Loading size="small" loading />}
-              </div>
-              {catResults.length > 0 && (
-                <div className="flex flex-wrap gap-2">
-                  {catResults.map((c) => (
-                    <button
-                      key={c.id}
-                      type="button"
-                      onClick={() => onSelectCategory(c)}
-                      className="text-xs px-2 py-1 rounded border border-gray-200 hover:border-blue-400 hover:bg-blue-50"
-                    >
-                      {c.name}
-                    </button>
-                  ))}
-                </div>
+          <div className="max-h-[78vh] overflow-auto pr-1 -mr-1">
+            <div className="mb-3 text-xs text-gray-500 bg-blue-50 px-3 py-2 rounded">
+              打开弹窗时已自动：①从 1688 读取重量/尺寸/SKU；②调用 AI 去背景+白底+水印；③按目标净利润反推售价。
+              {publishDraft.ali1688Url && (
+                <span className="ml-1">
+                  货源：
+                  <a href={publishDraft.ali1688Url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline break-all">
+                    1688 商品链接
+                  </a>
+                </span>
               )}
-              {catPredict.length > 0 && (
-                <div>
-                  <div className="text-xs text-gray-400 mb-1">推荐类目：</div>
-                  <div className="flex flex-wrap gap-2">
-                    {catPredict.map((c) => (
-                      <button
-                        key={c.id}
-                        type="button"
-                        onClick={() => onSelectCategory(c)}
-                        className="text-xs px-2 py-1 rounded border border-green-200 text-green-700 hover:bg-green-50"
-                      >
-                        {c.name}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {catError && <div className="text-xs text-orange-600">{catError}</div>}
             </div>
 
-            {/* 默认售价 & 库存 */}
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <div className="text-sm font-medium mb-1">默认售价（USD，未单独设置国家使用）</div>
-                <InputNumber
-                  value={publishDraft.listingPriceUsd}
-                  onChange={(v) =>
-                    setPublishDraft((prev) => {
-                      if (!prev) return prev;
-                      const price = Number(v) || 0;
-                      // 同步更新尚未单独设置的国家
-                      const priceBySite = { ...prev.priceBySite };
-                      for (const site of targetSites) {
-                        if (priceBySite[site] == null) priceBySite[site] = price;
-                      }
-                      return { ...prev, listingPriceUsd: price, priceBySite };
-                    })
-                  }
-                  decimalPlaces={2}
-                  min={0}
-                />
-              </div>
-              <div>
-                <div className="text-sm font-medium mb-1">库存</div>
-                <InputNumber
-                  value={publishDraft.availableQuantity}
-                  onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, availableQuantity: Number(v) || 0 } : prev))}
-                  min={1}
-                />
-              </div>
-            </div>
-
-            {/* 商品图片 */}
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium">商品图片（自动采集自 1688，已在后台 AI 处理，点击可放大）</span>
-                <Space>
-                  {aliFilling && <span className="text-xs text-gray-400">从1688补充中…</span>}
-                  {aiEditing && <span className="text-xs text-gray-400">AI 编辑中…</span>}
-                  <Button size="small" variant="text" theme="primary" loading={aliFilling} onClick={handleFetch1688Detail}>
-                    重新获取1688信息
-                  </Button>
-                </Space>
-              </div>
-              <div className="text-xs text-gray-500 mb-2">
-                打开弹窗时已自动：①从1688读取重量/尺寸/SKU；②调用 AI 去背景+白底+水印（符合美客多要求）；③按目标净利润反推售价。无需手动操作。
-                {publishDraft.ali1688Url && (
-                  <span className="ml-1">
-                    货源：
-                    <a href={publishDraft.ali1688Url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline break-all">
-                      1688 商品链接
-                    </a>
-                  </span>
-                )}
-              </div>
-              <div className="flex flex-wrap gap-2 mb-2">
-                {publishDraft.pictureUrls.map((url, idx) => (
-                  <div key={`${url}-${idx}`} className="relative w-16 h-16 border rounded overflow-hidden group">
-                    <img
-                      src={url}
-                      alt=""
-                      className="w-full h-full object-cover"
-                      onError={(e) => {
-                        (e.currentTarget as HTMLImageElement).src = FALLBACK_IMAGE;
-                      }}
-                      onClick={() => {
-                        setViewerImages(publishDraft.pictureUrls);
-                        setViewerIndex(idx);
-                        setViewerVisible(true);
-                      }}
-                    />
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setPublishDraft((prev) =>
-                          prev ? { ...prev, pictureUrls: prev.pictureUrls.filter((_, i) => i !== idx) } : prev
-                        )
-                      }
-                      className="absolute top-0 right-0 bg-red-500 text-white text-xs px-1 rounded-bl"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-              </div>
-              <div className="flex gap-2">
-                <Input
-                  value={newImageUrl}
-                  onChange={(v) => setNewImageUrl(String(v))}
-                  placeholder="https://...（添加更多图片 URL）"
-                  className="flex-1"
-                />
-                <Button
-                  size="small"
-                  onClick={() => {
-                    const url = newImageUrl.trim();
-                    if (!url.startsWith('http')) {
-                      MessagePlugin.warning('请输入有效的 http(s) 图片地址');
-                      return;
-                    }
-                    setPublishDraft((prev) =>
-                      prev ? { ...prev, pictureUrls: Array.from(new Set([...prev.pictureUrls, url])) } : prev
-                    );
-                    setNewImageUrl('');
-                  }}
-                >
-                  添加
-                </Button>
-              </div>
-            </div>
-
-            {/* SKU（一个或多个，标题/图片自动来自 1688） */}
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium">SKU（规格，可从 1688 自动识别多个）</span>
-                <Button
-                  size="small"
-                  variant="text"
-                  theme="primary"
-                  onClick={() =>
-                    setPublishDraft((prev) =>
-                      prev ? { ...prev, skus: [...prev.skus, { title: '', imageUrl: '' }] } : prev
-                    )
-                  }
-                >
-                  添加 SKU
-                </Button>
-              </div>
-              {publishDraft.skus.length === 0 ? (
-                <div className="text-xs text-gray-400 mb-2">
-                  未从 1688 识别到 SKU（可能无 1688 商品 ID 或 AK 未配置）。可在「重新获取1688信息」后自动填充，或手动添加。
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  {publishDraft.skus.map((sku, idx) => (
-                    <div key={idx} className="flex items-center gap-2 border border-gray-100 rounded p-2">
-                      <div
-                        className="w-12 h-12 border rounded overflow-hidden cursor-pointer flex-shrink-0"
-                        onClick={() => {
-                          if (sku.imageUrl) {
-                            setViewerImages([sku.imageUrl]);
-                            setViewerIndex(0);
-                            setViewerVisible(true);
-                          }
-                        }}
-                      >
-                        {sku.imageUrl ? (
-                          <img src={sku.imageUrl} alt="" className="w-full h-full object-cover" onError={(e) => { (e.currentTarget as HTMLImageElement).src = FALLBACK_IMAGE; }} />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-gray-300 text-xs">无图</div>
-                        )}
+            <Collapse defaultValue={['basic', 'images', 'profit', 'stores']}>
+              {/* 基础信息 */}
+              <Collapse.Panel header="基础信息" value="basic">
+                <div className="space-y-4">
+                  <div className="grid grid-cols-12 gap-4">
+                    <div className="col-span-8">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-medium">商品标题</span>
+                        <Button size="small" variant="text" theme="primary" onClick={handleGenerateTitle}>
+                          生成标题
+                        </Button>
                       </div>
                       <Input
-                        value={sku.title}
+                        value={publishDraft.title}
+                        onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, title: String(v) } : prev))}
+                        placeholder="西/葡语标题"
+                      />
+                    </div>
+                    <div className="col-span-2">
+                      <div className="text-sm font-medium mb-1">默认售价（USD）</div>
+                      <InputNumber
+                        value={publishDraft.listingPriceUsd}
                         onChange={(v) =>
-                          setPublishDraft((prev) =>
-                            prev ? { ...prev, skus: prev.skus.map((s, i) => (i === idx ? { ...s, title: String(v) } : s)) } : prev
-                          )
+                          setPublishDraft((prev) => {
+                            if (!prev) return prev;
+                            const price = Number(v) || 0;
+                            const priceBySite = { ...prev.priceBySite };
+                            for (const site of targetSites) {
+                              if (priceBySite[site] == null) priceBySite[site] = price;
+                            }
+                            return { ...prev, listingPriceUsd: price, priceBySite };
+                          })
                         }
-                        placeholder="SKU 标题（型号/规格）"
+                        decimalPlaces={2}
+                        min={0}
+                      />
+                    </div>
+                    <div className="col-span-2">
+                      <div className="text-sm font-medium mb-1">库存</div>
+                      <InputNumber
+                        value={publishDraft.availableQuantity}
+                        onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, availableQuantity: Number(v) || 0 } : prev))}
+                        min={1}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-4 text-sm">
+                    <div>
+                      <span className="text-gray-500">来源站点：</span>
+                      <Tag size="small">{publishRow.site}</Tag>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">竞品售价：</span>
+                      <span className="text-blue-600 font-medium">${publishRow.ml_price_usd?.toFixed(2)}</span>
+                    </div>
+                  </div>
+
+                  <div className="border border-gray-100 rounded p-3 space-y-2 bg-gray-50/50">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">类目（CBT 上架类目，可修改）</span>
+                      <Button size="small" variant="text" theme="primary" onClick={predictCategoryForTitle}>
+                        按标题推荐类目
+                      </Button>
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      当前类目：{publishDraft.categoryName || '-'}
+                      {catPath && <span className="ml-1 text-indigo-600">（{catPath}）</span>}
+                    </div>
+                    <div className="flex gap-2">
+                      <Input
+                        value={catSearch}
+                        onChange={(v) => {
+                          setCatSearch(String(v));
+                          searchCategory(String(v));
+                        }}
+                        placeholder="输入关键词搜索类目，如 phone / 手机"
+                        className="flex-1"
+                      />
+                      {catLoading && <Loading size="small" loading />}
+                    </div>
+                    {catResults.length > 0 && (
+                      <div className="flex flex-wrap gap-2">
+                        {catResults.map((c) => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => onSelectCategory(c)}
+                            className="text-xs px-2 py-1 rounded border border-gray-200 bg-white hover:border-blue-400 hover:bg-blue-50"
+                          >
+                            {c.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {catPredict.length > 0 && (
+                      <div>
+                        <div className="text-xs text-gray-400 mb-1">推荐类目：</div>
+                        <div className="flex flex-wrap gap-2">
+                          {catPredict.map((c) => (
+                            <button
+                              key={c.id}
+                              type="button"
+                              onClick={() => onSelectCategory(c)}
+                              className="text-xs px-2 py-1 rounded border border-green-200 text-green-700 bg-white hover:bg-green-50"
+                            >
+                              {c.name}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {catError && <div className="text-xs text-orange-600">{catError}</div>}
+                  </div>
+                </div>
+              </Collapse.Panel>
+
+              {/* 图片与 SKU */}
+              <Collapse.Panel header="商品图片 & SKU" value="images">
+                <div className="space-y-4">
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-sm font-medium">商品图片（点击放大，后台已 AI 处理）</span>
+                      <Space>
+                        {aliFilling && <span className="text-xs text-gray-400">从1688补充中…</span>}
+                        {aiEditing && <span className="text-xs text-gray-400">AI 编辑中…</span>}
+                        <Button size="small" variant="text" theme="primary" loading={aliFilling} onClick={handleFetch1688Detail}>
+                          重新获取1688信息
+                        </Button>
+                      </Space>
+                    </div>
+                    <div className="flex flex-wrap gap-2 mb-2">
+                      {publishDraft.pictureUrls.map((url, idx) => (
+                        <div key={`${url}-${idx}`} className="relative w-20 h-20 border rounded-lg overflow-hidden group hover:shadow-md transition-shadow">
+                          <img
+                            src={url}
+                            alt=""
+                            className="w-full h-full object-cover cursor-pointer"
+                            onError={(e) => {
+                              (e.currentTarget as HTMLImageElement).src = FALLBACK_IMAGE;
+                            }}
+                            onClick={() => {
+                              setViewerImages(publishDraft.pictureUrls);
+                              setViewerIndex(idx);
+                              setViewerVisible(true);
+                            }}
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setPublishDraft((prev) =>
+                                prev ? { ...prev, pictureUrls: prev.pictureUrls.filter((_, i) => i !== idx) } : prev
+                              )
+                            }
+                            className="absolute top-0 right-0 bg-red-500 text-white text-xs px-1.5 py-0.5 rounded-bl opacity-80 group-hover:opacity-100"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex gap-2">
+                      <Input
+                        value={newImageUrl}
+                        onChange={(v) => setNewImageUrl(String(v))}
+                        placeholder="https://...（添加更多图片 URL）"
                         className="flex-1"
                       />
                       <Button
                         size="small"
-                        variant="text"
-                        theme="danger"
-                        onClick={() =>
-                          setPublishDraft((prev) => (prev ? { ...prev, skus: prev.skus.filter((_, i) => i !== idx) } : prev))
-                        }
+                        onClick={() => {
+                          const url = newImageUrl.trim();
+                          if (!url.startsWith('http')) {
+                            MessagePlugin.warning('请输入有效的 http(s) 图片地址');
+                            return;
+                          }
+                          setPublishDraft((prev) =>
+                            prev ? { ...prev, pictureUrls: Array.from(new Set([...prev.pictureUrls, url])) } : prev
+                          );
+                          setNewImageUrl('');
+                        }}
                       >
-                        删
+                        添加
                       </Button>
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
+                  </div>
 
-            {/* 重量尺寸 */}
-            <div className="grid grid-cols-4 gap-3">
-              <div>
-                <div className="text-sm font-medium mb-1">重量（kg）</div>
-                <InputNumber
-                  value={publishDraft.weightKg}
-                  onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, weightKg: Number(v) || 0 } : prev))}
-                  decimalPlaces={3}
-                  min={0}
-                />
-              </div>
-              <div>
-                <div className="text-sm font-medium mb-1">长（cm）</div>
-                <InputNumber
-                  value={publishDraft.lengthCm}
-                  onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, lengthCm: Number(v) || 0 } : prev))}
-                  decimalPlaces={1}
-                  min={0}
-                />
-              </div>
-              <div>
-                <div className="text-sm font-medium mb-1">宽（cm）</div>
-                <InputNumber
-                  value={publishDraft.widthCm}
-                  onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, widthCm: Number(v) || 0 } : prev))}
-                  decimalPlaces={1}
-                  min={0}
-                />
-              </div>
-              <div>
-                <div className="text-sm font-medium mb-1">高（cm）</div>
-                <InputNumber
-                  value={publishDraft.heightCm}
-                  onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, heightCm: Number(v) || 0 } : prev))}
-                  decimalPlaces={1}
-                  min={0}
-                />
-              </div>
-            </div>
-
-            {/* 品牌/型号/保修/刊登类型 */}
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <div className="text-sm font-medium mb-1">品牌</div>
-                <Input
-                  value={publishDraft.brand}
-                  onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, brand: String(v) } : prev))}
-                />
-              </div>
-              <div>
-                <div className="text-sm font-medium mb-1">型号（Model）</div>
-                <Input
-                  value={publishDraft.model}
-                  onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, model: String(v) } : prev))}
-                />
-              </div>
-              <div>
-                <div className="text-sm font-medium mb-1">质保类型</div>
-                <select
-                  value={publishDraft.warrantyType}
-                  onChange={(e) => setPublishDraft((prev) => (prev ? { ...prev, warrantyType: e.target.value } : prev))}
-                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
-                >
-                  <option value="">无</option>
-                  <option value="Factory warranty">Factory warranty</option>
-                  <option value="Seller warranty">Seller warranty</option>
-                  <option value="No warranty">No warranty</option>
-                </select>
-              </div>
-              <div>
-                <div className="text-sm font-medium mb-1">质保时间</div>
-                <Input
-                  value={publishDraft.warrantyTime}
-                  onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, warrantyTime: String(v) } : prev))}
-                  placeholder="如 90 days / 1 year"
-                />
-              </div>
-            </div>
-
-            {/* 类目属性 */}
-            {categoryAttributes.length > 0 && (
-              <div>
-                <div className="text-sm font-medium mb-2">
-                  类目属性
-                  {categoryAttrLoading && <span className="ml-2 text-xs text-gray-400">加载中...</span>}
-                </div>
-                <div className="border border-gray-100 rounded p-3 space-y-3">
-                  {categoryAttributes
-                    .filter((attr) => attr.id !== 'ITEM_CONDITION')
-                    .map((attr) => (
-                      <div key={attr.id} className="grid grid-cols-12 gap-3 items-center">
-                        <div className="col-span-3 text-sm">
-                          {attr.name}
-                          {attr.required && <span className="text-red-500 ml-1">*</span>}
-                          <div className="text-xs text-gray-400">{attr.id}</div>
-                        </div>
-                        <div className="col-span-9">
-                          {attr.values && attr.values.length > 0 ? (
-                            <select
-                              value={publishDraft.attributeValues[attr.id]?.value_id || ''}
-                              onChange={(e) => {
-                                const val = attr.values?.find((v) => v.id === e.target.value);
-                                setPublishDraft((prev) => {
-                                  if (!prev) return prev;
-                                  return {
-                                    ...prev,
-                                    attributeValues: {
-                                      ...prev.attributeValues,
-                                      [attr.id]: val ? { value_id: val.id, value_name: val.name } : undefined,
-                                    },
-                                  };
-                                });
+                  <div className="border-t border-dashed border-gray-200 pt-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-sm font-medium">SKU（规格，可从 1688 自动识别多个）</span>
+                      <Button
+                        size="small"
+                        variant="text"
+                        theme="primary"
+                        onClick={() =>
+                          setPublishDraft((prev) =>
+                            prev ? { ...prev, skus: [...prev.skus, { title: '', imageUrl: '' }] } : prev
+                          )
+                        }
+                      >
+                        添加 SKU
+                      </Button>
+                    </div>
+                    {publishDraft.skus.length === 0 ? (
+                      <div className="text-xs text-gray-400 mb-2">
+                        未从 1688 识别到 SKU（可能无 1688 商品 ID 或 AK 未配置）。可在「重新获取1688信息」后自动填充，或手动添加。
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {publishDraft.skus.map((sku, idx) => (
+                          <div key={idx} className="flex items-center gap-2 border border-gray-100 rounded-lg p-2 bg-white hover:shadow-sm transition-shadow">
+                            <div
+                              className="w-12 h-12 border rounded overflow-hidden cursor-pointer flex-shrink-0"
+                              onClick={() => {
+                                if (sku.imageUrl) {
+                                  setViewerImages([sku.imageUrl]);
+                                  setViewerIndex(0);
+                                  setViewerVisible(true);
+                                }
                               }}
-                              className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
                             >
-                              <option value="">{attr.required ? '请选择（必填）' : '请选择（可选）'}</option>
-                              {attr.values.map((v) => (
-                                <option key={v.id} value={v.id}>
-                                  {v.name}
-                                </option>
-                              ))}
-                            </select>
-                          ) : attr.value_type === 'number_unit' || attr.value_type === 'number' ? (
-                            <div className="flex gap-2">
+                              {sku.imageUrl ? (
+                                <img src={sku.imageUrl} alt="" className="w-full h-full object-cover" onError={(e) => { (e.currentTarget as HTMLImageElement).src = FALLBACK_IMAGE; }} />
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center text-gray-300 text-xs">无图</div>
+                              )}
+                            </div>
+                            <Input
+                              value={sku.title}
+                              onChange={(v) =>
+                                setPublishDraft((prev) =>
+                                  prev ? { ...prev, skus: prev.skus.map((s, i) => (i === idx ? { ...s, title: String(v) } : s)) } : prev
+                                )
+                              }
+                              placeholder="SKU 标题（型号/规格）"
+                              className="flex-1"
+                            />
+                            <Button
+                              size="small"
+                              variant="text"
+                              theme="danger"
+                              onClick={() =>
+                                setPublishDraft((prev) => (prev ? { ...prev, skus: prev.skus.filter((_, i) => i !== idx) } : prev))
+                              }
+                            >
+                              删
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </Collapse.Panel>
+
+              {/* 重量 / 尺寸 / 质保 */}
+              <Collapse.Panel header="重量 / 尺寸 / 质保" value="physical">
+                <div className="space-y-4">
+                  <div className="grid grid-cols-4 gap-3">
+                    <div>
+                      <div className="text-sm font-medium mb-1">重量（kg）</div>
+                      <InputNumber
+                        value={publishDraft.weightKg}
+                        onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, weightKg: Number(v) || 0 } : prev))}
+                        decimalPlaces={3}
+                        min={0}
+                      />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium mb-1">长（cm）</div>
+                      <InputNumber
+                        value={publishDraft.lengthCm}
+                        onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, lengthCm: Number(v) || 0 } : prev))}
+                        decimalPlaces={1}
+                        min={0}
+                      />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium mb-1">宽（cm）</div>
+                      <InputNumber
+                        value={publishDraft.widthCm}
+                        onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, widthCm: Number(v) || 0 } : prev))}
+                        decimalPlaces={1}
+                        min={0}
+                      />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium mb-1">高（cm）</div>
+                      <InputNumber
+                        value={publishDraft.heightCm}
+                        onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, heightCm: Number(v) || 0 } : prev))}
+                        decimalPlaces={1}
+                        min={0}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-4 gap-4">
+                    <div>
+                      <div className="text-sm font-medium mb-1">品牌</div>
+                      <Input
+                        value={publishDraft.brand}
+                        onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, brand: String(v) } : prev))}
+                      />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium mb-1">型号（Model）</div>
+                      <Input
+                        value={publishDraft.model}
+                        onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, model: String(v) } : prev))}
+                      />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium mb-1">质保类型</div>
+                      <select
+                        value={publishDraft.warrantyType}
+                        onChange={(e) => setPublishDraft((prev) => (prev ? { ...prev, warrantyType: e.target.value } : prev))}
+                        className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm bg-white"
+                      >
+                        <option value="">无</option>
+                        <option value="Factory warranty">Factory warranty</option>
+                        <option value="Seller warranty">Seller warranty</option>
+                        <option value="No warranty">No warranty</option>
+                      </select>
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium mb-1">质保时间</div>
+                      <Input
+                        value={publishDraft.warrantyTime}
+                        onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, warrantyTime: String(v) } : prev))}
+                        placeholder="如 90 days / 1 year"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </Collapse.Panel>
+
+              {/* 类目属性 */}
+              {categoryAttributes.length > 0 && (
+                <Collapse.Panel header="类目属性" value="attrs">
+                  <div className="border border-gray-100 rounded p-3 space-y-3 bg-gray-50/30">
+                    {categoryAttributes
+                      .filter((attr) => attr.id !== 'ITEM_CONDITION')
+                      .map((attr) => (
+                        <div key={attr.id} className="grid grid-cols-12 gap-3 items-center">
+                          <div className="col-span-3 text-sm">
+                            {attr.name}
+                            {attr.required && <span className="text-red-500 ml-1">*</span>}
+                            <div className="text-xs text-gray-400">{attr.id}</div>
+                          </div>
+                          <div className="col-span-9">
+                            {attr.values && attr.values.length > 0 ? (
+                              <select
+                                value={publishDraft.attributeValues[attr.id]?.value_id || ''}
+                                onChange={(e) => {
+                                  const val = attr.values?.find((v) => v.id === e.target.value);
+                                  setPublishDraft((prev) => {
+                                    if (!prev) return prev;
+                                    return {
+                                      ...prev,
+                                      attributeValues: {
+                                        ...prev.attributeValues,
+                                        [attr.id]: val ? { value_id: val.id, value_name: val.name } : undefined,
+                                      },
+                                    };
+                                  });
+                                }}
+                                className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm bg-white"
+                              >
+                                <option value="">{attr.required ? '请选择（必填）' : '请选择（可选）'}</option>
+                                {attr.values.map((v) => (
+                                  <option key={v.id} value={v.id}>
+                                    {v.name}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : attr.value_type === 'number_unit' || attr.value_type === 'number' ? (
+                              <div className="flex gap-2">
+                                <Input
+                                  value={publishDraft.attributeValues[attr.id]?.value_name || ''}
+                                  onChange={(v) =>
+                                    setPublishDraft((prev) => {
+                                      if (!prev) return prev;
+                                      return {
+                                        ...prev,
+                                        attributeValues: {
+                                          ...prev.attributeValues,
+                                          [attr.id]: { value_name: String(v) },
+                                        },
+                                      };
+                                    })
+                                  }
+                                  placeholder={attr.hint || '如 10 cm / 500 g'}
+                                  className="flex-1"
+                                />
+                              </div>
+                            ) : (
                               <Input
                                 value={publishDraft.attributeValues[attr.id]?.value_name || ''}
                                 onChange={(v) =>
@@ -2066,72 +2090,44 @@ export function CandidatesPage() {
                                     };
                                   })
                                 }
-                                placeholder={attr.hint || '如 10 cm / 500 g'}
-                                className="flex-1"
+                                placeholder={attr.hint || '请输入'}
                               />
-                            </div>
-                          ) : (
-                            <Input
-                              value={publishDraft.attributeValues[attr.id]?.value_name || ''}
-                              onChange={(v) =>
-                                setPublishDraft((prev) => {
-                                  if (!prev) return prev;
-                                  return {
-                                    ...prev,
-                                    attributeValues: {
-                                      ...prev.attributeValues,
-                                      [attr.id]: { value_name: String(v) },
-                                    },
-                                  };
-                                })
-                              }
-                              placeholder={attr.hint || '请输入'}
-                            />
-                          )}
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      ))}
+                  </div>
+                </Collapse.Panel>
+              )}
+
+              {/* 商品描述 */}
+              <Collapse.Panel header="商品描述" value="desc">
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-sm font-medium">商品描述</span>
+                    <Button size="small" variant="text" theme="primary" onClick={handleGenerateDescription}>
+                      生成描述
+                    </Button>
+                  </div>
+                  <Textarea
+                    value={publishDraft.description}
+                    onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, description: String(v) } : prev))}
+                    rows={5}
+                    placeholder="西/葡语商品描述"
+                  />
                 </div>
-              </div>
-            )}
+              </Collapse.Panel>
 
-            {/* 描述 */}
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-sm font-medium">商品描述</span>
-                <Button size="small" variant="text" theme="primary" onClick={handleGenerateDescription}>
-                  生成描述
-                </Button>
-              </div>
-              <Textarea
-                value={publishDraft.description}
-                onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, description: String(v) } : prev))}
-                rows={4}
-                placeholder="西/葡语商品描述"
-              />
-            </div>
-
-            {/* 目标国家与利润 */}
-            <div>
-              <div className="text-sm font-medium mb-2">
-                目标国家 / 目标净利润 / 自动反推售价（运费按重量+尺寸自动测算）
-                <span className="text-xs text-gray-400 ml-2">直接填「目标净利润」，系统自动算出上架售价（美客多按净收入要求填净利润）</span>
-              </div>
-              <div className="border border-gray-100 rounded overflow-hidden">
-                <table className="w-full text-sm">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-3 py-2 text-left font-medium text-gray-600">国家</th>
-                      <th className="px-3 py-2 text-left font-medium text-gray-600">目标净利润（USD）</th>
-                      <th className="px-3 py-2 text-left font-medium text-gray-600">反推售价（USD）</th>
-                      <th className="px-3 py-2 text-left font-medium text-gray-600">产品类型</th>
-                      <th className="px-3 py-2 text-left font-medium text-gray-600">净利润</th>
-                      <th className="px-3 py-2 text-left font-medium text-gray-600">利润率</th>
-                      <th className="px-3 py-2 text-left font-medium text-gray-600">ROI</th>
-                      <th className="px-3 py-2 text-left font-medium text-gray-600">佣金比例</th>
-                    </tr>
-                  </thead>
-                  <tbody>
+              {/* 目标国家 / 利润 / 售价 */}
+              <Collapse.Panel header="目标国家 / 利润 / 售价" value="profit">
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm text-gray-500">
+                      运费按重量+尺寸自动测算；直接填「目标净利润」，系统自动算出上架售价。
+                    </div>
+                    {profitLoading && <div className="text-xs text-gray-400">测算中...</div>}
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                     {targetSites.map((site) => {
                       const info = siteInfos[site];
                       const p = profitBySite[site];
@@ -2139,29 +2135,11 @@ export function CandidatesPage() {
                       const siteType = publishDraft.listingTypeBySite[site] ?? publishDraft.listingType;
                       const targetNet = targetNetBySite[site];
                       return (
-                        <tr key={site} className="border-t">
-                          <td className="px-3 py-2">{info ? `${info.name} (${site})` : site}</td>
-                          <td className="px-3 py-2">
-                            <InputNumber
-                              value={targetNet ?? undefined}
-                              onChange={(v) =>
-                                reverseNetProfit(site, Number(v) || 0, {
-                                  purchaseCostCny: publishRow ? publishRow.ali1688_price_cny || 0 : 0,
-                                  weightKg: publishDraft.weightKg,
-                                  lengthCm: publishDraft.lengthCm,
-                                  widthCm: publishDraft.widthCm,
-                                  heightCm: publishDraft.heightCm,
-                                })
-                              }
-                              decimalPlaces={2}
-                              min={0}
-                              style={{ width: 120 }}
-                            />
-                          </td>
-                          <td className="px-3 py-2">
-                            <span className="text-blue-600 font-medium">${sitePrice.toFixed(2)}</span>
-                          </td>
-                          <td className="px-3 py-2">
+                        <div key={site} className="border border-gray-200 rounded-lg p-3 bg-white hover:shadow-sm transition-shadow">
+                          <div className="flex items-center justify-between mb-3 pb-2 border-b border-gray-100">
+                            <div className="font-medium text-sm">
+                              {info?.name} <span className="text-gray-400 text-xs">({site})</span>
+                            </div>
                             <select
                               value={siteType}
                               onChange={(e) =>
@@ -2173,95 +2151,130 @@ export function CandidatesPage() {
                                   };
                                 })
                               }
-                              className="border border-gray-300 rounded px-2 py-1 text-sm"
+                              className="text-xs border border-gray-300 rounded px-1.5 py-0.5 bg-white"
                             >
-                              <option value="gold_special">Classic（gold_special）</option>
-                              <option value="gold_pro">Premium（gold_pro）</option>
+                              <option value="gold_special">Classic</option>
+                              <option value="gold_pro">Premium</option>
                               <option value="gold">Gold</option>
                               <option value="silver">Silver</option>
                             </select>
-                          </td>
-                          <td className="px-3 py-2">
-                            {p ? (
-                              <span className={p.netProfit >= 0 ? 'text-green-600' : 'text-red-600'}>
-                                ${p.netProfit.toFixed(2)}
-                              </span>
-                            ) : (
-                              <span className="text-gray-400">-</span>
-                            )}
-                          </td>
-                          <td className="px-3 py-2">{p ? `${(p.netProfitRate * 100).toFixed(1)}%` : '-'}</td>
-                          <td className="px-3 py-2">{p ? p.roi.toFixed(2) : '-'}</td>
-                          <td className="px-3 py-2">{p && p.listingPriceUsd ? `${(p.costBreakdown.commission / p.listingPriceUsd * 100).toFixed(0)}%` : '-'}</td>
-                        </tr>
+                          </div>
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs text-gray-500">目标净利润</span>
+                              <InputNumber
+                                value={targetNet ?? undefined}
+                                onChange={(v) =>
+                                  reverseNetProfit(site, Number(v) || 0, {
+                                    purchaseCostCny: publishRow ? publishRow.ali1688_price_cny || 0 : 0,
+                                    weightKg: publishDraft.weightKg,
+                                    lengthCm: publishDraft.lengthCm,
+                                    widthCm: publishDraft.widthCm,
+                                    heightCm: publishDraft.heightCm,
+                                  })
+                                }
+                                decimalPlaces={2}
+                                min={0}
+                                style={{ width: 90 }}
+                                size="small"
+                              />
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs text-gray-500">反推售价</span>
+                              <span className="text-blue-600 font-medium">${sitePrice.toFixed(2)}</span>
+                            </div>
+                            <div className="grid grid-cols-4 gap-1 text-xs pt-2 border-t border-gray-100 mt-2">
+                              <div className="text-center">
+                                <div className="text-gray-400">净利润</div>
+                                <div className={p && p.netProfit >= 0 ? 'text-green-600' : 'text-red-600'}>
+                                  {p ? `$${p.netProfit.toFixed(2)}` : '-'}
+                                </div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-gray-400">利润率</div>
+                                <div>{p ? `${(p.netProfitRate * 100).toFixed(1)}%` : '-'}</div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-gray-400">ROI</div>
+                                <div>{p ? p.roi.toFixed(2) : '-'}</div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-gray-400">佣金</div>
+                                <div>{p && p.listingPriceUsd ? `${(p.costBreakdown.commission / p.listingPriceUsd * 100).toFixed(0)}%` : '-'}</div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
                       );
                     })}
-                  </tbody>
-                </table>
-                {profitLoading && <div className="text-xs text-gray-400 px-3 py-2">测算中...</div>}
-              </div>
-            </div>
+                  </div>
+                </div>
+              </Collapse.Panel>
 
-            {/* 上架目标店铺 */}
-            <div>
-              <div className="text-sm font-medium mb-2">选择要上架的目标店铺：</div>
-              <div className="space-y-2 max-h-40 overflow-auto border border-gray-100 rounded p-2">
-                {stores
-                  .filter((s) => s.enabled && s.authorized)
-                  .map((s) => (
-                    <div key={s.id} className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={selectedStoreIds.includes(s.id)}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            setSelectedStoreIds((prev) => [...prev, s.id]);
-                          } else {
-                            setSelectedStoreIds((prev) => prev.filter((id) => id !== s.id));
-                          }
-                        }}
-                      />
-                      <span>{s.nickname}</span>
-                      <Tag size="small">{s.site}</Tag>
+              {/* 目标店铺 / 高级设置 */}
+              <Collapse.Panel header="目标店铺 / 高级设置" value="stores">
+                <div className="space-y-4">
+                  <div>
+                    <div className="text-sm font-medium mb-2">选择要上架的目标店铺：</div>
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-2 max-h-48 overflow-auto border border-gray-100 rounded p-3 bg-gray-50/30">
+                      {stores
+                        .filter((s) => s.enabled && s.authorized)
+                        .map((s) => (
+                          <label key={s.id} className="flex items-center gap-2 cursor-pointer hover:bg-white p-1.5 rounded transition-colors">
+                            <input
+                              type="checkbox"
+                              checked={selectedStoreIds.includes(s.id)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedStoreIds((prev) => [...prev, s.id]);
+                                } else {
+                                  setSelectedStoreIds((prev) => prev.filter((id) => id !== s.id));
+                                }
+                              }}
+                            />
+                            <span className="text-sm">{s.nickname}</span>
+                            <Tag size="small">{s.site}</Tag>
+                          </label>
+                        ))}
                     </div>
-                  ))}
-              </div>
-            </div>
+                  </div>
 
-            <div className="flex items-center gap-2">
-              <Switch value={useCbtCategory} onChange={(v) => setUseCbtCategory(v as boolean)} />
-              <span className="text-sm">使用 CBT 类目前缀（上架失败可关闭）</span>
-            </div>
+                  <div className="flex items-center gap-2">
+                    <Switch value={useCbtCategory} onChange={(v) => setUseCbtCategory(v as boolean)} />
+                    <span className="text-sm">使用 CBT 类目前缀（上架失败可关闭）</span>
+                  </div>
 
-            {/* YouTube 上传 */}
-            <div className="border border-gray-100 rounded p-3">
-              <div className="flex items-center gap-2 mb-2">
-                <Switch value={uploadYoutube} onChange={(v) => setUploadYoutube(v as boolean)} />
-                <span className="text-sm font-medium">上架后上传商品视频到 YouTube</span>
-                {!ytConfigured && <Tag size="small" theme="warning">未授权</Tag>}
-              </div>
-              {uploadYoutube && (
-                <div className="space-y-2">
-                  <div className="text-xs text-gray-500">
-                    填写服务器上视频文件的<strong>绝对路径</strong>。
-                    {!ytConfigured && (
-                      <span className="text-red-500"> 尚未完成 YouTube OAuth 授权，请到「配置中心 → YouTube 上传」完成授权。</span>
+                  <div className="border border-gray-100 rounded p-3">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Switch value={uploadYoutube} onChange={(v) => setUploadYoutube(v as boolean)} />
+                      <span className="text-sm font-medium">上架后上传商品视频到 YouTube</span>
+                      {!ytConfigured && <Tag size="small" theme="warning">未授权</Tag>}
+                    </div>
+                    {uploadYoutube && (
+                      <div className="space-y-2">
+                        <div className="text-xs text-gray-500">
+                          填写服务器上视频文件的<strong>绝对路径</strong>。
+                          {!ytConfigured && (
+                            <span className="text-red-500"> 尚未完成 YouTube OAuth 授权，请到「配置中心 → YouTube 上传」完成授权。</span>
+                          )}
+                        </div>
+                        <input
+                          type="text"
+                          value={youtubeVideoPath}
+                          onChange={(e) => setYoutubeVideoPath(e.target.value)}
+                          placeholder="/data/videos/product_demo.mp4"
+                          className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                      </div>
                     )}
                   </div>
-                  <input
-                    type="text"
-                    value={youtubeVideoPath}
-                    onChange={(e) => setYoutubeVideoPath(e.target.value)}
-                    placeholder="/data/videos/product_demo.mp4"
-                    className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-              )}
-            </div>
 
-            <div className="text-xs text-gray-400 bg-yellow-50 p-2 rounded">
-              提示：确认上架后，系统会按上方预览信息生成 Listing 并发布。建议售价、库存、图片、描述等均可在此修改。
-            </div>
+                  <div className="text-xs text-gray-400 bg-yellow-50 p-2 rounded">
+                    提示：确认上架后，系统会按上方预览信息生成 Listing 并发布。
+                  </div>
+                </div>
+              </Collapse.Panel>
+            </Collapse>
           </div>
         )}
       </Dialog>
