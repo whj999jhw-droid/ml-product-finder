@@ -34,7 +34,7 @@ export interface ListingDraft {
   // 保修（sale_terms）一般可选：仅在调用方显式提供时才发送，默认不强制填写
   warrantyType?: string; // 如 'Factory warranty' / 'No warranty'
   warrantyTime?: string; // 如 '90 days' / '1 year'
-  listing_type_id?: string; // gold_pro / silver / bronze
+  listing_type_id?: string; // CBT: gold_special (Classic) / gold_pro (Premium)
   // 类目属性（ML category attributes），会与系统默认属性合并；相同 id 时外部值优先
   attributes?: Array<{ id: string; value_id?: string; value_name?: string; values?: any[] }>;
   // 多国售价/类型覆盖：若提供，则覆盖默认单条 sites_to_sell，实现逐国家独立定价与 listing_type
@@ -106,7 +106,7 @@ async function resolvePictureId(url: string, token: string): Promise<string | un
   }
 }
 
-export async function createListing(draft: ListingDraft, tokenOverride?: string): Promise<{ itemId: string; permalink: string }> {
+export async function createListing(draft: ListingDraft, tokenOverride?: string): Promise<{ itemId: string; permalink: string; siteItems?: any[] }> {
   // 多店铺：优先用传入的店铺 token；其次按 draft.storeId 取对应店铺 token；最后回退全局 token
   let token = tokenOverride;
   if (!token && draft.storeId) {
@@ -118,12 +118,18 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
     throw new Error('未获取到卖家 write token，请先在「店铺管理」中添加并授权店铺（需含 write scope），或先在设置页完成全局授权');
   }
 
-  // 图片：CBT 必须传 {id}（外部/1688 图先上传图床取 id）
-  const picIds: string[] = [];
+  // 图片：CBT 支持直接传 source URL（官方文档示例），也支持先上传图床取 id。
+  // 优先尝试 source URL，若后续 API 报错再切到 id 模式。
+  const pictures: any[] = [];
   for (const u of draft.pictureUrls || []) {
     const id = await resolvePictureId(u, token);
-    if (id) picIds.push(id);
-    else console.warn(`[Listing] 无法解析/上传图片，已跳过: ${u}`);
+    if (id) {
+      pictures.push({ id });
+    } else if (u.startsWith('http')) {
+      pictures.push({ source: u });
+    } else {
+      console.warn(`[Listing] 无法解析/上传图片，已跳过: ${u}`);
+    }
   }
 
   // attributes：品牌 / 模型 / 成色 / 包裹尺寸重量（CBT 用 PACKAGE_*，不用 shipping.dimensions）
@@ -164,7 +170,7 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
     category_id: draft.category_id,
     available_quantity: draft.available_quantity,
     description: { plain_text: draft.description },
-    pictures: picIds.map((id) => ({ id })),
+    pictures,
     attributes,
     // 仅在有保修信息时发送 sale_terms（保修在 CBT 一般可选）
     ...(saleTerms.length ? { sale_terms: saleTerms } : {}),
@@ -175,7 +181,7 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
             logistic_type: 'remote',
             title: s.title || draft.title,
             price: s.price,
-            listing_type_id: s.listing_type_id || draft.listing_type_id || 'bronze',
+            listing_type_id: s.listing_type_id || draft.listing_type_id || 'gold_special',
             ...(s.attributes?.length ? { attributes: mergeAttributes(s.attributes) } : {}),
           }))
         : [
@@ -184,7 +190,7 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
               logistic_type: 'remote',
               title: draft.title,
               price: draft.price,
-              listing_type_id: draft.listing_type_id || 'bronze',
+              listing_type_id: draft.listing_type_id || 'gold_special',
             },
           ],
   };
@@ -199,12 +205,16 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
   });
   const data = await resp.json();
   if (!resp.ok) {
-    const msg = data?.message || data?.error || '上架失败';
-    const err: any = new Error(`上架失败：${msg}`);
+    const cause = data?.cause?.[0]
+      ? `${data.cause[0].type || ''}: ${data.cause[0].message || data.cause[0].code || ''}`.trim()
+      : '';
+    const msg = data?.message || data?.error || cause || '上架失败';
+    const err: any = new Error(`上架失败 [${resp.status}]: ${msg}${cause ? ` (${cause})` : ''}`);
     err.status = resp.status;
+    err.mlError = data;
     throw err;
   }
-  return { itemId: data.id, permalink: data.permalink };
+  return { itemId: data.id, permalink: data.permalink, siteItems: data.site_items };
 }
 
 // ============ 批量上架发布器（参考文档 listingPublisher 设计）============

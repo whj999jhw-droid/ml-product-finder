@@ -19,6 +19,42 @@ const DB_PATH = process.env.DATABASE_PATH || path.join(DATA_DIR, 'mlfinder.db');
 // db 为 null 时本地数据库（聊天/多租户）功能停用，核心抓取/导出不受影响。
 let db: any = null;
 
+/**
+ * 由数据库中已有字段（上架时间/销量/售价/竞争分）推算趋势备注，
+ * 用于旧库回填与历史候选展示。返回空串表示信息不足。
+ */
+function buildTrendNoteFromDb(r: {
+  ml_listing_date?: string | null;
+  ml_sold_quantity?: number | null;
+  ml_price_usd?: number | null;
+  score_competition?: number | null;
+}): string {
+  const price = Number(r.ml_price_usd) || 0;
+  const sold = Number(r.ml_sold_quantity) || 0;
+  let days = 0;
+  if (r.ml_listing_date) {
+    const dt = new Date(r.ml_listing_date).getTime();
+    if (!isNaN(dt)) days = Math.max(1, Math.floor((Date.now() - dt) / (24 * 60 * 60 * 1000)));
+  }
+  const daily = days ? sold / days : 0;
+
+  const ageTag = days
+    ? days <= 7 ? '近1周新上'
+    : days <= 15 ? '近半月新上'
+    : days <= 30 ? '近1月上架'
+    : `${days}天前上架`
+    : '';
+  const trendTag = daily >= 2 ? `日均${daily.toFixed(1)}单·上涨明显`
+    : daily >= 1 ? `日均${daily.toFixed(1)}单·稳步上涨`
+    : daily >= 0.5 ? `日均${daily.toFixed(1)}单·有动销`
+    : `累计${sold}件`;
+  const priceTag = price ? `售价$${price.toFixed(1)}` : '';
+  const comp = r.score_competition != null ? Number(r.score_competition) : undefined;
+  const compTag = typeof comp === 'number' ? (comp >= 0.65 ? '竞争蓝海' : comp >= 0.5 ? '竞争中等' : '竞争偏红') : '';
+
+  return [ageTag, trendTag, priceTag, compTag].filter(Boolean).join(' · ');
+}
+
 async function initDatabase() {
   try {
     const mod: any = await import('better-sqlite3');
@@ -199,6 +235,8 @@ CREATE TABLE IF NOT EXISTS candidates (
   reject_reason TEXT,
   reviewed_at TEXT,
   published_at TEXT,
+  -- 选入理由/趋势备注（简明展示为何选入：近期上架、日均销量、售价区间、竞争环境）
+  trend_note TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -208,6 +246,7 @@ CREATE INDEX IF NOT EXISTS idx_candidates_status ON candidates(status);
 CREATE INDEX IF NOT EXISTS idx_candidates_site ON candidates(site);
 CREATE INDEX IF NOT EXISTS idx_candidates_score ON candidates(score_total);
 CREATE INDEX IF NOT EXISTS idx_candidates_item ON candidates(ml_item_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_unique ON candidates(site, ml_item_id);
 
 -- 上架任务：一个候选商品可发布到多个店铺
 CREATE TABLE IF NOT EXISTS publish_jobs (
@@ -234,6 +273,7 @@ CREATE TABLE IF NOT EXISTS app_config (
   value TEXT,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
 `);
     // 兼容旧数据库：若 sourcing_runs 表缺少 message 列则补加
     try {
@@ -254,6 +294,30 @@ CREATE TABLE IF NOT EXISTS app_config (
       }
     } catch (e: any) {
       console.warn('[DB] 检查/补加 handling_deadline 列失败:', e?.message || String(e));
+    }
+    // 兼容旧数据库：若 candidates 表缺少 trend_note 列则补加（选入理由/趋势备注）
+    try {
+      const cols = db.prepare("PRAGMA table_info(candidates)").all() as { name: string }[];
+      if (!cols.find((c) => c.name === 'trend_note')) {
+        db.exec("ALTER TABLE candidates ADD COLUMN trend_note TEXT");
+        console.log('[DB] candidates.trend_note 列已添加');
+      }
+      // 回填：为已有候选生成趋势备注（仅 NULL 的）
+      try {
+        const rows = db.prepare("SELECT id, ml_listing_date, ml_sold_quantity, ml_price_usd, score_competition FROM candidates WHERE trend_note IS NULL").all() as any[];
+        if (rows.length) {
+          const upd = db.prepare("UPDATE candidates SET trend_note = @note WHERE id = @id");
+          for (const r of rows) {
+            const note = buildTrendNoteFromDb(r);
+            if (note) upd.run({ id: r.id, note });
+          }
+          console.log(`[DB] 已回填 ${rows.length} 条候选的 trend_note`);
+        }
+      } catch (e: any) {
+        console.warn('[DB] 回填 trend_note 失败（不影响启动）:', e?.message || String(e));
+      }
+    } catch (e: any) {
+      console.warn('[DB] 检查/补加 trend_note 列失败:', e?.message || String(e));
     }
     console.log(`[DB] SQLite initialized at ${DB_PATH}`);
   } catch (e: any) {
@@ -583,11 +647,18 @@ export function insertCandidate(data: any): number {
   const now = new Date().toISOString();
   const cols = Object.keys(data).filter((k) => data[k] !== undefined);
   const placeholders = cols.map((k) => `@${k}`).join(', ');
+  const setSql = cols.map((k) => `${k}=excluded.${k}`).join(', ');
   const stmt = db.prepare(
-    `INSERT INTO candidates (${cols.join(', ')}, created_at, updated_at) VALUES (${placeholders}, @now, @now)`
+    `INSERT INTO candidates (${cols.join(', ')}, created_at, updated_at) VALUES (${placeholders}, @now, @now)
+     ON CONFLICT(site, ml_item_id) DO UPDATE SET ${setSql}, updated_at=excluded.updated_at`
   );
   const result = stmt.run({ ...data, now });
-  return Number(result.lastInsertRowid) || 0;
+  // UPSERT 后通过 site+ml_item_id 查回 id
+  const row = db.prepare('SELECT id FROM candidates WHERE site = @site AND ml_item_id = @ml_item_id').get({
+    site: data.site,
+    ml_item_id: data.ml_item_id,
+  });
+  return row?.id || Number(result.lastInsertRowid) || 0;
 }
 
 export function getCandidates(opts?: {
@@ -693,6 +764,7 @@ export function getPublishJobsByCandidate(candidateId: number): any[] {
   if (!db) return [];
   return db.prepare('SELECT * FROM publish_jobs WHERE candidate_id = ? ORDER BY created_at DESC').all(candidateId);
 }
+
 
 export default db;
 export { db };

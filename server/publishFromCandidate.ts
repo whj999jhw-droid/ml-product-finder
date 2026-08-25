@@ -71,7 +71,7 @@ export function candidateToDraft(opts: CandidateToDraftOptions): ListingDraft {
     height: candidate.heightCm,
     width: candidate.widthCm,
     length: candidate.lengthCm,
-    listing_type_id: 'bronze',
+    listing_type_id: 'gold_special',
   };
 
   if (overrides) {

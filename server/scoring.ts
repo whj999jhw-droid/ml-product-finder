@@ -8,7 +8,7 @@ import type { Ali1688Product } from './ali1688Skill.js';
 import type { ProfitResult } from './profit.js';
 import { checkBannedWords } from './bannedWords.js';
 
-export const SCORE_THRESHOLD = 0.55;
+export const SCORE_THRESHOLD = 0.50;
 
 export interface ScoreBreakdown {
   demand: number; // 0~1
@@ -33,13 +33,13 @@ export function scoreCandidate(input: ScoringInput): ScoreBreakdown {
   const { candidate, source, profit } = input;
   const reasons: string[] = [];
 
-  // 1) 需求强度：基于日均销量
+  // 1) 需求强度：基于日均销量（近期新品销量门槛放宽）
   let demand = 0;
   if (candidate.dailySales >= 5) demand = 1;
-  else if (candidate.dailySales >= 2) demand = 0.8;
-  else if (candidate.dailySales >= 1) demand = 0.6;
-  else if (candidate.dailySales >= 0.5) demand = 0.4;
-  else demand = Math.max(0.1, candidate.dailySales);
+  else if (candidate.dailySales >= 2) demand = 0.85;
+  else if (candidate.dailySales >= 1) demand = 0.7;
+  else if (candidate.dailySales >= 0.5) demand = 0.55;
+  else demand = Math.max(0.25, candidate.dailySales);
   reasons.push(`日均销量 ${candidate.dailySales.toFixed(2)} → 需求分 ${demand.toFixed(2)}`);
 
   // 2) 竞争密度：越低越蓝海；有 1688 downstreamOffer 时优先用
@@ -52,8 +52,8 @@ export function scoreCandidate(input: ScoringInput): ScoreBreakdown {
     else competition = 0.2;
     reasons.push(`1688 下游铺货数 ${downstream} → 竞争分 ${competition.toFixed(2)}`);
   } else {
-    // 无数据时，按 ML 同款价格带推断：售价低、销量高通常竞争更激烈
-    competition = candidate.priceUsd < 15 ? 0.4 : 0.6;
+    // 无数据时默认给中等偏上竞争分，避免过多候选因缺数据被淘汰
+    competition = candidate.priceUsd < 10 ? 0.55 : candidate.priceUsd < 25 ? 0.65 : 0.6;
     reasons.push('无 1688 铺货数据，按价格带估算竞争分');
   }
 

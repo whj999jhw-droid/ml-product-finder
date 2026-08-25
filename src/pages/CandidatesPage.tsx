@@ -48,6 +48,7 @@ interface Candidate {
   ai_evaluation_json?: string;
   status: 'pending' | 'approved' | 'rejected' | 'published';
   reject_reason: string;
+  trend_note?: string;
   weight_kg: number;
   length_cm: number;
   width_cm: number;
@@ -182,6 +183,9 @@ export function CandidatesPage() {
   const [newImageUrl, setNewImageUrl] = useState('');
   const [categoryAttributes, setCategoryAttributes] = useState<CategoryAttribute[]>([]);
   const [categoryAttrLoading, setCategoryAttrLoading] = useState(false);
+  // 上架结果详情
+  const [publishResult, setPublishResult] = useState<any>(null);
+  const [resultOpen, setResultOpen] = useState(false);
 
   const fetchAkStatus = async () => {
     try {
@@ -391,7 +395,7 @@ export function CandidatesPage() {
     const initialListingTypeBySite: Record<string, string> = {};
     for (const site of initialSites) {
       initialPriceBySite[site] = basePrice;
-      initialListingTypeBySite[site] = 'bronze';
+      initialListingTypeBySite[site] = 'gold_special';
     }
     setPublishDraft({
       title: row.ml_title || row.ali1688_title || '',
@@ -409,7 +413,7 @@ export function CandidatesPage() {
       model: '',
       warrantyType: '',
       warrantyTime: '',
-      listingType: 'bronze',
+      listingType: 'gold_special',
       skuTitle: '',
       skuImageUrl: '',
       attributeValues: {},
@@ -601,9 +605,14 @@ export function CandidatesPage() {
       });
       const data = await res.json();
       if (data.success) {
-        MessagePlugin.success(`上架完成：成功 ${data.result.succeeded} 个，失败 ${data.result.failed} 个`);
-        setPublishOpen(false);
-        fetchRows();
+        const r = data.result || {};
+        setPublishResult(r);
+        setResultOpen(true);
+        // 只有成功数>0才关闭预览弹窗并刷新列表
+        if (r.succeeded > 0) {
+          setPublishOpen(false);
+          fetchRows();
+        }
       } else {
         MessagePlugin.error(data.message || '上架失败');
       }
@@ -614,17 +623,74 @@ export function CandidatesPage() {
     }
   };
 
-  // 按 ml_item_id 保留最新一条，避免多次扫描导致同一商品重复展示
+  // 标题相似度去重：提取关键词计算 Jaccard 相似度
+  const titleTokens = (title: string): string[] => {
+    return String(title || '')
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .split(/\s+/)
+      .filter((t) => t.length >= 3 && !/^\d+$/.test(t));
+  };
+  const jaccardSimilarity = (a: string[], b: string[]): number => {
+    const setA = new Set(a);
+    const setB = new Set(b);
+    const intersection = new Set([...setA].filter((x) => setB.has(x)));
+    const union = new Set([...setA, ...setB]);
+    return union.size === 0 ? 0 : intersection.size / union.size;
+  };
+
+  // 去重策略：1) 同一 site+ml_item_id 保留最新；2) 1688 货源链接相同保留最优；3) 标题相似度>0.7 视为重复保留评分高者
   const dedupCandidates = (list: Candidate[]): Candidate[] => {
-    const map = new Map<string, Candidate>();
-    for (const row of list) {
-      const key = `${row.site}|${row.ml_item_id}`;
-      const existing = map.get(key);
-      if (!existing || row.id > existing.id) {
-        map.set(key, row);
+    const byItemId = new Map<string, Candidate>();
+    const by1688Url = new Map<string, Candidate>();
+    const kept: Candidate[] = [];
+    const simThreshold = 0.7;
+
+    // 先按 id 降序，保证较新记录优先
+    const sorted = [...list].sort((a, b) => b.id - a.id);
+
+    for (const row of sorted) {
+      const itemKey = `${row.site}|${row.ml_item_id}`;
+      if (byItemId.has(itemKey)) continue;
+
+      // 1688 货源链接去重
+      const url = row.ali1688_url || '';
+      if (url.startsWith('http')) {
+        const existing1688 = by1688Url.get(url);
+        if (existing1688) {
+          if ((row.score_total || 0) > (existing1688.score_total || 0)) {
+            by1688Url.set(url, row);
+            // 替换 kept 中旧的
+            const idx = kept.findIndex((x) => x.id === existing1688.id);
+            if (idx >= 0) kept[idx] = row;
+          }
+          continue;
+        }
+        by1688Url.set(url, row);
       }
+
+      // 标题相似度去重：与已保留的同行站点商品比较
+      const tokens = titleTokens(row.ml_title || row.ali1688_title || '');
+      const dup = kept.find((k) => {
+        if (k.site !== row.site) return false;
+        const kTokens = titleTokens(k.ml_title || k.ali1688_title || '');
+        return jaccardSimilarity(tokens, kTokens) >= simThreshold;
+      });
+      if (dup) {
+        // 保留评分更高或更新的
+        if ((row.score_total || 0) > (dup.score_total || 0) || row.id > dup.id) {
+          const idx = kept.findIndex((x) => x.id === dup.id);
+          if (idx >= 0) kept[idx] = row;
+        }
+        continue;
+      }
+
+      byItemId.set(itemKey, row);
+      kept.push(row);
     }
-    return Array.from(map.values());
+    // 保持原始列表的相对顺序（按 id 降序）
+    const keptIds = new Set(kept.map((x) => x.id));
+    return list.filter((x) => keptIds.has(x.id));
   };
 
   // 生成默认商品描述（西/葡语模板）
@@ -768,6 +834,20 @@ export function CandidatesPage() {
             {ev.score > 0 && <span className="ml-1 text-gray-500">{ev.score.toFixed(2)}</span>}
             {ev.reason && <div className="mt-1 text-gray-500 truncate max-w-[200px]" title={ev.reason}>{ev.reason}</div>}
           </div>
+        );
+      },
+    },
+    {
+      colKey: 'trend_note',
+      title: '趋势备注',
+      width: 240,
+      ellipsis: true,
+      cell: ({ row }) => {
+        if (!row.trend_note) return <span className="text-gray-300">-</span>;
+        return (
+          <span className="text-xs text-indigo-600 truncate max-w-[220px] inline-block" title={row.trend_note}>
+            {row.trend_note}
+          </span>
         );
       },
     },
@@ -1345,7 +1425,7 @@ export function CandidatesPage() {
                               }
                               className="border border-gray-300 rounded px-2 py-1 text-sm"
                             >
-                              <option value="bronze">Classic（bronze）</option>
+                              <option value="gold_special">Classic（gold_special）</option>
                               <option value="gold_pro">Premium（gold_pro）</option>
                               <option value="gold">Gold</option>
                               <option value="silver">Silver</option>
@@ -1432,6 +1512,113 @@ export function CandidatesPage() {
             <div className="text-xs text-gray-400 bg-yellow-50 p-2 rounded">
               提示：确认上架后，系统会按上方预览信息生成 Listing 并发布。建议售价、库存、图片、描述等均可在此修改。
             </div>
+          </div>
+        )}
+      </Dialog>
+
+      {/* 上架结果详情弹窗 */}
+      <Dialog
+        visible={resultOpen}
+        onClose={() => setResultOpen(false)}
+        header="上架结果详情"
+        width={720}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setResultOpen(false)}>
+              关闭
+            </Button>
+            {publishResult?.succeeded > 0 && (
+              <Button theme="primary" onClick={() => { setResultOpen(false); setPublishOpen(false); fetchRows(); }}>
+                确定
+              </Button>
+            )}
+          </div>
+        }
+      >
+        {publishResult && (
+          <div className="space-y-4 max-h-[70vh] overflow-auto pr-2">
+            <div className="grid grid-cols-5 gap-3 text-center">
+              <div className="bg-gray-50 p-3 rounded">
+                <div className="text-xs text-gray-500">总计</div>
+                <div className="font-medium text-lg">{publishResult.total || 0}</div>
+              </div>
+              <div className="bg-green-50 p-3 rounded">
+                <div className="text-xs text-green-600">成功</div>
+                <div className="font-medium text-lg text-green-700">{publishResult.succeeded || 0}</div>
+              </div>
+              <div className="bg-red-50 p-3 rounded">
+                <div className="text-xs text-red-600">失败</div>
+                <div className="font-medium text-lg text-red-700">{publishResult.failed || 0}</div>
+              </div>
+              <div className="bg-orange-50 p-3 rounded">
+                <div className="text-xs text-orange-600">预检拦截</div>
+                <div className="font-medium text-lg text-orange-700">{publishResult.blocked || 0}</div>
+              </div>
+              <div className="bg-blue-50 p-3 rounded">
+                <div className="text-xs text-blue-600">跳过</div>
+                <div className="font-medium text-lg text-blue-700">{publishResult.skipped || 0}</div>
+              </div>
+            </div>
+
+            {publishResult.results && publishResult.results.length > 0 && (
+              <div>
+                <div className="text-sm font-medium mb-2">各店铺/站点明细</div>
+                <div className="border border-gray-100 rounded overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium text-gray-600">站点</th>
+                        <th className="px-3 py-2 text-left font-medium text-gray-600">店铺</th>
+                        <th className="px-3 py-2 text-left font-medium text-gray-600">结果</th>
+                        <th className="px-3 py-2 text-left font-medium text-gray-600">ML Item ID / 链接</th>
+                        <th className="px-3 py-2 text-left font-medium text-gray-600">失败原因</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {publishResult.results.map((r: any, idx: number) => (
+                        <tr key={idx} className="border-t">
+                          <td className="px-3 py-2">
+                            <Tag size="small">{r.site}</Tag>
+                          </td>
+                          <td className="px-3 py-2">
+                            {stores.find((s) => s.id === r.storeId)?.nickname || r.storeId || '-'}
+                          </td>
+                          <td className="px-3 py-2">
+                            {r.success ? (
+                              <Tag theme="success" size="small">成功</Tag>
+                            ) : r.skipped ? (
+                              <Tag theme="warning" size="small">跳过</Tag>
+                            ) : r.precheckHits?.length ? (
+                              <Tag theme="warning" size="small">预检拦截</Tag>
+                            ) : (
+                              <Tag theme="danger" size="small">失败</Tag>
+                            )}
+                          </td>
+                          <td className="px-3 py-2">
+                            {r.permalink ? (
+                              <a href={r.permalink} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline text-xs">
+                                {r.itemId || '查看'}
+                              </a>
+                            ) : (
+                              <span className="text-gray-400 text-xs">-</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-xs text-red-600 max-w-[250px] break-words">
+                            {r.error || (r.precheckHits?.length ? r.precheckHits.join('; ') : '') || (r.skipped ? r.error : '') || '-'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {(publishResult.blocked > 0 || publishResult.skipped > 0) && (
+              <div className="text-xs text-orange-600 bg-orange-50 p-2 rounded">
+                提示：预检拦截或跳过的站点不会消耗 ML API 配额。请根据失败原因修改商品信息后重试。
+              </div>
+            )}
           </div>
         )}
       </Dialog>

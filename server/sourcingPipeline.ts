@@ -237,7 +237,44 @@ function buildCandidateRow(
     row.score_total = opts.score.total;
   }
   if (opts.aiEvaluation) row.ai_evaluation_json = JSON.stringify(opts.aiEvaluation);
+  // 趋势备注：简明说明为何选入（近期上架 + 上涨趋势 + 售价区间 + 竞争环境）
+  row.trend_note = buildTrendNote(enriched, opts.score?.competition);
   return row;
+}
+
+/**
+ * 生成「趋势备注」：简明展示选入理由。
+ * 维度：上架时间、日均销量/趋势强度、售价区间、竞争环境（若有评分）。
+ */
+function buildTrendNote(
+  enriched: Awaited<ReturnType<typeof enrichCandidate>>,
+  competition?: number
+): string {
+  const days = enriched.daysListed || 0;
+  const daily = enriched.dailySales || 0;
+  const sold = enriched.soldQuantity || 0;
+  const price = enriched.priceUsd || 0;
+
+  const ageTag =
+    days <= 7 ? '近1周新上'
+    : days <= 15 ? '近半月新上'
+    : days <= 30 ? '近1月上架'
+    : `${days}天前上架`;
+
+  const trendTag =
+    daily >= 2 ? `日均${daily.toFixed(1)}单·上涨明显`
+    : daily >= 1 ? `日均${daily.toFixed(1)}单·稳步上涨`
+    : daily >= 0.5 ? `日均${daily.toFixed(1)}单·有动销`
+    : `累计${sold}件`;
+
+  const priceTag = `售价$${price.toFixed(1)}`;
+
+  let compTag = '';
+  if (typeof competition === 'number') {
+    compTag = competition >= 0.65 ? '竞争蓝海' : competition >= 0.5 ? '竞争中等' : '竞争偏红';
+  }
+
+  return [ageTag, trendTag, priceTag, compTag].filter(Boolean).join(' · ');
 }
 
 /**
@@ -295,8 +332,8 @@ async function processOneCandidate(
     adAcosRate: 0.05,
   }, targetNetRate);
 
-  // 如果反推价超过竞品 2 倍，说明利润空间不够，改用竞品价格测算；否则保留反推价以保证目标净利
-  const listingPrice = suggestedPrice > 0 && suggestedPrice <= enriched.priceUsd * 2 ? suggestedPrice : enriched.priceUsd;
+  // 如果反推价超过竞品 3 倍，说明利润空间不够，改用竞品价格测算；否则保留反推价以保证目标净利
+  const listingPrice = suggestedPrice > 0 && suggestedPrice <= enriched.priceUsd * 3 ? suggestedPrice : enriched.priceUsd;
 
   const profit = await calculateProfit({
     site: enriched.site,
@@ -314,7 +351,7 @@ async function processOneCandidate(
   // 2.4 五维评分
   const score = scoreCandidate({ candidate: enriched, source, profit });
   if (!isScorePass(score) || score.total < minScore) {
-    const reason = `评分未通过(total=${score.total}, profit=${score.profit}, compliance=${score.compliance})`;
+    const reason = `评分未通过(total=${score.total.toFixed(2)}, demand=${score.demand.toFixed(2)}, competition=${score.competition.toFixed(2)}, profit=${score.profit.toFixed(2)}, logistics=${score.logistics.toFixed(2)}, compliance=${score.compliance.toFixed(2)})`;
     insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: reason, searchQuery, source, profit, listingPrice, score }));
     return { result: null, reason };
   }
