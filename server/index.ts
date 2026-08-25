@@ -19,6 +19,7 @@ import {
   getSourcingRun,
   getLatestSourcingRun,
   createSourcingRun,
+  updateSourcingRun,
   cleanupStaleSourcingRuns,
   createPublishJob,
 } from './db.js';
@@ -2250,6 +2251,46 @@ app.post('/api/ml/sourcing/run', async (req, res) => {
   }
 });
 
+// 查询最近一次运行状态（供前端进度面板轮询）
+// 注意：必须放在 /:id 之前，否则 Express 会把 latest 当成 id 参数
+app.get('/api/ml/sourcing/runs/latest', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  // 自动清理卡死记录，避免前端一直轮询到 stale running 状态
+  try {
+    cleanupStaleSourcingRuns(30);
+  } catch (e: any) {
+    console.error('[Sourcing] 清理卡死运行记录失败:', e?.message || String(e));
+  }
+  const run = getLatestSourcingRun();
+  if (!run) return res.json({ success: true, run: null });
+  res.json({ success: true, run });
+});
+
+// 手动重置卡死的运行记录为 failed（前端「重置状态」按钮）
+app.post('/api/ml/sourcing/runs/:id/reset', async (req, res) => {
+  const run = getSourcingRun(req.params.id);
+  if (!run) return res.status(404).json({ success: false, message: '运行记录不存在' });
+  if (run.status !== 'running') {
+    return res.json({ success: true, message: '运行记录已结束，无需重置', run });
+  }
+  const now = new Date().toISOString();
+  try {
+    updateSourcingRun(req.params.id, {
+      status: 'failed',
+      finished_at: now,
+      message: '用户手动重置运行状态',
+      error: '用户手动重置运行状态',
+    });
+    const updated = getSourcingRun(req.params.id);
+    res.json({ success: true, message: '已重置运行状态', run: updated });
+  } catch (e: any) {
+    console.error('[Sourcing] 重置运行记录失败:', e);
+    res.status(500).json({ success: false, message: `重置失败: ${e?.message || String(e)}` });
+  }
+});
+
 // 查询运行历史/详情
 app.get('/api/ml/sourcing/runs/:id', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -2257,16 +2298,6 @@ app.get('/api/ml/sourcing/runs/:id', async (req, res) => {
   res.setHeader('Expires', '0');
   const run = getSourcingRun(req.params.id);
   if (!run) return res.status(404).json({ success: false, message: '运行记录不存在' });
-  res.json({ success: true, run });
-});
-
-// 查询最近一次运行状态（供前端进度面板轮询）
-app.get('/api/ml/sourcing/runs/latest', async (req, res) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  res.setHeader('Pragma', 'no-cache');
-  res.setHeader('Expires', '0');
-  const run = getLatestSourcingRun();
-  if (!run) return res.json({ success: true, run: null });
   res.json({ success: true, run });
 });
 

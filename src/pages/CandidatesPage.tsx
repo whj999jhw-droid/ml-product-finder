@@ -277,13 +277,41 @@ export function CandidatesPage() {
         cache: 'no-store',
         headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
       });
+      const contentType = res.headers.get('content-type') || '';
+      // 若后端返回 HTML（如代理错误、静态回退、404 页面），不要直接 res.json() 抛红字
+      if (!contentType.includes('application/json')) {
+        const text = await res.text();
+        const preview = text.slice(0, 120).replace(/\s+/g, ' ');
+        throw new Error(`服务端返回非 JSON 响应（HTTP ${res.status} ${res.statusText}）：${preview}`);
+      }
       const data = await res.json();
       if (data.success) {
         setLatestRun(data.run);
         setRunPollError(null);
+      } else {
+        // 业务失败：比如运行记录不存在，不算轮询错误，只记日志
+        console.warn('[LatestRun]', data.message);
       }
     } catch (e: any) {
-      setRunPollError(`轮询状态失败: ${e?.message || '网络错误'}`);
+      // 连续失败时给出诊断提示，但不被红字 scare error 占满
+      setRunPollError(`状态同步异常：${e?.message || '网络错误'}（请确认后端地址/端口正确）`);
+    }
+  };
+
+  const resetRunStatus = async () => {
+    if (!latestRun?.id) return;
+    try {
+      const res = await fetch(`/api/ml/sourcing/runs/${latestRun.id}/reset`, { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        MessagePlugin.success('已重置运行状态');
+        setLatestRun(data.run);
+        setRunPollError(null);
+      } else {
+        MessagePlugin.warning(data.message || '重置失败');
+      }
+    } catch (e: any) {
+      MessagePlugin.error(`重置失败：${e?.message || '网络错误'}`);
     }
   };
 
@@ -1370,6 +1398,11 @@ export function CandidatesPage() {
               运行时间较长，可能卡在 ML/1688 网络请求，请检查服务器日志
             </span>
           )}
+          {isStuck && (
+            <Button size="small" variant="outline" theme="warning" onClick={resetRunStatus}>
+              重置状态
+            </Button>
+          )}
         </div>
         <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
           <div>
@@ -1394,7 +1427,12 @@ export function CandidatesPage() {
           </div>
         </div>
         {runPollError && (
-          <div className="text-xs text-red-600 bg-red-50 p-2 rounded">{runPollError}</div>
+          <div className="flex items-start justify-between gap-2 text-xs text-amber-700 bg-amber-50 p-2 rounded">
+            <span>{runPollError}</span>
+            <Button size="small" variant="text" theme="primary" onClick={fetchLatestRun}>
+              重试
+            </Button>
+          </div>
         )}
         {latestRun.error && (
           <div className="text-xs text-red-600 bg-red-50 p-2 rounded">{latestRun.error}</div>
