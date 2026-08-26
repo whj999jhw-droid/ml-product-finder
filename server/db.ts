@@ -237,6 +237,8 @@ CREATE TABLE IF NOT EXISTS candidates (
   published_at TEXT,
   -- 选入理由/趋势备注（简明展示为何选入：近期上架、日均销量、售价区间、竞争环境）
   trend_note TEXT,
+  -- 来源标记：recent=近期新上 / trend=官方热搜上升品 / bestseller=类目热销榜
+  source_tag TEXT,
   -- 卖家自定义 SKU 编号（上架时自动生成，便于与美客多后台 seller_sku 对应追踪）
   seller_sku TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -357,6 +359,11 @@ CREATE TABLE IF NOT EXISTS app_config (
       if (!cols.find((c) => c.name === 'seller_sku')) {
         db.exec("ALTER TABLE candidates ADD COLUMN seller_sku TEXT");
         console.log('[DB] candidates.seller_sku 列已添加');
+      }
+      // 兼容旧数据库：若 candidates 表缺少 source_tag 列则补加
+      if (!cols.find((c) => c.name === 'source_tag')) {
+        db.exec("ALTER TABLE candidates ADD COLUMN source_tag TEXT");
+        console.log('[DB] candidates.source_tag 列已添加');
       }
     } catch (e: any) {
       console.warn('[DB] 检查/补加 trend_note/seller_sku 列失败:', e?.message || String(e));

@@ -6,11 +6,14 @@
  */
 import {
   searchWithHighlightsFallback,
+  searchProductsByQuery,
   fetchProductDetails,
   fetchProductItems,
   getExchangeRate,
+  fetchHighlightsByCategory,
 } from './mercadolibre.js';
 import { getAllStores, ensureStoreToken } from './stores.js';
+import { getTrends, type TrendResult } from './trends.js';
 
 /**
  * 解析一个用于扫描的店铺 token。
@@ -52,6 +55,13 @@ export interface ScannerOptions {
   minDailySales?: number; // 日均销量门槛，默认 0.5
   onProgress?: (p: ScanProgress) => void; // 进度回调
   scanTimeoutMs?: number; // 整体扫描超时，默认 5 分钟
+  /** 扫描模式：
+   *  - 'recent'   （默认）近期新上 + 有销量（原逻辑）
+   *  - 'trend'    官方趋势词上升品：对每个热搜词调 /search?q=，命中"增长最快"搜索
+   *  - 'bestseller' 类目 Best Sellers 热销榜：直接调 /highlights，放宽时间门槛
+   *  - 'all'      三种来源一起跑（新增候选合并去重） */
+  mode?: 'recent' | 'trend' | 'bestseller' | 'all';
+  trendLimit?: number; // 趋势词模式取前 N 个热搜词，默认 20
 }
 
 export interface RawCandidate {
@@ -76,6 +86,12 @@ export interface RawCandidate {
   daysListed: number;
   dailySales: number;
   rawItem: any;
+  /** 来源标记：recent=近期新上，trend=官方趋势词上升品，bestseller=类目热销榜 */
+  sourceTag?: 'recent' | 'trend' | 'bestseller';
+  /** 趋势词名次（trend 模式有效）：热搜第 N 名 */
+  trendRank?: number;
+  /** 趋势词原文（trend 模式有效） */
+  trendKeyword?: string;
 }
 
 const DEFAULT_SITES = ['MLM', 'MLB', 'MLC', 'MCO'];
@@ -219,6 +235,163 @@ function normalizeItem(site: string, item: any, categoryName: string, rates: Rec
 }
 
 /**
+ * 模式 A：官方趋势词「上升品」扫描。
+ * 对每个站点的官方热搜词（/trends）调 /search?q=keyword，把结果作为"上升趋势候选"。
+ * 官方 trends 数组前 10 条即"最近 2 周增长最快"的搜索，直接命中上升需求。
+ */
+async function scanByTrends(
+  opts: ScannerOptions,
+  ctx: {
+    rates: Record<string, number>;
+    scanToken?: string;
+    onProgress?: (p: ScanProgress) => void;
+    report: (msg: string, extra?: Partial<ScanProgress>) => void;
+  }
+): Promise<{ candidates: RawCandidate[]; totalScanned: number; errors: string[] }> {
+  const sites = opts.sites || DEFAULT_SITES;
+  const trendLimit = opts.trendLimit ?? 20;
+  const limitPerKeyword = Math.min(opts.limitPerCategory ?? 20, 20);
+  const all: RawCandidate[] = [];
+  const errors: string[] = [];
+  let totalScanned = 0;
+
+  for (const site of sites) {
+    ctx.report(`[${site}] 获取官方热搜趋势词（上升品类）...`);
+    let trends: TrendResult[] = [];
+    try {
+      trends = await getTrends(site, trendLimit);
+    } catch (e: any) {
+      const msg = `[${site}] 获取趋势词失败: ${e?.message || String(e)}`.slice(0, 200);
+      console.warn('[SourcingScanner]', msg);
+      errors.push(msg);
+    }
+    if (!trends.length) {
+      ctx.report(`[${site}] 无趋势词（可能 token 未授权 / 该站点不支持），跳过`);
+      continue;
+    }
+    ctx.report(`[${site}] 共 ${trends.length} 个趋势词，开始按词搜索上升品...`);
+    for (let i = 0; i < trends.length; i++) {
+      const t = trends[i];
+      ctx.report(`[${site}] 趋势词 ${i + 1}/${trends.length}: ${t.keyword}${t.translation ? ` (${t.translation})` : ''}`, { totalScanned });
+      try {
+        const items = await searchProductsByQuery(site, t.keyword, limitPerKeyword, 0, ctx.scanToken);
+        totalScanned += items.length;
+        for (const item of items) {
+          const c = normalizeItem(site, item, item.category_name || t.keyword, ctx.rates);
+          if (!c) continue;
+          // 趋势词来源：放宽时间门槛（上升品不一定近30天上架），但要求有销量/价格在范围内
+          if (c.priceUsd <= 0) continue;
+          if (c.priceUsd < (opts.minPriceUsd ?? 5) || c.priceUsd > (opts.maxPriceUsd ?? 50)) continue;
+          if (c.soldQuantity < (opts.minSold ?? 1)) continue;
+          all.push({
+            ...c,
+            sourceTag: 'trend',
+            trendRank: t.index,
+            trendKeyword: t.keyword,
+          });
+        }
+      } catch (err: any) {
+        const msg = `[${site}/trend:${t.keyword}] ${err?.message || String(err)}`.slice(0, 200);
+        console.warn('[SourcingScanner]', msg);
+        errors.push(msg);
+      }
+      await sleep(500);
+    }
+  }
+  return { candidates: all, totalScanned, errors };
+}
+
+/**
+ * 模式 B：类目 Best Sellers 热销榜扫描。
+ * 直接调官方 /highlights/{site}/category/{cat}，命中"当前卖得最好"的商品。
+ * 与 recent 模式不同：热销榜不要求近30天上架，放宽时间/新品门槛，价格>0 即通过。
+ */
+async function scanByBestSellers(
+  opts: ScannerOptions,
+  ctx: {
+    rates: Record<string, number>;
+    scanToken?: string;
+    onProgress?: (p: ScanProgress) => void;
+    report: (msg: string, extra?: Partial<ScanProgress>) => void;
+  }
+): Promise<{ candidates: RawCandidate[]; totalScanned: number; errors: string[] }> {
+  const sites = opts.sites || DEFAULT_SITES;
+  const limitPerCategory = Math.min(opts.limitPerCategory ?? 20, 20);
+  const all: RawCandidate[] = [];
+  const errors: string[] = [];
+  let totalScanned = 0;
+
+  for (const site of sites) {
+    const categories = opts.categories?.length ? opts.categories : (DEFAULT_CATEGORIES[site] || []);
+    ctx.report(`[${site}] 开始扫描类目 Best Sellers（热销榜），共 ${categories.length} 个分类...`, { totalScanned });
+    for (let idx = 0; idx < categories.length; idx++) {
+      const cat = categories[idx];
+      ctx.report(`[${site}] 热销榜 ${idx + 1}/${categories.length}: ${cat.name}`, { totalScanned });
+      try {
+        const highlights = await fetchHighlightsByCategory(site, cat.id);
+        const productIds = highlights
+          .filter((h: any) => h.type === 'PRODUCT' || h.type === 'ITEM')
+          .slice(0, limitPerCategory)
+          .map((h: any) => h.id);
+        totalScanned += productIds.length;
+        for (const pid of productIds) {
+          try {
+            const productDetail = await fetchProductDetails(pid, ctx.scanToken);
+            const productItems = await fetchProductItems(pid, 5, ctx.scanToken);
+            for (const it of productItems) {
+              if (!it.id && it.item_id) it.id = it.item_id;
+              if (!it.title && it.name) it.title = it.name;
+              if (!it.title && it.family_name) it.title = it.family_name;
+              if (!it.title && productDetail?.name) it.title = productDetail.name;
+              if (!it.thumbnail && productDetail?.pictures?.[0]) {
+                it.thumbnail = productDetail.pictures[0].url || productDetail.pictures[0].secure_url;
+              }
+              if (!it.pictures && productDetail?.pictures) it.pictures = productDetail.pictures;
+              if (!it.start_time && !it.date_created) {
+                it.start_time = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+              }
+              if (!it.category_id) it.category_id = cat.id;
+              let enriched = it;
+              const priceUsable = typeof it.price === 'number' && it.price > 0;
+              if (it.id && (!priceUsable || !it.sold_quantity)) {
+                try {
+                  const { fetchItemDetails } = await import('./mercadolibre.js');
+                  const detail = await fetchItemDetails(String(it.id), ctx.scanToken);
+                  if (detail) enriched = { ...it, ...detail, _fromHighlights: true };
+                } catch {
+                  /* ignore */
+                }
+              }
+              const c = normalizeItem(site, { ...enriched, _fromHighlights: true }, cat.name, ctx.rates);
+              if (!c) continue;
+              // Best Sellers 来源：价格>0 即通过，放宽时间/销量门槛（热门≠新品）
+              if (c.priceUsd <= 0) continue;
+              const effSold = c.soldQuantity > 0 ? c.soldQuantity : 1;
+              all.push({
+                ...c,
+                soldQuantity: effSold,
+                condition: c.condition || 'new',
+                sourceTag: 'bestseller',
+                dailySales: effSold / Math.max(1, c.daysListed),
+              });
+            }
+          } catch {
+            /* ignore single product */
+          }
+          await sleep(300);
+        }
+      } catch (err: any) {
+        const msg = `[${site}/${cat.id}] ${err?.message || String(err)}`.slice(0, 200);
+        console.warn('[SourcingScanner]', msg);
+        errors.push(msg);
+      }
+      await sleep(500);
+    }
+  }
+  return { candidates: all, totalScanned, errors };
+}
+
+/**
  * 扫描「近期新上 + 有销量」的商品。
  * 每个站点按分类串行，避免触发 ML 限速；分类内部批量拉取。
  */
@@ -257,66 +430,77 @@ export async function scanNewRisingProducts(
     const errors: string[] = [];
     let totalScanned = 0;
 
-    for (const site of sites) {
-      const categories = opts.categories?.length ? opts.categories : (DEFAULT_CATEGORIES[site] || []);
-      report(`开始扫描站点 ${site}，共 ${categories.length} 个分类...`, { totalScanned });
-      for (let idx = 0; idx < categories.length; idx++) {
-        const cat = categories[idx];
-        report(`[${site}] 扫描分类 ${idx + 1}/${categories.length}: ${cat.name}`, { totalScanned });
-        try {
-          const res = await searchWithHighlightsFallback(site, cat.id, limitPerCategory, 0, scanToken);
-          const results = res.items;
-          const fromHighlights = res.fromHighlights;
-          totalScanned += results.length;
-          report(`[${site}/${cat.name}] 获取 ${results.length} 个结果${fromHighlights ? '（highlights 兜底）' : ''}`, { totalScanned });
-          // 统计本分类被过滤原因，便于调试 highlights 数据
-          const reasons: Record<string, number> = {};
-          for (const item of results) {
-            const c = normalizeItem(site, item, cat.name, rates);
-            if (!c) { reasons['normalize_null'] = (reasons['normalize_null'] || 0) + 1; continue; }
-            // highlights 兜底的货源是「长期热门」，没有「近30天新品」概念，
-            // 且 /products/{id}/items 返回的 item 常缺少 sold_quantity/condition，
-            // 因此放宽过滤：价格>0、能上 Best Sellers 默认有销量、condition 为空默认可通过
-            if (item._fromHighlights) {
-              // highlights 是官方 Best Sellers，/products/{id}/items 返回的 item
-              // 常缺少 sold_quantity/condition，且价格分布广。这里只排除价格未转换成功的商品，
-              // 让后端 1688 匹配 + 五维评分去淘汰，避免扫描阶段把候选全部刷掉。
-              if (c.priceUsd <= 0) {
-                reasons['price_zero'] = (reasons['price_zero'] || 0) + 1;
-                logPriceDebug(item, site, cat.name);
+    const mode = opts.mode || 'recent';
+    const ctx = { rates, scanToken, onProgress, report };
+
+    // recent 模式（原逻辑）：近期新上 + 有销量，按分类扫 /search 并 highlights 兜底
+    async function scanRecent(): Promise<void> {
+      for (const site of sites) {
+        const categories = opts.categories?.length ? opts.categories : (DEFAULT_CATEGORIES[site] || []);
+        report(`开始扫描站点 ${site}，共 ${categories.length} 个分类...`, { totalScanned });
+        for (let idx = 0; idx < categories.length; idx++) {
+          const cat = categories[idx];
+          report(`[${site}] 扫描分类 ${idx + 1}/${categories.length}: ${cat.name}`, { totalScanned });
+          try {
+            const res = await searchWithHighlightsFallback(site, cat.id, limitPerCategory, 0, scanToken);
+            const results = res.items;
+            const fromHighlights = res.fromHighlights;
+            totalScanned += results.length;
+            report(`[${site}/${cat.name}] 获取 ${results.length} 个结果${fromHighlights ? '（highlights 兜底）' : ''}`, { totalScanned });
+            const reasons: Record<string, number> = {};
+            for (const item of results) {
+              const c = normalizeItem(site, item, cat.name, rates);
+              if (!c) { reasons['normalize_null'] = (reasons['normalize_null'] || 0) + 1; continue; }
+              if (item._fromHighlights) {
+                if (c.priceUsd <= 0) {
+                  reasons['price_zero'] = (reasons['price_zero'] || 0) + 1;
+                  logPriceDebug(item, site, cat.name);
+                  continue;
+                }
+                const effSold = c.soldQuantity > 0 ? c.soldQuantity : 1;
+                const effCondition = c.condition || 'new';
+                all.push({ ...c, soldQuantity: effSold, condition: effCondition, dailySales: effSold / Math.max(1, c.daysListed), sourceTag: 'recent' });
                 continue;
               }
-              const effSold = c.soldQuantity > 0 ? c.soldQuantity : 1;
-              const effCondition = c.condition || 'new';
-              const corrected = { ...c, soldQuantity: effSold, condition: effCondition, dailySales: effSold / Math.max(1, c.daysListed) };
-              all.push(corrected);
-              continue;
+              if (new Date(c.listingDate) < cutoff) continue;
+              if (c.soldQuantity < minSold) continue;
+              if (c.priceUsd < minPriceUsd || c.priceUsd > maxPriceUsd) continue;
+              if (c.dailySales < minDailySales) continue;
+              if (c.condition && c.condition !== 'new') continue;
+              all.push({ ...c, sourceTag: 'recent' });
             }
-            // 过滤：近 N 天、有销量、价格区间
-            if (new Date(c.listingDate) < cutoff) continue;
-            if (c.soldQuantity < minSold) continue;
-            if (c.priceUsd < minPriceUsd || c.priceUsd > maxPriceUsd) continue;
-            if (c.dailySales < minDailySales) continue;
-            // 仅 new（避免二手/翻新品）
-            if (c.condition && c.condition !== 'new') continue;
-            all.push(c);
+            if (Object.keys(reasons).length) {
+              console.log(`[SourcingScanner] [${site}/${cat.name}] 过滤原因统计:`, reasons);
+            }
+          } catch (err: any) {
+            const msg = `[${site}/${cat.id}] ${err?.message || String(err)}`.slice(0, 200);
+            console.warn('[SourcingScanner]', msg);
+            errors.push(msg);
           }
-          if (Object.keys(reasons).length) {
-            console.log(`[SourcingScanner] [${site}/${cat.name}] 过滤原因统计:`, reasons);
-          }
-        } catch (err: any) {
-          const msg = `[${site}/${cat.id}] ${err?.message || String(err)}`.slice(0, 200);
-          console.warn('[SourcingScanner]', msg);
-          errors.push(msg);
+          await sleep(600);
         }
-        // 分类间限速，降低被封概率
-        await sleep(600);
       }
     }
 
-    // 按 itemId 去重，保留第一次出现（站点/分类优先级由调用顺序决定）
+    // 按 mode 调度三种来源
+    const runModes: Array<'recent' | 'trend' | 'bestseller'> =
+      mode === 'all' ? ['recent', 'trend', 'bestseller'] : [mode];
+    for (const m of runModes) {
+      if (m === 'recent') await scanRecent();
+      else if (m === 'trend') {
+        const r = await scanByTrends(opts, ctx);
+        all.push(...r.candidates); totalScanned += r.totalScanned; errors.push(...r.errors);
+      } else if (m === 'bestseller') {
+        const r = await scanByBestSellers(opts, ctx);
+        all.push(...r.candidates); totalScanned += r.totalScanned; errors.push(...r.errors);
+      }
+    }
+
+    // 按 itemId 去重，保留第一次出现（sourceTag 优先级：trend > bestseller > recent）
     const seen = new Set<string>();
-    const unique = all.filter((c) => {
+    const priority: Record<string, number> = { trend: 0, bestseller: 1, recent: 2 };
+    const sorted = [...all].sort((a, b) => (priority[a.sourceTag || 'recent'] - priority[b.sourceTag || 'recent']));
+    const unique = sorted.filter((c) => {
       if (seen.has(c.itemId)) return false;
       seen.add(c.itemId);
       return true;

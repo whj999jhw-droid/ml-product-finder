@@ -50,6 +50,7 @@ interface Candidate {
   status: 'pending' | 'approved' | 'rejected' | 'published';
   reject_reason: string;
   trend_note?: string;
+  source_tag?: 'recent' | 'trend' | 'bestseller';
   weight_kg: number;
   length_cm: number;
   width_cm: number;
@@ -158,6 +159,7 @@ export function CandidatesPage() {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<string>('');
   const [running, setRunning] = useState(false);
+  const [scanMode, setScanMode] = useState<string>('all');
   const [stores, setStores] = useState<Store[]>([]);
   const [selectedStoreIds, setSelectedStoreIds] = useState<string[]>([]);
   const [publishOpen, setPublishOpen] = useState(false);
@@ -397,7 +399,7 @@ export function CandidatesPage() {
       const res = await fetch('/api/ml/sourcing/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ maxCandidatesToSource: 30, targetNetRate: 0.15 }),
+        body: JSON.stringify({ maxCandidatesToSource: 30, targetNetRate: 0.15, mode: scanMode }),
       });
       const data = await res.json();
       if (data.success && data.runId) {
@@ -1243,6 +1245,20 @@ export function CandidatesPage() {
     },
     { colKey: 'site', title: '站点', width: 80 },
     {
+      colKey: 'source_tag',
+      title: '来源',
+      width: 110,
+      cell: ({ row }) => {
+        const map: Record<string, { label: string; theme: any }> = {
+          trend: { label: '🔥热搜上升', theme: 'warning' },
+          bestseller: { label: '🏆热销榜', theme: 'danger' },
+          recent: { label: '🆕近期新上', theme: 'success' },
+        };
+        const s = map[row.source_tag || 'recent'] || map.recent;
+        return <Tag theme={s.theme} size="small">{s.label}</Tag>;
+      },
+    },
+    {
       colKey: 'ml_category_name',
       title: '类目',
       width: 180,
@@ -1474,6 +1490,17 @@ export function CandidatesPage() {
               <Button theme="primary" loading={running} onClick={handleRun}>
                 立即扫描选品
               </Button>
+              <Select
+                value={scanMode}
+                onChange={(v) => setScanMode(v as string)}
+                options={[
+                  { label: '全部来源（推荐）', value: 'all' },
+                  { label: '近期新上+有销量', value: 'recent' },
+                  { label: '🔥官方热搜上升品', value: 'trend' },
+                  { label: '🏆类目热销榜', value: 'bestseller' },
+                ]}
+                style={{ width: 180 }}
+              />
               <Button variant="outline" onClick={fetchRows}>
                 刷新
               </Button>

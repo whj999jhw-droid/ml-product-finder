@@ -239,6 +239,8 @@ function buildCandidateRow(
   if (opts.aiEvaluation) row.ai_evaluation_json = JSON.stringify(opts.aiEvaluation);
   // 趋势备注：简明说明为何选入（近期上架 + 上涨趋势 + 售价区间 + 竞争环境）
   row.trend_note = buildTrendNote(enriched, opts.score?.competition);
+  // 来源标记（recent / trend / bestseller）
+  row.source_tag = enriched.sourceTag || 'recent';
   return row;
 }
 
@@ -254,6 +256,14 @@ function buildTrendNote(
   const daily = enriched.dailySales || 0;
   const sold = enriched.soldQuantity || 0;
   const price = enriched.priceUsd || 0;
+
+  // 来源标签（模式 A/B/recent 一目了然）
+  const sourceTag =
+    enriched.sourceTag === 'trend'
+      ? `🔥官方热搜第${enriched.trendRank ?? '?'}名${enriched.trendKeyword ? `(${enriched.trendKeyword})` : ''}`
+      : enriched.sourceTag === 'bestseller'
+      ? '🏆类目热销榜'
+      : '🆕近期新上';
 
   const ageTag =
     days <= 7 ? '近1周新上'
@@ -274,7 +284,7 @@ function buildTrendNote(
     compTag = competition >= 0.65 ? '竞争蓝海' : competition >= 0.5 ? '竞争中等' : '竞争偏红';
   }
 
-  return [ageTag, trendTag, priceTag, compTag].filter(Boolean).join(' · ');
+  return [sourceTag, ageTag, trendTag, priceTag, compTag].filter(Boolean).join(' · ');
 }
 
 /**

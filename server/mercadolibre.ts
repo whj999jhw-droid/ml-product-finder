@@ -1642,6 +1642,71 @@ export async function searchProductsByCategory(
 }
 
 /**
+ * 按关键词搜索（趋势词扫描模式用）。
+ * 复用 searchProductsByCategory 的底层策略链（官方 API → q 参数 → token → 网站抓取），
+ * 仅把 category 过滤换成 q=keyword 自由文本查询。
+ */
+export async function searchProductsByQuery(
+  siteId: string,
+  query: string,
+  limit: number = 20,
+  offset: number = 0,
+  accessTokenOverride?: string
+): Promise<any[]> {
+  const authH = accessTokenOverride ? { Authorization: `Bearer ${accessTokenOverride}` } : {};
+  const apiUrl = `${getApiBase()}/sites/${siteId}/search?q=${encodeURIComponent(query)}&limit=${limit}&offset=${offset}`;
+  try {
+    const data = await httpsGet(apiUrl, authH);
+    if (data?.results && data.results.length > 0) return data.results;
+    // 无结果也尝试策略1b（加 category 空过滤有时能绕过部分 403）
+    return [];
+  } catch (err1: any) {
+    const err1Msg = err1.message?.slice(0, 120) || '';
+    console.warn(`[ML Search] 关键词搜索失败 (${query}): ${err1Msg}`);
+    if (err1Msg.includes('403') && mlAccessToken) {
+      const effToken = accessTokenOverride || mlAccessToken;
+      try {
+        const urlWithToken = `${getApiBase()}/sites/${siteId}/search?q=${encodeURIComponent(query)}&limit=${limit}&offset=${offset}&access_token=${encodeURIComponent(effToken)}`;
+        const data2 = await httpsGet(urlWithToken, authH);
+        if (data2?.results && data2.results.length > 0) return data2.results;
+      } catch (e2: any) {
+        console.warn(`[ML Search] 关键词搜索(token)失败 (${query}): ${e2.message?.slice(0, 80)}`);
+      }
+      // 回退网站抓取（按关键词构造 ML 网站搜索 URL）
+      try {
+        const siteDomain = siteId === 'MLM' ? 'listado.mercadolibre.com.mx' : 'lista.mercadolivre.com.br';
+        const webUrl = `https://${siteDomain}/${encodeURIComponent(query)}`;
+        const html = await httpsGetRaw(webUrl);
+        const stateMatch = html.match(/window\.__PRELOADED_STATE__\s*=\s*(\{[\s\S]*?\});\s*<\/script>/);
+        if (stateMatch) {
+          const state = JSON.parse(stateMatch[1]);
+          const results = state?.initialState?.results?.results ?? state?.components?.results?.results ?? [];
+          if (Array.isArray(results) && results.length) {
+            return results.map((r: any) => ({
+              id: r.id,
+              title: r.title,
+              price: r.price?.offer?.price ?? r.price?.amount ?? 0,
+              currency_id: r.price?.currency_id ?? (siteId === 'MLM' ? 'MXN' : 'BRL'),
+              sold_quantity: r.sold_quantity ?? 0,
+              available_quantity: r.available_quantity ?? 0,
+              category_id: r.category_id ?? '',
+              permalink: r.permalink ?? '',
+              thumbnail: r.thumbnail ?? '',
+              seller: r.seller ?? {},
+              condition: r.condition ?? 'new',
+              start_time: r.start_time ?? new Date(Date.now() - 7 * 864e5).toISOString(),
+            }));
+          }
+        }
+      } catch (e3: any) {
+        console.warn(`[ML Search] 关键词搜索(网站)失败 (${query}): ${e3.message?.slice(0, 80)}`);
+      }
+    }
+    return [];
+  }
+}
+
+/**
  * 带 highlights 兜底的搜索。
  * 当官方 /search 被云服务器 IP 封锁（403）时，回退到 /highlights 品类 Best Sellers
  * （服务器 IP 可访问），返回与 /search results 同构的 item 数组，并在每条上标记
@@ -1756,7 +1821,7 @@ function getProductPermalink(siteId: string, productId: string): string {
  * 获取品类 Best Sellers（销量排行）产品 ID 列表
  * 这是 /search 被封锁时的主要替代数据源
  */
-async function fetchHighlightsByCategory(siteId: string, categoryId: string): Promise<Array<{ id: string; position: number; type: string }>> {
+export async function fetchHighlightsByCategory(siteId: string, categoryId: string): Promise<Array<{ id: string; position: number; type: string }>> {
   const url = `${getApiBase()}/highlights/${siteId}/category/${categoryId}`;
   console.log(`[ML Highlights] 获取品类 Best Sellers: ${siteId}/${categoryId}`);
   const data = await httpsGet(url);
