@@ -328,9 +328,13 @@ CREATE TABLE IF NOT EXISTS app_config (
     } catch (e: any) {
       console.warn('[DB] 检查/补加 handling_deadline 列失败:', e?.message || String(e));
     }
-    // 兼容旧数据库：若 candidates 表缺少 trend_note 列则补加（选入理由/趋势备注）
+    // 兼容旧数据库：若 candidates 表缺少 trend_note / ai_evaluation_json 列则补加
     try {
       const cols = db.prepare("PRAGMA table_info(candidates)").all() as { name: string }[];
+      if (!cols.find((c) => c.name === 'ai_evaluation_json')) {
+        db.exec("ALTER TABLE candidates ADD COLUMN ai_evaluation_json TEXT");
+        console.log('[DB] candidates.ai_evaluation_json 列已添加');
+      }
       if (!cols.find((c) => c.name === 'trend_note')) {
         db.exec("ALTER TABLE candidates ADD COLUMN trend_note TEXT");
         console.log('[DB] candidates.trend_note 列已添加');
