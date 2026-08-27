@@ -55,7 +55,7 @@ export interface ScannerOptions {
   limitPerCategory?: number; // 每个分类拉取数，默认 50
   minDailySales?: number; // 日均销量门槛，默认 0.5
   onProgress?: (p: ScanProgress) => void; // 进度回调
-  scanTimeoutMs?: number; // 整体扫描超时，默认 5 分钟
+  scanTimeoutMs?: number; // 整体扫描超时，默认 30 分钟（mode='all' 扫描量大，15 分钟易超时）
   /** 扫描模式：
    *  - 'recent'   （默认）近期新上 + 有销量。代理感知：有住宅代理走 /search（真·start_time+sold_quantity）；无代理回退 /highlights+/products，用 catalog date_created 近似"新"、sold 缺失默认 1
    *  - 'trend'    官方趋势词上升品：取 /trends 热搜词 → 映射到类目 → 用 /highlights 取该类目热销品（零代理，纯官方 API）
@@ -451,7 +451,7 @@ export async function scanNewRisingProducts(
   const limitPerCategory = opts.limitPerCategory ?? 50;
   const minDailySales = opts.minDailySales ?? 0.5;
   const onProgress = opts.onProgress;
-  const scanTimeoutMs = opts.scanTimeoutMs ?? 15 * 60 * 1000;
+  const scanTimeoutMs = opts.scanTimeoutMs ?? 30 * 60 * 1000;
 
   const report = (msg: string, extra?: Partial<ScanProgress>) => {
     console.log(`[SourcingScanner] ${msg}`);
