@@ -10,7 +10,7 @@ import {
   fetchProductItems,
   getExchangeRate,
   fetchHighlightsByCategory,
-  getProxyConfig,
+  isProxyEnabled,
   predictCategory,
 } from './mercadolibre.js';
 import { getAllStores, ensureStoreToken } from './stores.js';
@@ -484,7 +484,7 @@ export async function scanNewRisingProducts(
     //    但 /products/{id}/items 不含 start_time/sold_quantity，只能用 catalog product 的 date_created 近似"近期新上"，
     //    sold_quantity 缺失时默认 1（无法精筛"有销量"），客观上≈"类目近期上架的新品"。
     async function scanRecent(): Promise<void> {
-      const proxyOn = getProxyConfig().hasProxy;
+      const proxyOn = isProxyEnabled();
       for (const site of sites) {
         const categories = opts.categories?.length ? opts.categories : (DEFAULT_CATEGORIES[site] || []);
         report(`开始扫描站点 ${site}，共 ${categories.length} 个分类...`, { totalScanned });

@@ -66,26 +66,74 @@ function getApiBase(): string {
 let mlAccessToken: string = process.env.ML_ACCESS_TOKEN || '';
 
 // 代理配置
-let mlProxyUrl: string = '';
+let mlProxyUrl: string = '';                    // 默认代理（可为模板，含 {cc} 占位符，运行时替换为站点国家代码）
+let mlProxyBySite: Record<string, string> = {};  // 按站点覆盖：{ MLM: 'http://...', MLB: '...' }，供应商要求每国独立链接时用
+let mlProxyEnabled: boolean = false;             // 总开关
 const PROXY_FILE = path.join(__dirname, '..', 'data', 'ml-proxy.json');
 
-/** 获取代理 Agent（如果有配置） */
-function getProxyAgent(): https.Agent | undefined {
-  if (!mlProxyUrl) return undefined;
-  try {
-    if (mlProxyUrl.startsWith('socks')) {
-      return new SocksProxyAgent(mlProxyUrl) as unknown as https.Agent;
+/** 按站点选择代理 URL（未启用/未配置则返回 undefined） */
+export function getProxyForSite(site: string): string | undefined {
+  if (!mlProxyEnabled) return undefined;
+  if (mlProxyBySite[site]) return mlProxyBySite[site];
+  if (mlProxyUrl) {
+    if (mlProxyUrl.includes('{cc}')) {
+      const cc = (SITE_COUNTRY[site] || '').toLowerCase();
+      return mlProxyUrl.replace(/\{cc\}/g, cc);
     }
-    return new HttpsProxyAgent(mlProxyUrl) as unknown as https.Agent;
+    return mlProxyUrl;
+  }
+  return undefined;
+}
+
+/** 代理是否启用 */
+export function isProxyEnabled(): boolean {
+  return mlProxyEnabled;
+}
+
+/** 根据请求 URL 推断站点并选择对应代理（无站点信息时用默认代理） */
+function pickProxyForUrl(url?: string): string | undefined {
+  if (url) {
+    const m = url.match(/\/sites\/([A-Z]{3})\//);
+    if (m) return getProxyForSite(m[1]);
+    // 非站点请求（如 currency 转换）：若默认链接含 {cc} 无法解析国家，则不走代理
+    if (mlProxyUrl && !mlProxyUrl.includes('{cc}')) return mlProxyUrl;
+    return undefined;
+  }
+  if (mlProxyUrl && !mlProxyUrl.includes('{cc}')) return mlProxyUrl;
+  return undefined;
+}
+
+/** 获取代理 Agent（如果有配置且启用）。url 用于按站点选代理 */
+function getProxyAgent(url?: string): https.Agent | undefined {
+  if (!mlProxyEnabled) return undefined;
+  const proxy = pickProxyForUrl(url);
+  if (!proxy) return undefined;
+  try {
+    if (proxy.startsWith('socks')) {
+      return new SocksProxyAgent(proxy) as unknown as https.Agent;
+    }
+    return new HttpsProxyAgent(proxy) as unknown as https.Agent;
   } catch (err) {
     console.error('[ML Proxy] 代理配置无效:', err);
     return undefined;
   }
 }
 
-/** 设置代理 URL */
+/** 设置代理（兼容旧调用：传入字符串仅设置默认链接，保留 bySite/enabled） */
 export function setProxyConfig(proxyUrl: string) {
-  mlProxyUrl = proxyUrl.trim();
+  setProxyConfigFull({ proxyUrl });
+}
+
+/** 完整设置代理配置 */
+export function setProxyConfigFull(cfg: { proxyUrl?: string; bySite?: Record<string, string>; enabled?: boolean }) {
+  if (typeof cfg.proxyUrl === 'string') mlProxyUrl = cfg.proxyUrl.trim();
+  if (cfg.bySite && typeof cfg.bySite === 'object') {
+    mlProxyBySite = {};
+    for (const [k, v] of Object.entries(cfg.bySite)) {
+      if (v && typeof v === 'string' && v.trim()) mlProxyBySite[k] = v.trim();
+    }
+  }
+  if (typeof cfg.enabled === 'boolean') mlProxyEnabled = cfg.enabled;
   // 更换/清除代理后，重置 /search 封锁标记，给 search 一次重新尝试的机会
   // （住宅代理可解锁中国 IP 对 /search 的地理封锁）
   searchConfirmedBlocked = false;
@@ -96,8 +144,12 @@ export function setProxyConfig(proxyUrl: string) {
 /** 获取代理配置状态（proxyUrl 已打码，仅用于前端展示，切勿用于实际连接） */
 export function getProxyConfig() {
   return {
-    proxyUrl: mlProxyUrl ? `${mlProxyUrl.replace(/\/\/.*@/, '//***:***@')}` : '',
-    hasProxy: !!mlProxyUrl,
+    proxyUrl: mlProxyUrl ? mlProxyUrl.replace(/\/\/.*@/, '//***:***@') : '',
+    bySite: Object.fromEntries(
+      Object.entries(mlProxyBySite).map(([k, v]) => [k, v.replace(/\/\/.*@/, '//***:***@')])
+    ),
+    enabled: mlProxyEnabled,
+    hasProxy: mlProxyEnabled && (!!mlProxyUrl || Object.keys(mlProxyBySite).length > 0),
   };
 }
 
@@ -106,13 +158,21 @@ export function getRawProxyUrl(): string {
   return mlProxyUrl;
 }
 
+/** 获取某站点的原始代理 URL（未打码，仅供测试连通使用） */
+export function getRawProxyUrlForSite(site: string): string | undefined {
+  return getProxyForSite(site);
+}
+
 /** 持久化代理配置 */
 function persistProxyData() {
   try {
     const dir = path.dirname(PROXY_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(PROXY_FILE, JSON.stringify({ proxyUrl: mlProxyUrl, savedAt: new Date().toISOString() }, null, 2));
-    console.log(`[ML Proxy] 代理配置已保存`);
+    fs.writeFileSync(
+      PROXY_FILE,
+      JSON.stringify({ proxyUrl: mlProxyUrl, bySite: mlProxyBySite, enabled: mlProxyEnabled, savedAt: new Date().toISOString() }, null, 2)
+    );
+    console.log(`[ML Proxy] 代理配置已保存 (enabled=${mlProxyEnabled})`);
   } catch (err) {
     console.error('[ML Proxy] 保存失败:', err);
   }
@@ -124,9 +184,11 @@ function loadProxyData() {
     if (!fs.existsSync(PROXY_FILE)) return;
     const raw = fs.readFileSync(PROXY_FILE, 'utf-8');
     const data = JSON.parse(raw);
-    if (data.proxyUrl) {
-      mlProxyUrl = data.proxyUrl;
-      console.log(`[ML Proxy] 代理配置已加载: ${mlProxyUrl.replace(/\/\/.*@/, '//***:***@')}`);
+    if (data.proxyUrl) mlProxyUrl = data.proxyUrl;
+    if (data.bySite && typeof data.bySite === 'object') mlProxyBySite = data.bySite;
+    if (typeof data.enabled === 'boolean') mlProxyEnabled = data.enabled;
+    if (mlProxyUrl || Object.keys(mlProxyBySite).length) {
+      console.log(`[ML Proxy] 代理配置已加载: enabled=${mlProxyEnabled}, default=${mlProxyUrl ? mlProxyUrl.replace(/\/\/.*@/, '//***:***@') : '(无)'}`);
     }
   } catch (err) {
     console.error('[ML Proxy] 加载失败:', err);
@@ -995,8 +1057,8 @@ async function httpsGet(url: string, headers: Record<string, string> = {}, maxRe
             ...(mlAccessToken ? { 'Authorization': `Bearer ${mlAccessToken}` } : {}),
             ...headers,
           },
-          // 如果有代理配置，使用代理
-          ...(getProxyAgent() ? { agent: getProxyAgent() } : {}),
+          // 如果有代理配置，按站点选择代理出口
+          ...(getProxyAgent(url) ? { agent: getProxyAgent(url) } : {}),
         };
 
         const req = https.request(options, (res) => {

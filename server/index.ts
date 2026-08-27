@@ -729,7 +729,9 @@ import {
   exportProductsToXlsx,
   getFallbackCategories,
   setProxyConfig,
+  setProxyConfigFull,
   getProxyConfig,
+  getProxyForSite,
   setApiProxyUrl,
   getApiProxyConfig,
   loadCheckpoint,
@@ -1856,43 +1858,57 @@ app.get('/api/ml/proxy', (req, res) => {
   res.json(getProxyConfig());
 });
 
-// 设置代理配置
+// 设置代理配置（支持：默认链接 proxyUrl、按站点覆盖 bySite、总开关 enabled）
 app.post('/api/ml/proxy', (req, res) => {
-  const { proxyUrl } = req.body;
+  const { proxyUrl, bySite, enabled } = req.body || {};
+  // 校验默认链接格式（若提供）
   if (proxyUrl && typeof proxyUrl === 'string') {
-    // 验证代理 URL 格式
     const trimmed = proxyUrl.trim();
     if (trimmed && !trimmed.startsWith('http://') && !trimmed.startsWith('https://') && !trimmed.startsWith('socks5://') && !trimmed.startsWith('socks4://')) {
-      return res.status(400).json({ error: '代理 URL 必须以 http://、https://、socks5:// 或 socks4:// 开头' });
+      return res.status(400).json({ error: '代理 URL 必须以 http://、https://、socks5:// 或 socks4:// 开头（支持 {cc} 占位符表示国家代码）' });
     }
-    setProxyConfig(trimmed);
-    res.json({ success: true, message: trimmed ? '代理配置已保存' : '代理已清除' });
-  } else {
-    // 空值 = 清除代理
-    setProxyConfig('');
-    res.json({ success: true, message: '代理已清除' });
   }
+  // 校验 bySite 中每个链接格式
+  if (bySite && typeof bySite === 'object') {
+    for (const [site, u] of Object.entries(bySite)) {
+      if (u && typeof u === 'string' && u.trim()) {
+        const t = u.trim();
+        if (!t.startsWith('http://') && !t.startsWith('https://') && !t.startsWith('socks5://') && !t.startsWith('socks4://')) {
+          return res.status(400).json({ error: `站点 ${site} 的代理 URL 格式非法` });
+        }
+      }
+    }
+  }
+  setProxyConfigFull({
+    proxyUrl: typeof proxyUrl === 'string' ? proxyUrl : undefined,
+    bySite: bySite && typeof bySite === 'object' ? bySite : undefined,
+    enabled: typeof enabled === 'boolean' ? enabled : undefined,
+  });
+  const cfg = getProxyConfig();
+  res.json({ success: true, message: cfg.enabled ? `代理已启用（默认${cfg.proxyUrl ? '已配置' : '未填'}，按站点覆盖 ${Object.keys(cfg.bySite).length} 个）` : '代理已关闭' });
 });
 
-// 测试代理连通性
+// 测试代理连通性（默认测 MLM，可传 { site: 'MLB' } 测指定站点出口）
 app.post('/api/ml/proxy/test', async (req, res) => {
+  const { site = 'MLM' } = req.body || {};
   const config = getProxyConfig();
-  if (!config.hasProxy) {
-    return res.json({ success: false, message: '未配置代理' });
+  if (!config.enabled) {
+    return res.json({ success: false, message: '代理未启用（请先打开开关）' });
+  }
+  const proxyUrl = getProxyForSite(String(site).toUpperCase());
+  if (!proxyUrl) {
+    return res.json({ success: false, message: `站点 ${site} 无可用代理（请检查默认链接或按站点覆盖）` });
   }
   try {
     // 用一个简单的 ML API 端点测试
-    const { getAccessToken, getRawProxyUrl } = await import('./mercadolibre.js');
+    const { getAccessToken } = await import('./mercadolibre.js');
     const token = getAccessToken();
-    const testUrl = token
-      ? `${'https://api.mercadolibre.com'}/users/me`
-      : `${'https://api.mercadolibre.com'}/sites/MLM/categories`;
+    const path = token ? '/users/me' : `/sites/${String(site).toUpperCase()}/categories`;
 
     const { HttpsProxyAgent } = await import('https-proxy-agent');
     const { SocksProxyAgent } = await import('socks-proxy-agent');
 
     let agent: any = undefined;
-    const proxyUrl = getRawProxyUrl(); // 必须用原始（未打码）的代理 URL 建连，否则会因假密码 ***:*** 触发 407
     if (proxyUrl.startsWith('socks')) {
       agent = new SocksProxyAgent(proxyUrl);
     } else {
@@ -1903,7 +1919,7 @@ app.post('/api/ml/proxy/test', async (req, res) => {
     const result = await new Promise<any>((resolve, reject) => {
       const options: any = {
         hostname: 'api.mercadolibre.com',
-        path: token ? '/users/me' : '/sites/MLM/categories',
+        path,
         method: 'GET',
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',

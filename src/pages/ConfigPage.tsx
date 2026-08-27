@@ -519,6 +519,159 @@ function YouTubeConfigPanel() {
   );
 }
 
+// ============ 代理配置面板 ============
+function ProxyConfigPanel() {
+  const SITES = [
+    { code: 'MLM', name: '墨西哥', cc: 'mx' },
+    { code: 'MLB', name: '巴西', cc: 'br' },
+    { code: 'MLC', name: '智利', cc: 'cl' },
+    { code: 'MCO', name: '哥伦比亚', cc: 'co' },
+  ];
+  const [config, setConfig] = useState<{ proxyUrl: string; bySite: Record<string, string>; enabled: boolean }>({
+    proxyUrl: '', bySite: {}, enabled: false,
+  });
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [descExpanded, setDescExpanded] = useState(false);
+
+  const featureLines = [
+    '住宅代理用于解锁 Mercado Libre 对中国大陆 / 数据中心 IP 的地理封锁（主要是 /search 自由关键词搜索与 /items 精确销量接口）。官方 API（/trends、/highlights、/products）免费且合法，无需代理。',
+    '默认代理链接支持 {cc} 占位符：运行时自动替换为目标站点国家代码（MLM→mx、MLB→br、MLC→cl、MCO→co），即「一条链接覆盖多国」。若供应商要求每个国家独立出口，展开「按站点单独配置」逐国填写即可覆盖默认。',
+    '启用后扫描按商品所属站点自动选用对应国家出口；关闭则全部直连（官方 API 不受影响）。注意：住宅代理抓取公开页面属灰色地带，请控制请求频率、避免影响正式店铺。',
+  ];
+
+  const loadStatus = async () => {
+    try {
+      const res = await fetch('/api/ml/proxy');
+      const data = await res.json();
+      setConfig({
+        proxyUrl: data.proxyUrl || '',
+        bySite: data.bySite || {},
+        enabled: !!data.enabled,
+      });
+    } catch { /* ignore */ }
+  };
+
+  useEffect(() => { loadStatus(); }, []);
+
+  const updateBySite = (code: string, v: string) => {
+    setConfig((prev) => ({ ...prev, bySite: { ...prev.bySite, [code]: v as string } }));
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const res = await fetch('/api/ml/proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proxyUrl: config.proxyUrl.trim(), bySite: config.bySite, enabled: config.enabled }),
+      });
+      const data = await res.json();
+      if (data.success) { MessagePlugin.success(data.message || '代理配置已保存'); loadStatus(); }
+      else MessagePlugin.error(data.message || '保存失败');
+    } catch (e: any) {
+      MessagePlugin.error(e?.message || '网络错误');
+    } finally { setSaving(false); }
+  };
+
+  const handleTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch('/api/ml/proxy/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ site: 'MLM' }),
+      });
+      const data = await res.json();
+      setTestResult(data);
+      if (data.success) MessagePlugin.success('测试通过');
+      else MessagePlugin.warning(data.message || '测试未通过');
+    } catch (e: any) {
+      MessagePlugin.error(e?.message || '网络错误');
+    } finally { setTesting(false); }
+  };
+
+  return (
+    <div className="space-y-5">
+      <Card title="住宅代理配置（解锁美客多地理封锁）" headerBordered>
+        <div className="space-y-4">
+          {/* 功能说明（超过 3 行折叠） */}
+          <div className="text-xs text-gray-500 bg-gray-50 rounded p-3">
+            {descExpanded ? featureLines.map((l, i) => (<div key={i}>{l}</div>)) : featureLines.slice(0, 2).map((l, i) => (<div key={i}>{l}</div>))}
+            <button className="text-blue-500 mt-1" onClick={() => setDescExpanded((v) => !v)}>
+              {descExpanded ? '收起 ▲' : '展开详细说明 ▼'}
+            </button>
+          </div>
+
+          {/* 总开关 */}
+          <div className="flex items-center justify-between border border-gray-100 rounded p-3">
+            <div>
+              <div className="text-sm font-medium">启用住宅代理</div>
+              <div className="text-xs text-gray-500">关闭时全部请求直连官方 API（/trends、/highlights、/products 不受影响）</div>
+            </div>
+            <Switch value={config.enabled} onChange={(v) => setConfig((p) => ({ ...p, enabled: v as boolean }))} />
+          </div>
+
+          {/* 默认代理链接 */}
+          <div>
+            <label className="block text-sm text-gray-600 mb-1">默认代理链接（支持 {'{cc}'} 占位符）</label>
+            <Input
+              value={config.proxyUrl}
+              onChange={(v) => setConfig((p) => ({ ...p, proxyUrl: v as string }))}
+              placeholder="http://user:pass@host:port  或  http://user-country-{cc}@host:port"
+            />
+            <div className="text-xs text-gray-400 mt-1">
+              主流供应商（Bright Data / Oxylabs / Smartproxy 等）支持在账号名加 <code>-country-mx</code> 或链接带 <code>?country=mx</code>；
+              所有站点共用同一出口时只填这里即可，留空「按站点覆盖」按需补充。
+            </div>
+          </div>
+
+          {/* 高级：按站点单独配置 */}
+          <div className="border border-gray-100 rounded p-3">
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-medium">按站点单独配置（高级，可选）</div>
+              <Button size="small" variant="text" onClick={() => setShowAdvanced((v) => !v)}>
+                {showAdvanced ? '收起' : '展开'}
+              </Button>
+            </div>
+            <div className="text-xs text-gray-400 mt-1">当供应商要求每个国家独立链接时填写，会覆盖上方默认链接。</div>
+            {showAdvanced && (
+              <div className="space-y-2 mt-3">
+                {SITES.map((s) => (
+                  <div key={s.code} className="flex items-center gap-2">
+                    <span className="text-xs w-28 shrink-0 text-gray-600">{s.name}（{s.code}→{s.cc}）</span>
+                    <Input
+                      size="small"
+                      value={config.bySite[s.code] || ''}
+                      onChange={(v) => updateBySite(s.code, v as string)}
+                      placeholder={`${s.code} 专用链接`}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Button size="small" theme="primary" loading={saving} onClick={handleSave}>保存配置</Button>
+            <Button size="small" variant="outline" loading={testing} onClick={handleTest}>测试连接（MLM）</Button>
+            <Button size="small" variant="text" icon={<RefreshIcon />} onClick={loadStatus}>刷新</Button>
+          </div>
+
+          {testResult && (
+            <div className={`text-xs p-2 rounded ${testResult.success ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}>
+              {testResult.success ? '✅ ' : '❌ '}{testResult.message}
+            </div>
+          )}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 // ============ 配置中心 ============
 export function ConfigPage() {
   const [activeTab, setActiveTab] = useState('ai');
@@ -542,6 +695,9 @@ export function ConfigPage() {
           </Tabs.TabPanel>
           <Tabs.TabPanel value="youtube" label="YouTube 上传">
             <div className="pt-3"><YouTubeConfigPanel /></div>
+          </Tabs.TabPanel>
+          <Tabs.TabPanel value="proxy" label="代理配置">
+            <div className="pt-3"><ProxyConfigPanel /></div>
           </Tabs.TabPanel>
           <Tabs.TabPanel value="notify" label="通知设置">
             <div style={{ height: 'calc(100vh - 220px)' }}><NotificationSettingsPage /></div>
