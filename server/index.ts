@@ -3173,9 +3173,16 @@ app.post('/api/ml/llm-config/test', async (req, res) => {
 // AI 基于 1688 货源信息 + 竞品要素 + ML 热搜词生成；AI 不可用时回退规则引擎
 app.post('/api/ml/listing/generate-title', async (req, res) => {
   try {
-    const { competitorTitle, site, brand, customPoints, count, maxLength, sourceTitle, sourcePriceCNY, trendKeywords } = req.body || {};
+    const { competitorTitle, site, brand, customPoints, count, maxLength, sourceTitle, sourcePriceCNY, trendKeywords, candidateId } = req.body || {};
     if (!competitorTitle || typeof competitorTitle !== 'string') {
       return res.status(400).json({ success: false, message: '请提供竞品标题（competitorTitle）' });
+    }
+
+    // 未显式传热搜词时，若提供了 candidateId 则复用该候选选品时的具体热搜词（更精准）
+    let resolvedTrendKeywords = Array.isArray(trendKeywords) ? trendKeywords : undefined;
+    if (!resolvedTrendKeywords && candidateId) {
+      const cand = typeof candidateId === 'number' ? getCandidateById(candidateId) : getCandidateById(Number(candidateId));
+      if (cand?.trend_keyword) resolvedTrendKeywords = [cand.trend_keyword];
     }
 
     // 1) 先尝试 AI 生成（自动注入站点热搜词）
@@ -3186,7 +3193,7 @@ app.post('/api/ml/listing/generate-title', async (req, res) => {
       sourcePriceCNY,
       brand,
       count: count || 3,
-      trendKeywords: Array.isArray(trendKeywords) ? trendKeywords : undefined,
+      trendKeywords: resolvedTrendKeywords,
     });
 
     if (aiResult.titles.length > 0) {
@@ -3260,9 +3267,16 @@ app.post('/api/ml/listing/generate-title/batch', async (req, res) => {
 // 单条描述生成
 app.post('/api/ml/listing/generate-description', async (req, res) => {
   try {
-    const { title, site, sourceTitle, sourcePriceCNY, competitorDescription, categoryName, brand, trendKeywords } = req.body || {};
+    const { title, site, sourceTitle, sourcePriceCNY, competitorDescription, categoryName, brand, trendKeywords, candidateId } = req.body || {};
     if (!title || typeof title !== 'string') {
       return res.status(400).json({ success: false, message: '请提供商品标题（title）' });
+    }
+
+    // 未显式传热搜词时，若提供了 candidateId 则复用该候选选品时的具体热搜词
+    let resolvedTrendKeywords = Array.isArray(trendKeywords) ? trendKeywords : undefined;
+    if (!resolvedTrendKeywords && candidateId) {
+      const cand = typeof candidateId === 'number' ? getCandidateById(candidateId) : getCandidateById(Number(candidateId));
+      if (cand?.trend_keyword) resolvedTrendKeywords = [cand.trend_keyword];
     }
 
     const result = await aiGenerateDescription({
@@ -3273,7 +3287,7 @@ app.post('/api/ml/listing/generate-description', async (req, res) => {
       competitorDescription,
       categoryName,
       brand,
-      trendKeywords: Array.isArray(trendKeywords) ? trendKeywords : undefined,
+      trendKeywords: resolvedTrendKeywords,
     });
 
     if (result.description) {

@@ -1758,21 +1758,9 @@ export async function searchWithHighlightsFallback(
           }
           // 补上 category_id，否则 normalizeItem 无法识别分类
           if (!it.category_id) it.category_id = categoryId;
-          // /products/{id}/items 返回的 item 经常缺失 price 等字段，用 /items/{id} 补充。
-          // 注意 spread 顺序：以 it 为基础，用 detail 覆盖缺失字段（detail 有 price/sold_quantity/condition），
-          // 不能写成 { ...detail, ...it }，否则 it 会把刚拿到的 price 覆盖回 undefined。
-          let enriched = it;
-          const priceUsable = typeof it.price === 'number' && it.price > 0;
-          if (it.id && (!priceUsable || !it.sold_quantity)) {
-            try {
-              const detail = await fetchItemDetails(String(it.id), accessTokenOverride);
-              if (detail) {
-                enriched = { ...it, ...detail, _fromHighlights: true };
-              }
-            } catch {
-              /* 补充失败仍保留原 item */
-            }
-          }
+          // price/sold 直接来自 /products/{id}/items（数据中心 IP 可访问，返回 price/shipping/seller），
+          // 不再回退 /items/{id}（云服务器 IP 下 403 被封，且 productItems 已含所需字段）。
+          const enriched = it;
           items.push({ ...enriched, _fromHighlights: true });
         }
       } catch {

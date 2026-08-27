@@ -583,6 +583,7 @@ export function CandidatesPage() {
           sourcePriceCNY: publishRow.ali1688_price_cny,
           brand: publishDraft.brand,
           count: 3,
+          candidateId: publishRow.id,
         }),
       });
       const data = await res.json();
@@ -608,6 +609,7 @@ export function CandidatesPage() {
           sourcePriceCNY: publishRow.ali1688_price_cny,
           categoryName: publishDraft.categoryName || publishRow.ml_category_name,
           brand: publishDraft.brand,
+          candidateId: publishRow.id,
         }),
       });
       const data = await res.json();

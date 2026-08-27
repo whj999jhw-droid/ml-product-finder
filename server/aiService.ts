@@ -1115,3 +1115,76 @@ function fallbackEvaluation(input: AIEvaluationInput): AIEvaluationResult {
     used: 'fallback',
   };
 }
+
+// ============ 1688 货源相关性校验 ============
+
+export interface SourceRelevanceResult {
+  relevant: boolean;
+  score: number;
+  reason: string;
+}
+
+/**
+ * 判断 1688 货源与 Mercado Libre 竞品是否属于同类/同功能商品。
+ * 用于拦截「照片纸匹配到挂钩」这类明显错配。
+ *
+ * 注意：
+ * - 不需要同品牌，接受同款/同类/可替代 generic 货源。
+ * - LLM 未配置或失败时保守返回 relevant=true，避免阻断流水线。
+ */
+export async function assessSourceRelevance(
+  mlTitle: string,
+  mlCategory: string,
+  source: { title: string; stats?: { categoryListName?: string } }
+): Promise<SourceRelevanceResult> {
+  const cfg = getLlmConfig();
+  if (!cfg) {
+    return { relevant: true, score: 0.5, reason: 'LLM 未配置，跳过相关性校验' };
+  }
+
+  const systemPrompt = `You are a cross-border e-commerce product matching expert.
+Given a Mercado Libre competitor product (title + category) and a 1688 source product (Chinese title + category), determine if the 1688 product is a relevant source for selling a similar product on Mercado Libre.
+Respond ONLY in JSON format, no explanation, no markdown code block.
+
+JSON schema:
+{
+  "relevant": boolean,  // true if the 1688 product matches the ML product type/function
+  "score": number,      // 0.0~1.0 relevance confidence
+  "reason": string      // concise Chinese reason (≤60 chars)
+}
+
+Rules:
+- The 1688 product does NOT need to be the same brand. Generic alternatives are fine.
+- It MUST be the same product type / function / use case (e.g., photo paper ≠ wall hooks).
+- Beauty/makeup products in the same subcategory are usually relevant.
+- Be strict: reject obvious category mismatches.`;
+
+  const prompt = `Mercado Libre 竞品标题：${mlTitle}
+Mercado Libre 类目：${mlCategory || 'N/A'}
+1688 货源标题：${source.title}
+1688 货源类目：${source.stats?.categoryListName || 'N/A'}
+
+请判断该 1688 货源是否与 Mercado Libre 竞品属于同类/同功能商品，并按 systemPrompt 要求只返回 JSON。`;
+
+  try {
+    const raw = await llmGenerate({
+      prompt,
+      systemPrompt,
+      timeoutMs: 15000,
+      jsonMode: true,
+      temperature: 0.2,
+    });
+    const parsed = extractJsonObject(raw) as Partial<SourceRelevanceResult> | undefined;
+    if (!parsed || typeof parsed.relevant !== 'boolean' || typeof parsed.score !== 'number') {
+      return { relevant: true, score: 0.5, reason: 'LLM 相关性格式异常，按通过处理' };
+    }
+    return {
+      relevant: parsed.relevant,
+      score: Math.max(0, Math.min(1, parsed.score)),
+      reason: String(parsed.reason || '').slice(0, 80) || (parsed.relevant ? 'AI 判断匹配' : 'AI 判断不匹配'),
+    };
+  } catch (err: any) {
+    console.error('[assessSourceRelevance] LLM 相关性判断失败：', err?.message || err);
+    return { relevant: true, score: 0.5, reason: 'LLM 相关性判断失败，按通过处理' };
+  }
+}

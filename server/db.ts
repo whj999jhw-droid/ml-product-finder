@@ -365,6 +365,11 @@ CREATE TABLE IF NOT EXISTS app_config (
         db.exec("ALTER TABLE candidates ADD COLUMN source_tag TEXT");
         console.log('[DB] candidates.source_tag 列已添加');
       }
+      // 兼容旧数据库：若 candidates 表缺少 trend_keyword 列则补加（记录选品时的具体热搜词，供生成标题/详情复用）
+      if (!cols.find((c) => c.name === 'trend_keyword')) {
+        db.exec("ALTER TABLE candidates ADD COLUMN trend_keyword TEXT");
+        console.log('[DB] candidates.trend_keyword 列已添加');
+      }
     } catch (e: any) {
       console.warn('[DB] 检查/补加 trend_note/seller_sku 列失败:', e?.message || String(e));
     }

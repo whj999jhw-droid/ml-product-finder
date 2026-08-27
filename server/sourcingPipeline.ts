@@ -14,7 +14,7 @@ import {
 import { search1688ByQuery, get1688ProductDetail, type Ali1688Product } from './ali1688Skill.js';
 import { calculateProfit, reverseEngineerPrice, type ProfitResult } from './profit.js';
 import { scoreCandidate, isScorePass, type ScoreBreakdown } from './scoring.js';
-import { aiEvaluateCandidate, type AIEvaluationResult } from './aiService.js';
+import { aiEvaluateCandidate, assessSourceRelevance, type AIEvaluationResult } from './aiService.js';
 import {
   createSourcingRun,
   updateSourcingRun,
@@ -241,6 +241,8 @@ function buildCandidateRow(
   row.trend_note = buildTrendNote(enriched, opts.score?.competition);
   // 来源标记（recent / trend / bestseller）
   row.source_tag = enriched.sourceTag || 'recent';
+  // 选品时的具体热搜词（trend 模式有值），供生成标题/详情时复用，提升搜索命中
+  row.trend_keyword = enriched.trendKeyword || null;
   return row;
 }
 
@@ -362,6 +364,14 @@ async function processOneCandidate(
   const score = scoreCandidate({ candidate: enriched, source, profit });
   if (!isScorePass(score) || score.total < minScore) {
     const reason = `评分未通过(total=${score.total.toFixed(2)}, demand=${score.demand.toFixed(2)}, competition=${score.competition.toFixed(2)}, profit=${score.profit.toFixed(2)}, logistics=${score.logistics.toFixed(2)}, compliance=${score.compliance.toFixed(2)})`;
+    insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: reason, searchQuery, source, profit, listingPrice, score }));
+    return { result: null, reason };
+  }
+
+  // 2.4b 货源相关性校验：拦截「标题与 1688 链接不对应」的错配
+  const relevance = await assessSourceRelevance(enriched.title, enriched.categoryName, source);
+  if (!relevance.relevant || relevance.score < 0.6) {
+    const reason = `1688货源不匹配(${relevance.score.toFixed(2)}): ${relevance.reason}`;
     insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: reason, searchQuery, source, profit, listingPrice, score }));
     return { result: null, reason };
   }
