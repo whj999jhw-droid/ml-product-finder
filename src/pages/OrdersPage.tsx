@@ -695,6 +695,7 @@ export function OrdersPage() {
         images={viewerImages}
         visible={viewerVisible}
         defaultIndex={viewerIndex}
+        closeOnOverlay
         onClose={() => setViewerVisible(false)}
       />
     </div>

@@ -571,6 +571,7 @@ export function ProductManagerPage() {
         images={previewImages}
         visible={previewVisible}
         index={previewIndex}
+        closeOnOverlay
         onClose={() => setPreviewVisible(false)}
       />
     </div>

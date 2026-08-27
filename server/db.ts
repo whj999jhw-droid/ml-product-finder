@@ -200,6 +200,7 @@ CREATE TABLE IF NOT EXISTS candidates (
   ml_category_name TEXT,
   ml_permalink TEXT,
   ml_thumbnail TEXT,
+  ml_pictures TEXT,
   ml_seller_id TEXT,
   ml_listing_date TEXT,
   source_title TEXT,
@@ -330,6 +331,16 @@ CREATE TABLE IF NOT EXISTS app_config (
       }
     } catch (e: any) {
       console.warn('[DB] 检查/补加 sourcing_runs.total_new 列失败:', e?.message || String(e));
+    }
+    // 兼容旧数据库：若 candidates 表缺少 ml_pictures 列则补加（存储多图 URL 列表 JSON）
+    try {
+      const candCols = db.prepare("PRAGMA table_info(candidates)").all() as { name: string }[];
+      if (!candCols.find((c) => c.name === 'ml_pictures')) {
+        db.exec("ALTER TABLE candidates ADD COLUMN ml_pictures TEXT");
+        console.log('[DB] candidates.ml_pictures 列已添加');
+      }
+    } catch (e: any) {
+      console.warn('[DB] 检查/补加 candidates.ml_pictures 列失败:', e?.message || String(e));
     }
     // 兼容旧数据库：若 orders 表缺少 handling_deadline 列则补加
     try {

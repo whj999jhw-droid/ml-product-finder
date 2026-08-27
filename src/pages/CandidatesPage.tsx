@@ -27,6 +27,7 @@ interface Candidate {
   ml_title: string;
   ml_price_usd: number;
   ml_thumbnail: string;
+  ml_pictures?: string;
   ml_permalink: string;
   ml_category_id?: string;
   ml_category_name?: string;
@@ -1192,7 +1193,16 @@ export function CandidatesPage() {
 
   // 从候选行提取所有可用图片 URL（支持逗号/分号/空格分隔的多图），去重后返回
   const extractImageUrls = (row: Candidate): string[] => {
-    const parts = [row.ali1688_image_url, row.ml_thumbnail]
+    let multi: string[] = [];
+    if (row.ml_pictures) {
+      try {
+        const parsed = JSON.parse(row.ml_pictures);
+        if (Array.isArray(parsed)) multi = parsed.map((s) => String(s).trim()).filter(Boolean);
+      } catch {
+        /* 旧数据或脏数据容错 */
+      }
+    }
+    const parts = [...multi, row.ali1688_image_url, row.ml_thumbnail]
       .filter(Boolean)
       .flatMap((s) => String(s).split(/[,; ]+/))
       .map((s) => s.trim())
@@ -1678,6 +1688,7 @@ export function CandidatesPage() {
             images={viewerImages}
             visible={viewerVisible}
             defaultIndex={viewerIndex}
+            closeOnOverlay
             onClose={() => setViewerVisible(false)}
           />
         </Card>
@@ -1808,6 +1819,7 @@ export function CandidatesPage() {
             images={viewerImages}
             visible={viewerVisible}
             defaultIndex={viewerIndex}
+            closeOnOverlay
             onClose={() => setViewerVisible(false)}
           />
         </Card>
