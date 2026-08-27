@@ -180,6 +180,7 @@ CREATE TABLE IF NOT EXISTS sourcing_runs (
   total_matched INTEGER DEFAULT 0,
   total_scored INTEGER DEFAULT 0,
   total_approved INTEGER DEFAULT 0,
+  total_new INTEGER DEFAULT 0,
   total_rejected INTEGER DEFAULT 0,
   message TEXT,
   error TEXT
@@ -319,6 +320,16 @@ CREATE TABLE IF NOT EXISTS app_config (
       }
     } catch (e: any) {
       console.warn('[DB] 检查/补加 sourcing_runs.message 列失败:', e?.message || String(e));
+    }
+    // 兼容旧数据库：若 sourcing_runs 表缺少 total_new 列则补加（统计本次真正新增的候选数）
+    try {
+      const runCols = db.prepare("PRAGMA table_info(sourcing_runs)").all() as { name: string }[];
+      if (!runCols.find((c) => c.name === 'total_new')) {
+        db.exec("ALTER TABLE sourcing_runs ADD COLUMN total_new INTEGER DEFAULT 0");
+        console.log('[DB] sourcing_runs.total_new 列已添加');
+      }
+    } catch (e: any) {
+      console.warn('[DB] 检查/补加 sourcing_runs.total_new 列失败:', e?.message || String(e));
     }
     // 兼容旧数据库：若 orders 表缺少 handling_deadline 列则补加
     try {
@@ -649,6 +660,7 @@ export function updateSourcingRun(
     total_matched?: number;
     total_scored?: number;
     total_approved?: number;
+    total_new?: number;
     total_rejected?: number;
     message?: string;
     error?: string;
@@ -696,12 +708,17 @@ export function cleanupStaleSourcingRuns(maxAgeMinutes: number = 30): number {
   return count;
 }
 
-export function insertCandidate(data: any): number {
-  if (!db) return 0;
+export function insertCandidate(data: any): { id: number; isNew: boolean } {
+  if (!db) return { id: 0, isNew: false };
   const now = new Date().toISOString();
   const cols = Object.keys(data).filter((k) => data[k] !== undefined);
   const placeholders = cols.map((k) => `@${k}`).join(', ');
   const setSql = cols.map((k) => `${k}=excluded.${k}`).join(', ');
+  // 先判断是否已存在同款（site+ml_item_id），用于区分「本次新增」与「更新已有」
+  const existing = db
+    .prepare('SELECT id FROM candidates WHERE site = @site AND ml_item_id = @ml_item_id')
+    .get({ site: data.site, ml_item_id: data.ml_item_id });
+  const isNew = !existing;
   const stmt = db.prepare(
     `INSERT INTO candidates (${cols.join(', ')}, created_at, updated_at) VALUES (${placeholders}, @now, @now)
      ON CONFLICT(site, ml_item_id) DO UPDATE SET ${setSql}, updated_at=excluded.updated_at`
@@ -712,7 +729,7 @@ export function insertCandidate(data: any): number {
     site: data.site,
     ml_item_id: data.ml_item_id,
   });
-  return row?.id || Number(result.lastInsertRowid) || 0;
+  return { id: row?.id || Number(result.lastInsertRowid) || 0, isNew };
 }
 
 export function getCandidates(opts?: {

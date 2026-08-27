@@ -16,6 +16,7 @@ import {
   InputNumber,
   Textarea,
   Collapse,
+  Tooltip,
 } from 'tdesign-react';
 import type { PrimaryTableCol } from 'tdesign-react';
 
@@ -47,7 +48,7 @@ interface Candidate {
   score_logistics: number;
   score_compliance: number;
   ai_evaluation_json?: string;
-  status: 'pending' | 'approved' | 'rejected' | 'published';
+  status: 'pending' | 'approved' | 'rejected' | 'published' | 'matched';
   reject_reason: string;
   trend_note?: string;
   source_tag?: 'recent' | 'trend' | 'bestseller';
@@ -136,6 +137,7 @@ interface SourcingRun {
   total_matched: number;
   total_scored: number;
   total_approved: number;
+  total_new?: number;
   total_rejected: number;
   message?: string;
   error?: string;
@@ -151,6 +153,7 @@ const statusMap: Record<string, { label: string; theme: any }> = {
   pending: { label: '待审核', theme: 'warning' },
   approved: { label: '已通过', theme: 'success' },
   rejected: { label: '已拒绝', theme: 'danger' },
+  matched: { label: '进入匹配', theme: 'default' },
   published: { label: '已上架', theme: 'primary' },
 };
 
@@ -171,6 +174,20 @@ export function CandidatesPage() {
   const [runStartTime, setRunStartTime] = useState<number | null>(null);
   const [elapsedText, setElapsedText] = useState('');
   const [runPollError, setRunPollError] = useState<string | null>(null);
+
+  // 排序方式：评分 / 入库时间（新→旧）/ 入库时间（旧→新）
+  const [orderBy, setOrderBy] = useState<string>('created_at DESC');
+  // 表头显隐配置（持久化到 localStorage）
+  const COL_VIS_KEY = 'mlfinder_col_visibility';
+  const [colVisibility, setColVisibility] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = localStorage.getItem(COL_VIS_KEY);
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+  const [showColSettings, setShowColSettings] = useState(false);
 
   // YouTube 上传配置（仅保留授权状态；具体配置在「配置中心」）
   const [ytConfigured, setYtConfigured] = useState(false);
@@ -366,6 +383,7 @@ export function CandidatesPage() {
       const params = new URLSearchParams();
       if (status) params.set('status', status);
       if (siteFilter) params.set('site', siteFilter);
+      if (orderBy) params.set('orderBy', orderBy);
       params.set('limit', '100');
       const res = await fetch(`/api/ml/candidates?${params.toString()}`);
       const data = await res.json();
@@ -1211,13 +1229,13 @@ export function CandidatesPage() {
           );
         }
         return (
-          <div className="grid grid-cols-2 gap-1 w-[76px]">
-            {urls.slice(0, 4).map((src, idx) => (
+          <div className="grid grid-cols-4 gap-0.5 w-[104px]">
+            {urls.slice(0, 8).map((src, idx) => (
               <img
                 key={`${src}-${idx}`}
                 src={src}
                 alt=""
-                className="w-9 h-9 object-cover rounded border border-gray-100 cursor-pointer hover:opacity-80"
+                className="w-6 h-6 object-cover rounded border border-gray-100 cursor-pointer hover:opacity-80"
                 onError={handleError}
                 onClick={() => {
                   setViewerImages(urls);
@@ -1364,6 +1382,19 @@ export function CandidatesPage() {
       },
     },
     {
+      colKey: 'created_at',
+      title: '入库时间',
+      width: 150,
+      cell: ({ row }) => {
+        const t = row.created_at ? new Date(row.created_at) : null;
+        return (
+          <span className="text-xs text-gray-500">
+            {t && !isNaN(t.getTime()) ? t.toLocaleString('zh-CN', { hour12: false }) : '-'}
+          </span>
+        );
+      },
+    },
+    {
       colKey: 'action',
       title: '操作',
       width: 220,
@@ -1388,6 +1419,27 @@ export function CandidatesPage() {
       ),
     },
   ];
+
+  // 固定常显的列（不参与显隐切换）
+  const FIXED_COL_KEYS = ['row-select', 'thumbnail', 'action'];
+  // 生成可切换列的下拉选项（基于 columns 的 colKey/title，排除固定列）
+  const columnToggleOptions = columns
+    .filter((c) => !FIXED_COL_KEYS.includes(c.colKey as string))
+    .map((c) => ({ colKey: c.colKey as string, title: (c.title as string) || String(c.colKey) }));
+  const visibleColumns = columns.filter((c) => {
+    const key = c.colKey as string;
+    if (FIXED_COL_KEYS.includes(key)) return true;
+    return colVisibility[key] !== false;
+  });
+  const toggleColumn = (key: string, visible: boolean) => {
+    const next = { ...colVisibility, [key]: visible };
+    setColVisibility(next);
+    try {
+      localStorage.setItem(COL_VIS_KEY, JSON.stringify(next));
+    } catch {
+      /* ignore */
+    }
+  };
 
   const renderRunStatus = () => {
     if (!latestRun) {
@@ -1423,26 +1475,41 @@ export function CandidatesPage() {
           )}
         </div>
         <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
-          <div>
-            <div className="text-gray-500">扫描商品</div>
-            <div className="font-medium">{latestRun.total_scanned || 0}</div>
-          </div>
-          <div>
-            <div className="text-gray-500">进入匹配</div>
-            <div className="font-medium">{latestRun.total_matched || 0}</div>
-          </div>
-          <div>
-            <div className="text-gray-500">已核价</div>
-            <div className="font-medium">{latestRun.total_scored || 0}</div>
-          </div>
-          <div>
-            <div className="text-gray-500">入库通过</div>
-            <div className="font-medium text-green-600">{latestRun.total_approved || 0}</div>
-          </div>
-          <div>
-            <div className="text-gray-500"> rejected</div>
-            <div className="font-medium text-red-600">{latestRun.total_rejected || 0}</div>
-          </div>
+          <Tooltip content="本次扫描从 Mercado Libre 各站点抓取到的候选商品总数（尚未经过 1688 匹配与评分筛选）。">
+            <div>
+              <div className="text-gray-500">扫描商品</div>
+              <div className="font-medium">{latestRun.total_scanned || 0}</div>
+            </div>
+          </Tooltip>
+          <Tooltip content="扫描结果中符合基础过滤条件、进入 1688 货源匹配环节的商品数。其中超出单次处理上限的部分会记为「进入匹配」但未核价，可在候选列表按状态筛选查看。">
+            <div>
+              <div className="text-gray-500">进入匹配</div>
+              <div className="font-medium">{latestRun.total_matched || 0}</div>
+            </div>
+          </Tooltip>
+          <Tooltip content="实际完成 1688 找货 + 利润测算 + 五维评分的商品数（受单次处理上限限制，小于「进入匹配」）。">
+            <div>
+              <div className="text-gray-500">已核价</div>
+              <div className="font-medium">{latestRun.total_scored || 0}</div>
+            </div>
+          </Tooltip>
+          <Tooltip content="通过评分门槛并写入候选库的商品数。系统按「站点+商品ID」去重：与历史同款重复的商品会更新已有记录而非新增，因此「入库通过」往往大于列表里真正新增的条数。">
+            <div>
+              <div className="text-gray-500">入库通过</div>
+              <div className="font-medium text-green-600">{latestRun.total_approved || 0}</div>
+              {latestRun.total_new !== undefined && latestRun.total_approved > 0 && (
+                <div className="text-xs text-gray-400">
+                  新增 {latestRun.total_new || 0} / 更新 {(latestRun.total_approved || 0) - (latestRun.total_new || 0)}
+                </div>
+              )}
+            </div>
+          </Tooltip>
+          <Tooltip content="进入匹配但未达到评分/合规性门槛、被淘汰的商品数（可在候选列表按「已拒绝」状态查看具体原因）。">
+            <div>
+              <div className="text-gray-500">已淘汰</div>
+              <div className="font-medium text-red-600">{latestRun.total_rejected || 0}</div>
+            </div>
+          </Tooltip>
         </div>
         {runPollError && (
           <div className="flex items-start justify-between gap-2 text-xs text-amber-700 bg-amber-50 p-2 rounded">
@@ -1520,6 +1587,7 @@ export function CandidatesPage() {
                 options={[
                   { label: '全部状态', value: '' },
                   { label: '待审核', value: 'pending' },
+                  { label: '进入匹配', value: 'matched' },
                   { label: '已通过', value: 'approved' },
                   { label: '已拒绝', value: 'rejected' },
                   { label: '已上架', value: 'published' },
@@ -1539,13 +1607,44 @@ export function CandidatesPage() {
                 style={{ width: 150 }}
                 placeholder="站点筛选"
               />
+              <Select
+                value={orderBy}
+                onChange={(v) => setOrderBy(v as string)}
+                options={[
+                  { label: '入库时间（新→旧）', value: 'created_at DESC' },
+                  { label: '入库时间（旧→新）', value: 'created_at ASC' },
+                  { label: '评分（高→低）', value: 'score_total DESC, created_at DESC' },
+                ]}
+                style={{ width: 160 }}
+                placeholder="排序"
+              />
+              <div className="relative">
+                <Button variant="outline" size="medium" onClick={() => setShowColSettings((v) => !v)}>
+                  列设置
+                </Button>
+                {showColSettings && (
+                  <div className="absolute right-0 z-20 mt-1 bg-white border border-gray-200 shadow-lg rounded-lg p-2 max-h-80 overflow-auto" style={{ minWidth: 220 }}>
+                    <div className="text-xs text-gray-400 px-2 py-1">点击切换列显隐（自动保存）</div>
+                    {columnToggleOptions.map((opt) => (
+                      <div key={opt.colKey} className="flex items-center gap-2 px-2 py-1">
+                        <Switch
+                          size="small"
+                          value={colVisibility[opt.colKey] !== false}
+                          onChange={(val) => toggleColumn(opt.colKey, val as boolean)}
+                        />
+                        <span className="text-sm">{opt.title}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </Space>
           </div>
 
           <Loading loading={loading} size="small">
             <Table
               data={rows}
-              columns={columns}
+              columns={visibleColumns}
               rowKey="id"
               bordered
               hover

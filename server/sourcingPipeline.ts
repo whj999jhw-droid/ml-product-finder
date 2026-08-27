@@ -106,6 +106,7 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
     let totalScored = 0;
     let totalApproved = 0;
     let totalRejected = 0;
+    let totalNew = 0;
     const rejectReasons: Record<string, number> = {};
 
     // 2) 逐个查 1688 + 利润 + 评分 + 入库
@@ -119,11 +120,12 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
         total_rejected: totalRejected,
       });
       try {
-        const { result, reason } = await processOneCandidate(runId, raw, targetNetRate, minScore, scanToken);
-        totalScored++;
-        if (result) {
-          totalApproved++;
-        } else {
+      const { result, reason, isNew } = await processOneCandidate(runId, raw, targetNetRate, minScore, scanToken);
+      totalScored++;
+      if (result) {
+        totalApproved++;
+        if (isNew) totalNew++;
+      } else {
           totalRejected++;
           rejectReasons[reason] = (rejectReasons[reason] || 0) + 1;
           console.log(`[SourcingPipeline] 候选 ${raw.itemId} 未通过: ${reason}`);
@@ -137,6 +139,30 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
       await sleep(800);
     }
 
+    // 将「进入匹配但未核价」的尾部商品也落库（status='matched'），便于前端按漏斗查看
+    for (let i = totalToProcess; i < rawCandidates.length; i++) {
+      const r = rawCandidates[i];
+      insertCandidate({
+        run_id: runId,
+        site: r.site,
+        ml_item_id: r.itemId,
+        ml_title: r.title,
+        ml_price_usd: r.priceUsd,
+        ml_currency: r.currency,
+        ml_sold_quantity: r.soldQuantity,
+        ml_category_id: r.categoryId,
+        ml_category_name: r.categoryName || '',
+        ml_permalink: r.permalink,
+        ml_thumbnail: r.thumbnail,
+        ml_seller_id: r.sellerId ? String(r.sellerId) : null,
+        ml_listing_date: r.listingDate,
+        status: 'matched',
+        source_tag: r.sourceTag || 'recent',
+        trend_keyword: r.trendKeyword || null,
+        trend_note: `进入匹配但未核价（受单次处理上限 ${maxCandidatesToSource} 个限制）`,
+      });
+    }
+
     const rejectSummary = Object.entries(rejectReasons)
       .sort((a, b) => b[1] - a[1])
       .map(([k, v]) => `${k}:${v}`)
@@ -144,8 +170,11 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
     updateSourcingRun(runId, {
       status: 'done',
       finished_at: new Date().toISOString(),
+      total_scanned: scan.totalScanned,
+      total_matched: rawCandidates.length,
       total_scored: totalScored,
       total_approved: totalApproved,
+      total_new: totalNew,
       total_rejected: totalRejected,
       message: `选品完成：扫描 ${scan.totalScanned} 个，入库 ${totalApproved} 个${rejectSummary ? `，淘汰原因 [${rejectSummary}]` : ''}`,
       error: errors.length ? errors.join('; ') : null,
@@ -176,7 +205,7 @@ function buildCandidateRow(
   runId: string,
   enriched: Awaited<ReturnType<typeof enrichCandidate>>,
   opts: {
-    status: 'pending' | 'rejected';
+    status: 'pending' | 'rejected' | 'matched';
     rejectReason?: string;
     searchQuery?: string;
     source?: Ali1688Product;
@@ -300,7 +329,7 @@ async function processOneCandidate(
   targetNetRate: number,
   minScore: number,
   scanToken?: string
-): Promise<{ result: SourcedCandidate | null; reason: string }> {
+): Promise<{ result: SourcedCandidate | null; reason: string; isNew?: boolean }> {
   // 2.1 补充详情（重量/尺寸/图片）
   const enriched = await enrichCandidate(raw, scanToken);
 
@@ -403,7 +432,7 @@ async function processOneCandidate(
   }
 
   // 2.6 入库（通过 → pending）
-  const dbId = insertCandidate(
+  const ins = insertCandidate(
     buildCandidateRow(runId, enriched, {
       status: 'pending',
       searchQuery,
@@ -415,7 +444,7 @@ async function processOneCandidate(
     })
   );
 
-  if (!dbId) return { result: null, reason: '数据库写入失败' };
+  if (!ins.id) return { result: null, reason: '数据库写入失败' };
 
   return {
     result: {
@@ -424,9 +453,10 @@ async function processOneCandidate(
       profit,
       score,
       suggestedPriceUsd: listingPrice,
-      dbId,
+      dbId: ins.id,
     },
     reason: '通过',
+    isNew: ins.isNew,
   };
 }
 
