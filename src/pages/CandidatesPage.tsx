@@ -225,6 +225,13 @@ export function CandidatesPage() {
   const [activeTab, setActiveTab] = useState<'candidates' | 'published'>('candidates');
   const [siteFilter, setSiteFilter] = useState('');
 
+  // 运行状态卡片点击下钻到对应列表筛选
+  const drillToStatus = (nextStatus: string) => {
+    setActiveTab('candidates');
+    setStatus(nextStatus);
+    // 切换到候选列表后会由 useEffect 自动拉取
+  };
+
   // 批量上架
   const [selectedRowIds, setSelectedRowIds] = useState<(string | number)[]>([]);
   const [batchOpen, setBatchOpen] = useState(false);
@@ -1485,40 +1492,60 @@ export function CandidatesPage() {
           )}
         </div>
         <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
-          <Tooltip content="本次扫描从 Mercado Libre 各站点抓取到的候选商品总数（尚未经过 1688 匹配与评分筛选）。">
-            <div>
+          <Tooltip content="本次扫描从 Mercado Libre 各站点抓取到的候选商品总数（尚未经过 1688 匹配与评分筛选）。点击显示全部候选。">
+            <button
+              type="button"
+              onClick={() => drillToStatus('')}
+              className="text-left rounded-lg border border-gray-100 bg-white px-3 py-2 hover:border-blue-300 hover:shadow-sm transition"
+            >
               <div className="text-gray-500">扫描商品</div>
-              <div className="font-medium">{latestRun.total_scanned || 0}</div>
-            </div>
+              <div className="font-medium text-lg">{latestRun.total_scanned || 0}</div>
+            </button>
           </Tooltip>
-          <Tooltip content="扫描结果中符合基础过滤条件、进入 1688 货源匹配环节的商品数。其中超出单次处理上限的部分会记为「进入匹配」但未核价，可在候选列表按状态筛选查看。">
-            <div>
+          <Tooltip content="扫描结果中符合基础过滤条件、进入 1688 货源匹配环节的商品数。点击筛选「进入匹配」状态。">
+            <button
+              type="button"
+              onClick={() => drillToStatus('matched')}
+              className="text-left rounded-lg border border-gray-100 bg-white px-3 py-2 hover:border-blue-300 hover:shadow-sm transition"
+            >
               <div className="text-gray-500">进入匹配</div>
-              <div className="font-medium">{latestRun.total_matched || 0}</div>
-            </div>
+              <div className="font-medium text-lg">{latestRun.total_matched || 0}</div>
+            </button>
           </Tooltip>
-          <Tooltip content="实际完成 1688 找货 + 利润测算 + 五维评分的商品数（受单次处理上限限制，小于「进入匹配」）。">
-            <div>
+          <Tooltip content="实际完成 1688 找货 + 利润测算 + 五维评分的商品数（受单次处理上限限制，小于「进入匹配」）。点击显示所有已核价候选。">
+            <button
+              type="button"
+              onClick={() => drillToStatus('')}
+              className="text-left rounded-lg border border-gray-100 bg-white px-3 py-2 hover:border-blue-300 hover:shadow-sm transition"
+            >
               <div className="text-gray-500">已核价</div>
-              <div className="font-medium">{latestRun.total_scored || 0}</div>
-            </div>
+              <div className="font-medium text-lg text-blue-600">{latestRun.total_scored || 0}</div>
+            </button>
           </Tooltip>
-          <Tooltip content="通过评分门槛并写入候选库的商品数。系统按「站点+商品ID」去重：与历史同款重复的商品会更新已有记录而非新增，因此「入库通过」往往大于列表里真正新增的条数。">
-            <div>
-              <div className="text-gray-500">入库通过</div>
-              <div className="font-medium text-green-600">{latestRun.total_approved || 0}</div>
+          <Tooltip content="系统初筛通过并写入候选库的商品，当前状态为「待审核」，需要你在列表里点「通过」后才会进入可上架状态。点击筛选「待审核」。">
+            <button
+              type="button"
+              onClick={() => drillToStatus('pending')}
+              className="text-left rounded-lg border border-gray-100 bg-white px-3 py-2 hover:border-blue-300 hover:shadow-sm transition"
+            >
+              <div className="text-gray-500">入库待审</div>
+              <div className="font-medium text-lg text-green-600">{latestRun.total_approved || 0}</div>
               {latestRun.total_new !== undefined && latestRun.total_approved > 0 && (
                 <div className="text-xs text-gray-400">
                   新增 {latestRun.total_new || 0} / 更新 {(latestRun.total_approved || 0) - (latestRun.total_new || 0)}
                 </div>
               )}
-            </div>
+            </button>
           </Tooltip>
-          <Tooltip content="进入匹配但未达到评分/合规性门槛、被淘汰的商品数（可在候选列表按「已拒绝」状态查看具体原因）。">
-            <div>
+          <Tooltip content="进入匹配但未达到评分/合规性门槛、被淘汰的商品数。点击筛选「已拒绝」查看具体原因。">
+            <button
+              type="button"
+              onClick={() => drillToStatus('rejected')}
+              className="text-left rounded-lg border border-gray-100 bg-white px-3 py-2 hover:border-blue-300 hover:shadow-sm transition"
+            >
               <div className="text-gray-500">已淘汰</div>
-              <div className="font-medium text-red-600">{latestRun.total_rejected || 0}</div>
-            </div>
+              <div className="font-medium text-lg text-red-600">{latestRun.total_rejected || 0}</div>
+            </button>
           </Tooltip>
         </div>
         {runPollError && (
