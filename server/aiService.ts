@@ -965,17 +965,24 @@ function parseTitleList(raw: string, max: number): ParsedTitleList {
   const translations: string[] = [];
   const zhPrefixes = ['ZH:', '中文：', '中文:', '中文翻译：', '中文翻译:', '翻译：', '翻译:'];
 
+  // 去掉标题两侧的 markdown 噪音（**、引号、列表符 -）
+  const clean = (s: string) =>
+    s
+      .replace(/^\d+[\)\.\:]\s*/, '')
+      .replace(/^[*`_~\-\s]+|[*`_~\-\s]+$/g, '')
+      .replace(/^["'「」『』]+|["'「」『』]+$/g, '')
+      .trim();
+
   for (let i = 0; i < lines.length && titles.length < max; i++) {
     const line = lines[i];
-    // 判断是否为编号标题行：以数字 + )/.:/) 开头，且不是 ZH 行
+    // 编号标题行：以数字 + )/.:/) 开头，且不是 ZH 行
     const isTitleLine = /^\d+[\)\.\:]\s*/.test(line) && !zhPrefixes.some((pre) => line.toUpperCase().startsWith(pre.toUpperCase()));
     if (!isTitleLine) continue;
 
-    const cleaned = line.replace(/^\d+[\)\.\:]\s*/, '').replace(/^["'\s]+|["'\s]+$/g, '').trim();
+    const cleaned = clean(line);
     if (!cleaned || cleaned.length < 5 || cleaned.length > 80) continue;
 
     titles.push(cleaned);
-    // 看下一行是不是 ZH 翻译
     const nextLine = lines[i + 1] || '';
     let zh = '';
     for (const pre of zhPrefixes) {
@@ -985,6 +992,21 @@ function parseTitleList(raw: string, max: number): ParsedTitleList {
       }
     }
     translations.push(zh);
+  }
+
+  // 兜底：编号解析未命中时，直接把「非 ZH、非说明性」的行当作标题取前 max 条。
+  // 模型常不遵守编号格式，但仍能产出可用标题。
+  if (titles.length === 0) {
+    const junk = /^(sure|here|ok|note|title|título|los|las|el|la|the|este|esta)\b/i;
+    for (let i = 0; i < lines.length && titles.length < max; i++) {
+      const line = lines[i];
+      if (zhPrefixes.some((pre) => line.toUpperCase().startsWith(pre.toUpperCase()))) continue;
+      const cleaned = clean(line);
+      if (!cleaned || cleaned.length < 5 || cleaned.length > 80) continue;
+      if (junk.test(cleaned)) continue;
+      titles.push(cleaned);
+      translations.push('');
+    }
   }
 
   return { titles, translations };

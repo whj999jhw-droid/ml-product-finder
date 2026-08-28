@@ -2257,9 +2257,17 @@ app.post('/api/ml/sourcing/run', async (req, res) => {
     // 同步创建运行记录：若 DB 未初始化会立即报错并返回给前端
     createSourcingRun(runId);
     // 异步执行，不等待
-    runSourcingPipeline({ ...opts, runId })
-      .then((r) => console.log(`[Sourcing] 流水线完成 runId=${r.runId}: ${r.totalApproved}/${r.totalScored} 通过`))
-      .catch((e) => console.error('[Sourcing] 流水线异常:', e));
+    if (opts.mode === 'custom-new') {
+      // 定制新品发现模式：按类目热词搜 1688，过滤「定制+30天上新」的货源入库
+      const { runCustomNewScan } = await import('./sourcingPipeline.js');
+      runCustomNewScan({ keywords: opts.keywords, site: opts.site, runId, targetNetRate: opts.targetNetRate, maxPerKeyword: opts.maxPerKeyword })
+        .then((r) => console.log(`[CustomNew] 发现完成 runId=${r.runId}: 命中 ${r.totalApproved}/${r.totalScanned}`))
+        .catch((e) => console.error('[CustomNew] 异常:', e));
+    } else {
+      runSourcingPipeline({ ...opts, runId })
+        .then((r) => console.log(`[Sourcing] 流水线完成 runId=${r.runId}: ${r.totalApproved}/${r.totalScored} 通过`))
+        .catch((e) => console.error('[Sourcing] 流水线异常:', e));
+    }
     res.json({ success: true, message: '选品流水线已启动', runId });
   } catch (e: any) {
     console.error('[Sourcing] 启动失败:', e);
@@ -2325,7 +2333,8 @@ app.get('/api/ml/candidates', async (req, res) => {
   const minScore = req.query.minScore ? Number(req.query.minScore) : undefined;
   const limit = req.query.limit ? Number(req.query.limit) : 50;
   const offset = req.query.offset ? Number(req.query.offset) : 0;
-  const { rows, total } = getCandidates({ status, site, runId, minScore, limit, offset });
+  const customNew = req.query.customNew === '1' || req.query.customNew === 'true' ? true : undefined;
+  const { rows, total } = getCandidates({ status, site, runId, minScore, limit, offset, customNew });
   res.json({ success: true, rows, total, limit, offset });
 });
 

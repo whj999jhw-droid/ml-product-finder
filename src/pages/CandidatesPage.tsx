@@ -49,10 +49,13 @@ interface Candidate {
   score_logistics: number;
   score_compliance: number;
   ai_evaluation_json?: string;
+  ai_title?: string;
+  ai_description?: string;
+  flags?: string;
   status: 'pending' | 'approved' | 'rejected' | 'published' | 'matched';
   reject_reason: string;
   trend_note?: string;
-  source_tag?: 'recent' | 'trend' | 'bestseller';
+  source_tag?: 'recent' | 'trend' | 'bestseller' | 'custom-new';
   weight_kg: number;
   length_cm: number;
   width_cm: number;
@@ -162,6 +165,7 @@ export function CandidatesPage() {
   const [rows, setRows] = useState<Candidate[]>([]);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<string>('');
+  const [customNewFilter, setCustomNewFilter] = useState<boolean>(false);
   const [running, setRunning] = useState(false);
   const [scanMode, setScanMode] = useState<string>('all');
   const [stores, setStores] = useState<Store[]>([]);
@@ -390,6 +394,7 @@ export function CandidatesPage() {
     try {
       const params = new URLSearchParams();
       if (status) params.set('status', status);
+      if (customNewFilter) params.set('customNew', '1');
       if (siteFilter) params.set('site', siteFilter);
       if (orderBy) params.set('orderBy', orderBy);
       params.set('limit', '100');
@@ -425,7 +430,7 @@ export function CandidatesPage() {
       const res = await fetch('/api/ml/sourcing/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ maxCandidatesToSource: 30, targetNetRate: 0.15, mode: scanMode }),
+        body: JSON.stringify({ maxCandidatesToSource: 30, targetNetRate: 0.15, mode: scanMode, site: siteFilter || undefined }),
       });
       const data = await res.json();
       if (data.success && data.runId) {
@@ -514,8 +519,8 @@ export function CandidatesPage() {
       initialListingTypeBySite[site] = 'gold_special';
     }
     const draft: PublishDraft = {
-      title: row.ml_title || row.ali1688_title || '',
-      description: buildDefaultDescription(row, row.ml_title || row.ali1688_title || ''),
+      title: row.ai_title || row.ml_title || row.ali1688_title || '',
+      description: row.ai_description || buildDefaultDescription(row, row.ml_title || row.ali1688_title || ''),
       pictureUrls: imgs,
       listingPriceUsd: basePrice,
       priceBySite: initialPriceBySite,
@@ -1290,6 +1295,7 @@ export function CandidatesPage() {
           trend: { label: '🔥热搜上升', theme: 'warning' },
           bestseller: { label: '🏆热销榜', theme: 'danger' },
           recent: { label: '🆕近期新上', theme: 'success' },
+          'custom-new': { label: '🛠定制新品', theme: 'primary' },
         };
         const s = map[row.source_tag || 'recent'] || map.recent;
         return <Tag theme={s.theme} size="small">{s.label}</Tag>;
@@ -1604,6 +1610,7 @@ export function CandidatesPage() {
                   { label: '近期新上+有销量', value: 'recent' },
                   { label: '🔥官方热搜上升品', value: 'trend' },
                   { label: '🏆类目热销榜', value: 'bestseller' },
+                  { label: '🛠 定制新品提前布局', value: 'custom-new' },
                 ]}
                 style={{ width: 180 }}
               />
@@ -1628,6 +1635,15 @@ export function CandidatesPage() {
                   { label: '已通过', value: 'approved' },
                   { label: '已拒绝', value: 'rejected' },
                   { label: '已上架', value: 'published' },
+                ]}
+                style={{ width: 130 }}
+              />
+              <Select
+                value={customNewFilter ? '1' : ''}
+                onChange={(v) => setCustomNewFilter(v === '1')}
+                options={[
+                  { label: '全部商品', value: '' },
+                  { label: '🛠 仅定制新品', value: '1' },
                 ]}
                 style={{ width: 130 }}
               />
@@ -1891,7 +1907,12 @@ export function CandidatesPage() {
                   <div className="grid grid-cols-12 gap-4">
                     <div className="col-span-8">
                       <div className="flex items-center justify-between mb-1">
-                        <span className="text-sm font-medium">商品标题</span>
+                        <span className="text-sm font-medium">
+                          商品标题
+                          {publishRow?.ai_title && (
+                            <Tag size="small" theme="primary" style={{ marginLeft: 6 }}>AI 已优化填入</Tag>
+                          )}
+                        </span>
                         <Button size="small" variant="text" theme="primary" onClick={handleGenerateTitle}>
                           生成标题
                         </Button>
@@ -1901,6 +1922,9 @@ export function CandidatesPage() {
                         onChange={(v) => setPublishDraft((prev) => (prev ? { ...prev, title: String(v) } : prev))}
                         placeholder="西/葡语标题"
                       />
+                      {publishRow?.ai_description && (
+                        <div className="mt-1 text-xs text-gray-400 line-clamp-2">AI 描述已预填，可在下方描述框查看/修改</div>
+                      )}
                     </div>
                     <div className="col-span-2">
                       <div className="text-sm font-medium mb-1">默认售价（USD）</div>

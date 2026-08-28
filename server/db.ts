@@ -232,6 +232,11 @@ CREATE TABLE IF NOT EXISTS candidates (
   score_total REAL,
   -- AI 选品研判结果（JSON）
   ai_evaluation_json TEXT,
+  -- AI 生成的精化上架标题（西/葡语，融入热搜词）/ 描述（合规重写）
+  ai_title TEXT,
+  ai_description TEXT,
+  -- 信号标记（JSON）：定制新品提前布局用。如 {"isCustom":true,"isNewArrival":true,"customNewArrival":true,"customKeywords":["定制"]}
+  flags TEXT,
   -- 审核工作流
   status TEXT NOT NULL DEFAULT 'pending',
   reject_reason TEXT,
@@ -391,6 +396,19 @@ CREATE TABLE IF NOT EXISTS app_config (
       if (!cols.find((c) => c.name === 'trend_keyword')) {
         db.exec("ALTER TABLE candidates ADD COLUMN trend_keyword TEXT");
         console.log('[DB] candidates.trend_keyword 列已添加');
+      }
+      // 兼容旧数据库：若 candidates 表缺少 AI 标题/描述/信号标记列则补加
+      if (!cols.find((c) => c.name === 'ai_title')) {
+        db.exec("ALTER TABLE candidates ADD COLUMN ai_title TEXT");
+        console.log('[DB] candidates.ai_title 列已添加');
+      }
+      if (!cols.find((c) => c.name === 'ai_description')) {
+        db.exec("ALTER TABLE candidates ADD COLUMN ai_description TEXT");
+        console.log('[DB] candidates.ai_description 列已添加');
+      }
+      if (!cols.find((c) => c.name === 'flags')) {
+        db.exec("ALTER TABLE candidates ADD COLUMN flags TEXT");
+        console.log('[DB] candidates.flags 列已添加');
       }
     } catch (e: any) {
       console.warn('[DB] 检查/补加 trend_note/seller_sku 列失败:', e?.message || String(e));
@@ -712,8 +730,13 @@ export function getLatestSourcingRun(): any {
  */
 export function cleanupStaleSourcingRuns(maxAgeMinutes: number = 30): number {
   if (!db) return 0;
-  const cutoff = new Date(Date.now() - maxAgeMinutes * 60 * 1000).toISOString();
-  const result = db.prepare("UPDATE sourcing_runs SET status='failed', finished_at=?, message='运行超时或被新扫描覆盖' WHERE status='running' AND started_at < ?").run(new Date().toISOString(), cutoff);
+  // 用 SQLite datetime() 比较，避免 started_at 的「YYYY-MM-DD HH:MM:SS」与 ISO cutoff 字符串比较错位
+  // （空格 < 'T' 导致原本所有 running 记录都被误判为超时）。
+  const result = db
+    .prepare(
+      "UPDATE sourcing_runs SET status='failed', finished_at=?, message='运行超时或被新扫描覆盖' WHERE status='running' AND datetime(started_at) < datetime('now', ?)"
+    )
+    .run(new Date().toISOString(), `-${maxAgeMinutes} minutes`);
   const count = result.changes || 0;
   if (count > 0) console.log(`[DB] 清理 ${count} 条卡死的 sourcing_runs 记录`);
   return count;
@@ -751,6 +774,8 @@ export function getCandidates(opts?: {
   limit?: number;
   offset?: number;
   orderBy?: string;
+  /** #4 MVP：仅返回定制货源（提前布局）信号命中的候选（source_tag='custom-new'） */
+  customNew?: boolean;
 }): { rows: any[]; total: number } {
   if (!db) return { rows: [], total: 0 };
   const where: string[] = [];
@@ -759,6 +784,7 @@ export function getCandidates(opts?: {
   if (opts?.runId) { where.push('run_id = @runId'); params.runId = opts.runId; }
   if (opts?.site) { where.push('site = @site'); params.site = opts.site; }
   if (opts?.minScore !== undefined) { where.push('score_total >= @minScore'); params.minScore = opts.minScore; }
+  if (opts?.customNew) { where.push("source_tag = 'custom-new'"); }
 
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const totalRow = db.prepare(`SELECT COUNT(*) AS c FROM candidates ${whereSql}`).get(params);

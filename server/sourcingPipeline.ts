@@ -14,7 +14,8 @@ import {
 import { search1688ByQuery, get1688ProductDetail, type Ali1688Product } from './ali1688Skill.js';
 import { calculateProfit, reverseEngineerPrice, type ProfitResult } from './profit.js';
 import { scoreCandidate, isScorePass, type ScoreBreakdown } from './scoring.js';
-import { aiEvaluateCandidate, assessSourceRelevance, type AIEvaluationResult } from './aiService.js';
+import { aiEvaluateCandidate, assessSourceRelevance, aiGenerateTitles, aiGenerateDescription, getLlmConfig, type AIEvaluationResult } from './aiService.js';
+import { getTrendsKeywords } from './trends.js';
 import {
   createSourcingRun,
   updateSourcingRun,
@@ -214,6 +215,12 @@ function buildCandidateRow(
     listingPrice?: number;
     score?: ScoreBreakdown;
     aiEvaluation?: AIEvaluationResult;
+  /** #4 MVP：定制新品信号标记（JSON 字符串） */
+  flags?: CustomFlags;
+  /** #2：AI 精化上架标题（西/葡语） */
+  aiTitle?: string;
+  /** #2：AI 精化商品描述 */
+  aiDescription?: string;
   }
 ): Record<string, any> {
   const zh = CATEGORY_ZH_BY_ID[enriched.categoryId] || '';
@@ -268,6 +275,11 @@ function buildCandidateRow(
     row.score_total = opts.score.total;
   }
   if (opts.aiEvaluation) row.ai_evaluation_json = JSON.stringify(opts.aiEvaluation);
+  // #2：AI 精化标题/描述（best-effort 生成，可能为空；空则不写列）
+  if (opts.aiTitle) row.ai_title = opts.aiTitle;
+  if (opts.aiDescription) row.ai_description = opts.aiDescription;
+  // #4 MVP：定制新品信号标记
+  if (opts.flags) row.flags = JSON.stringify(opts.flags);
   // 趋势备注：简明说明为何选入（近期上架 + 上涨趋势 + 售价区间 + 竞争环境）
   row.trend_note = buildTrendNote(enriched, opts.score?.competition);
   // 来源标记（recent / trend / bestseller）
@@ -451,6 +463,44 @@ async function processOneCandidate(
     console.warn(`[SourcingPipeline] 候选 ${raw.itemId} AI 研判失败:`, err?.message || err);
   }
 
+  // 2.5b AI 精化上架标题/描述（#2：把已有但零调用的生成函数接进流水线）
+  // best-effort：LLM 未配置或失败都不阻断入库。
+  let aiTitle = '';
+  let aiDescription = '';
+  if (getLlmConfig()) {
+    try {
+      const titles = await aiGenerateTitles({
+        competitorTitle: enriched.title,
+        site: enriched.site,
+        sourceTitle: source.title,
+        sourcePriceCNY: source.price,
+        count: 3,
+        trendKeywords: enriched.trendKeyword ? [enriched.trendKeyword] : undefined,
+      });
+      aiTitle = titles.titles[0] || '';
+    } catch (e: any) {
+      console.warn(`[SourcingPipeline] 候选 ${raw.itemId} AI 标题生成失败:`, e?.message || e);
+    }
+    if (aiTitle) {
+      try {
+        const desc = await aiGenerateDescription({
+          title: aiTitle,
+          site: enriched.site,
+          sourceTitle: source.title,
+          sourcePriceCNY: source.price,
+          categoryName: enriched.categoryName,
+          trendKeywords: enriched.trendKeyword ? [enriched.trendKeyword] : undefined,
+        });
+        aiDescription = desc.description || '';
+      } catch (e: any) {
+        console.warn(`[SourcingPipeline] 候选 ${raw.itemId} AI 描述生成失败:`, e?.message || e);
+      }
+    }
+  }
+
+  // 2.5c 定制新品信号（#4 MVP）：从 1688 货源标题/上架时间抽取
+  const flags = classifyCustom(source);
+
   // 2.6 入库（通过 → pending）
   const ins = insertCandidate(
     buildCandidateRow(runId, enriched, {
@@ -461,6 +511,9 @@ async function processOneCandidate(
       listingPrice,
       score,
       aiEvaluation,
+      flags,
+      aiTitle,
+      aiDescription,
     })
   );
 
@@ -540,4 +593,148 @@ function estimate1688Shipping(priceCny: number): number {
   if (priceCny < 20) return 3;
   if (priceCny < 100) return 5;
   return 8;
+}
+
+// ============ 定制新品信号（#4 MVP）============
+// 从 1688 货源标题抽取「支持定制/定做/OEM/ODM」等关键词，结合上架时间判断「新品」。
+const CUSTOM_KEYWORDS = ['定制', '定做', 'oem', 'odm', '来样加工', '支持定制', '私模', '加工定制'];
+
+export interface CustomFlags {
+  isCustom: boolean;
+  isNewArrival: boolean;
+  customNewArrival: boolean;
+  customKeywords: string[];
+}
+
+export function classifyCustom(product: Ali1688Product, newArrivalDays = 30): CustomFlags {
+  const title = (product.title || '').toLowerCase();
+  const hits = CUSTOM_KEYWORDS.filter((k) => title.includes(k.toLowerCase()));
+  const isCustom = hits.length > 0;
+  let isNewArrival = false;
+  const t = product.stats?.earliestListingTime;
+  if (t) {
+    const d = Date.parse(t);
+    if (!isNaN(d)) {
+      const days = (Date.now() - d) / 86400000;
+      isNewArrival = days >= 0 && days <= newArrivalDays;
+    }
+  }
+  return { isCustom, isNewArrival, customNewArrival: isCustom && isNewArrival, customKeywords: hits };
+}
+
+// 生成 1688 搜索用的「类目热词」种子（定制新品发现模式用）
+// 1688 是中文平台，必须用中文词才能命中「定制/OEM/ODM」标题；站点热搜词是西/葡语，搜 1688 基本无定制命中。
+// 故此处固定用跨境电商常见易定制的类目中文词（后续可做成可配置）。
+function customNewSeedKeywords(_site: string): string[] {
+  return [
+    '收纳盒 定制', '手机壳 定制', '硅胶模具 定制', '宠物用品 定制', '化妆刷 定制',
+    '瑜伽裤 定制', '车载支架 定制', 'LED灯带 定制', '钥匙扣 定制', '保温杯 定制',
+    '定做', 'OEM 加工', '来样加工', '私模',
+  ];
+}
+
+/**
+ * 定制新品发现扫描（#4 MVP 的「提前布局」能力）。
+ * 不再按 ML 竞品标题搜，而是按类目热词直接搜 1688，过滤出
+ * 「支持定制 + 30天内上新」的货源，作为候选入库（source_tag='custom-new'）。
+ * 这些往往是小 B 需求萌芽、可能先于 C 端爆款的源头。
+ */
+export async function runCustomNewScan(opts: {
+  keywords?: string[];
+  site?: string;
+  runId?: string;
+  targetNetRate?: number;
+  maxPerKeyword?: number;
+} = {}): Promise<{ runId: string; status: string; totalScanned: number; totalApproved: number; totalRejected: number }> {
+  const runId = opts.runId || uuidv4();
+  const site = opts.site || 'MLM';
+  const targetNetRate = opts.targetNetRate ?? 0.15;
+  const maxPerKeyword = opts.maxPerKeyword ?? 12;
+  try {
+    const existing = getSourcingRun(runId);
+    if (!existing) createSourcingRun(runId);
+  } catch (e: any) {
+    console.error(`[CustomNewScan] 创建运行记录失败 runId=${runId}:`, e?.message || String(e));
+    throw e;
+  }
+
+  const keywords = opts.keywords && opts.keywords.length ? opts.keywords : await customNewSeedKeywords(site);
+  let totalScanned = 0;
+  let totalApproved = 0;
+  let totalRejected = 0;
+
+  try {
+    updateSourcingRun(runId, { message: `定制新品发现：种子词 ${keywords.length} 个`, total_scanned: 0, total_approved: 0, total_rejected: 0 });
+    for (const kw of keywords) {
+      const res = await search1688ByQuery(kw);
+      if (!res.success) continue;
+      const products = res.products.slice(0, maxPerKeyword);
+      for (const p of products) {
+        totalScanned++;
+        const flags = classifyCustom(p);
+        // 硬性门槛：必须是「支持定制/OEM」的货源（这是可检测的提前布局信号）。
+        // isNewArrival（1688 上新≤30天）依赖 earliestListingTime，搜索接口常不返回，
+        // 故作为加分项而非硬门槛——能拿到就标「上新」，拿不到只标「定制能力」。
+        if (!flags.isCustom) {
+          totalRejected++;
+          continue;
+        }
+        // 利润粗估（默认 0.5kg / 10cm 立方；仅给一个量级参考，非精算）
+        const priceCny = p.price || 0;
+        const shipCny = estimate1688Shipping(priceCny);
+        const suggested = await reverseEngineerPrice(
+          { site, purchaseCostCny: priceCny, firstLegShippingCny: shipCny, weightKg: 0.5, lengthCm: 10, widthCm: 10, heightCm: 10, taxMode: 'direct_import', adAcosRate: 0.05 },
+          targetNetRate
+        );
+        const listingPrice = suggested > 0 ? suggested : priceCny * 3;
+        const profit = await calculateProfit(
+          { site, listingPriceUsd: listingPrice, purchaseCostCny: priceCny, firstLegShippingCny: shipCny, weightKg: 0.5, lengthCm: 10, widthCm: 10, heightCm: 10, taxMode: 'direct_import', adAcosRate: 0.05 }
+        );
+        const row: Record<string, any> = {
+          run_id: runId,
+          site,
+          ml_item_id: `custom-${p.id}-${kw}`,
+          ml_title: p.title,
+          ml_price_usd: +(priceCny * 0.14).toFixed(2),
+          ml_category_name: p.stats?.categoryListName || '',
+          ml_thumbnail: p.imageUrl || '',
+          ml_pictures: JSON.stringify(p.imageUrl ? [p.imageUrl] : []),
+          source_title: kw,
+          source_image_url: p.imageUrl || '',
+          ali1688_product_id: p.id,
+          ali1688_title: p.title,
+          ali1688_price_cny: p.price,
+          ali1688_shipping_cny: shipCny,
+          ali1688_url: p.url,
+          ali1688_supplier: p.stats?.categoryListName || '',
+          ali1688_image_url: p.imageUrl,
+          listing_price_usd: +listingPrice.toFixed(2),
+          profit_net_usd: +profit.netProfit.toFixed(2),
+          profit_rate: +profit.netProfitRate.toFixed(4),
+          roi: +profit.roi.toFixed(2),
+          break_even_price: +profit.breakEvenPrice.toFixed(2),
+          cost_breakdown_json: JSON.stringify(profit.costBreakdown),
+          status: 'pending',
+          reject_reason: null,
+          trend_note: `🛠定制货源: ${flags.customKeywords.join('/')}${flags.isNewArrival ? ' · 1688 上新≤30天' : ''} · 种子词「${kw}」`,
+          source_tag: 'custom-new',
+          trend_keyword: kw,
+          flags: JSON.stringify(flags),
+        };
+        const ins = insertCandidate(row);
+        if (ins.id) totalApproved++;
+        updateSourcingRun(runId, { total_scanned: totalScanned, total_approved: totalApproved, total_rejected: totalRejected });
+      }
+    }
+    updateSourcingRun(runId, {
+      status: 'done',
+      finished_at: new Date().toISOString(),
+      message: `定制货源发现完成：扫描 ${totalScanned} 个，命中可定制货源 ${totalApproved} 个`,
+    });
+    return { runId, status: 'done', totalScanned, totalApproved, totalRejected };
+  } catch (err: any) {
+    const msg = err?.message || String(err);
+    updateSourcingRun(runId, { status: 'failed', finished_at: new Date().toISOString(), message: `定制新品发现失败：${msg}`, error: msg });
+    return { runId, status: 'failed', totalScanned, totalApproved, totalRejected };
+  }
 }
