@@ -1320,6 +1320,8 @@ export interface SourceRelevanceResult {
   relevant: boolean;
   score: number;
   reason: string;
+  /** true 表示 LLM 未配置/调用失败，结果不可信，调用方应退回兜底逻辑而非据此拦截 */
+  unavailable?: boolean;
 }
 
 /**
@@ -1337,7 +1339,7 @@ export async function assessSourceRelevance(
 ): Promise<SourceRelevanceResult> {
   const cfg = getLlmConfig();
   if (!cfg) {
-    return { relevant: true, score: 0.5, reason: 'LLM 未配置，跳过相关性校验' };
+    return { relevant: true, score: 0.5, reason: 'LLM 未配置，跳过相关性校验', unavailable: true };
   }
 
   const systemPrompt = `You are a cross-border e-commerce product matching expert.
@@ -1374,7 +1376,7 @@ Mercado Libre 类目：${mlCategory || 'N/A'}
     });
     const parsed = extractJsonObject(raw) as Partial<SourceRelevanceResult> | undefined;
     if (!parsed || typeof parsed.relevant !== 'boolean' || typeof parsed.score !== 'number') {
-      return { relevant: true, score: 0.5, reason: 'LLM 相关性格式异常，按通过处理' };
+      return { relevant: true, score: 0.5, reason: 'LLM 相关性格式异常，按通过处理', unavailable: true };
     }
     return {
       relevant: parsed.relevant,
@@ -1383,6 +1385,6 @@ Mercado Libre 类目：${mlCategory || 'N/A'}
     };
   } catch (err: any) {
     console.error('[assessSourceRelevance] LLM 相关性判断失败：', err?.message || err);
-    return { relevant: true, score: 0.5, reason: 'LLM 相关性判断失败，按通过处理' };
+    return { relevant: true, score: 0.5, reason: 'LLM 相关性判断失败，按通过处理', unavailable: true };
   }
 }

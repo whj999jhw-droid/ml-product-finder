@@ -355,11 +355,37 @@ async function processOneCandidate(
     return { result: null, reason };
   }
 
-  // 取 cheapest + 有销量的货源
-  const source = pickBestSource(searchResult.products);
+  // 取货源：先按价格/销量取 Top5 候选，再逐个性相关度校验，取最匹配的一个。
+  // 这样避免「只看价格 → 便宜但不同类」的 1688 货源被错误入库（张冠李戴）。
+  // LLM 不可用时退回按价格选最优，保持无 LLM 用户不被阻断。
+  const topSources = pickTopSources(searchResult.products, 5);
+  let source: Ali1688Product | undefined;
+  let bestRelScore = -1;
+  let fallback: Ali1688Product | undefined; // LLM 不可用时的兜底（价格最优）
+  for (const cand of topSources) {
+    const rel = await assessSourceRelevance(enriched.title, enriched.categoryName, cand);
+    if (rel.unavailable) {
+      if (!fallback) fallback = cand;
+      continue;
+    }
+    if (rel.relevant && rel.score >= 0.6 && rel.score > bestRelScore) {
+      source = cand;
+      bestRelScore = rel.score;
+    }
+  }
   if (!source) {
-    insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: '1688货源筛选失败', searchQuery }));
-    return { result: null, reason: '1688货源筛选失败' };
+    if (fallback) {
+      source = fallback; // LLM 不可用：退回价格优先（旧行为）
+    } else {
+      const top = topSources[0];
+      const rel = top ? await assessSourceRelevance(enriched.title, enriched.categoryName, top) : undefined;
+      insertCandidate(buildCandidateRow(runId, enriched, {
+        status: 'rejected',
+        rejectReason: `1688货源不匹配(${(rel?.score ?? 0).toFixed(2)}): ${rel?.reason || '无合适货源'}`,
+        searchQuery,
+      }));
+      return { result: null, reason: '1688货源不匹配' };
+    }
   }
 
   // 2.3 利润测算：按目标净利率反推建议售价
@@ -395,14 +421,6 @@ async function processOneCandidate(
   const score = scoreCandidate({ candidate: enriched, source, profit });
   if (!isScorePass(score) || score.total < minScore) {
     const reason = `评分未通过(total=${score.total.toFixed(2)}, demand=${score.demand.toFixed(2)}, competition=${score.competition.toFixed(2)}, profit=${score.profit.toFixed(2)}, logistics=${score.logistics.toFixed(2)}, compliance=${score.compliance.toFixed(2)})`;
-    insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: reason, searchQuery, source, profit, listingPrice, score }));
-    return { result: null, reason };
-  }
-
-  // 2.4b 货源相关性校验：拦截「标题与 1688 链接不对应」的错配
-  const relevance = await assessSourceRelevance(enriched.title, enriched.categoryName, source);
-  if (!relevance.relevant || relevance.score < 0.6) {
-    const reason = `1688货源不匹配(${relevance.score.toFixed(2)}): ${relevance.reason}`;
     insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: reason, searchQuery, source, profit, listingPrice, score }));
     return { result: null, reason };
   }
@@ -499,6 +517,21 @@ function pickBestSource(products: Ali1688Product[]): Ali1688Product | undefined 
   });
   scored.sort((a, b) => b.score - a.score);
   return scored[0]?.p;
+}
+
+/** 取价格/销量综合得分最高的前 N 个货源作为相关性候选集 */
+function pickTopSources(products: Ali1688Product[], topN: number): Ali1688Product[] {
+  const scored = products.map((p) => {
+    const s = p.stats || {};
+    let score = 0;
+    score += Math.max(0, 1 - p.price / 100); // 越便宜越好
+    score += Math.min(1, (s.last30DaysSales || 0) / 1000);
+    score += (s.goodRates || 0.9) - 0.9;
+    score -= (s.downstreamOffer || 0) / 1000; // 铺货数越少越好
+    return { p, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, topN).map((x) => x.p);
 }
 
 function estimate1688Shipping(priceCny: number): number {
