@@ -15,6 +15,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { getTrendsKeywords } from './trends.js';
+import { ArkRuntimeClient } from '@volcengine/ark-runtime';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,12 +26,16 @@ function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
+export type LlmProviderType = 'openai' | 'volcano-rest' | 'volcano-sdk';
+
 export interface LlmProvider {
   /** 平台名称（仅用于展示，如「硅基流动」「DeepSeek」） */
   name: string;
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** 调用方式，默认 openai */
+  type?: LlmProviderType;
 }
 
 /** 旧版单配置兼容结构 */
@@ -102,7 +107,7 @@ function loadLlmConfigFile(): LlmConfigFile | null {
  * 这样用户在「只改 KEY / 只增模型」时不至于把 endpoint/model 也清掉。
  * 出于安全与「留空即复用」语义，apiKey 永不随响应返回明文。
  */
-export function getLlmConfigForDisplay(): { providers: { name: string; baseUrl: string; model: string }[] } {
+export function getLlmConfigForDisplay(): { providers: { name: string; baseUrl: string; model: string; type?: LlmProviderType }[] } {
   const raw = loadLlmConfigFileRaw();
   if (!raw?.providers) return { providers: [] };
   return {
@@ -110,6 +115,7 @@ export function getLlmConfigForDisplay(): { providers: { name: string; baseUrl: 
       name: p.name || '',
       baseUrl: normalizeBaseUrl(p.baseUrl) || p.baseUrl || '',
       model: p.model || '',
+      type: p.type || 'openai',
     })),
   };
 }
@@ -208,12 +214,14 @@ export function saveLlmConfig(cfg: Partial<LlmProvider> | { providers?: Partial<
         message: `第 ${i + 1} 个平台必须填写 baseUrl 与至少一个 model（多个 model 用逗号隔开）`,
       };
     }
+    const providerType = ((p as any).type || 'openai') as LlmProviderType;
     modelList.forEach((m: string, idx: number) => {
       expanded.push({
         name: modelList.length > 1 ? `${p.name || '平台'} · ${m}` : (p.name || `平台 ${i + 1}`).trim(),
         baseUrl,
         apiKey,
         model: m,
+        type: providerType,
       });
     });
   }
@@ -257,6 +265,7 @@ export function saveLlmConfig(cfg: Partial<LlmProvider> | { providers?: Partial<
       baseUrl,
       apiKey,
       model,
+      type: p.type || 'openai',
     });
   }
 
@@ -311,14 +320,50 @@ interface OpenAICompletionResponse {
   error?: { message?: string };
 }
 
+function isImageModel(model: string): boolean {
+  const m = (model || '').toLowerCase();
+  return m.includes('seedream') || m.includes('seedance') || m.includes('dall-e') || m.includes('image');
+}
+
+function isImageEndpoint(baseUrl: string): boolean {
+  return (baseUrl || '').toLowerCase().includes('/images/generations');
+}
+
+function isImageProvider(provider: LlmProvider): boolean {
+  return isImageEndpoint(provider.baseUrl) || isImageModel(provider.model);
+}
+
+/** 火山方舟 REST 的 chat 端点：baseUrl 通常已带 /api/v3，补 /chat/completions 即可。 */
+function volcanoRestChatUrl(baseUrl: string): string {
+  const normalized = (baseUrl || '').trim().replace(/\/+$/, '');
+  if (normalized.toLowerCase().endsWith('/chat/completions')) return normalized;
+  return `${normalized}/chat/completions`;
+}
+
+interface ImageGenerationResponse {
+  data?: Array<{ url?: string; b64_json?: string }>;
+  error?: { message?: string };
+}
+
 async function llmGenerateWithProvider(opts: LLMOptions, provider: LlmProvider): Promise<string> {
+  const type = provider.type || 'openai';
+  const image = isImageProvider(provider);
+  if (type === 'volcano-sdk') return volcanoSdkGenerate(opts, provider);
+  if (type === 'volcano-rest') return volcanoRestGenerate(opts, provider);
+  // type === 'openai'：文本走 OpenAI 兼容 /chat/completions；
+  // 但若该平台实为图片生成（/images/generations 端点或 seedream 等模型），
+  // 必须用 REST 图片生成接口，否则会拼出错误 URL 导致“连接不上”。
+  if (image) return volcanoRestGenerate(opts, provider);
+  return openaiCompatibleGenerate(opts, provider);
+}
+
+async function openaiCompatibleGenerate(opts: LLMOptions, provider: LlmProvider): Promise<string> {
   const timeoutMs = opts.timeoutMs ?? 30000;
   const temperature = opts.temperature ?? 0.7;
   const url = chatCompletionsUrl(provider.baseUrl);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  // 硬超时守卫：即使 AbortController 未生效，也强制 reject
   let hardTimer: ReturnType<typeof setTimeout> | undefined;
   const hardGuard = new Promise<never>((_, reject) => {
     hardTimer = setTimeout(() => reject(new Error('AI generation hard timeout')), timeoutMs + 10000);
@@ -362,6 +407,137 @@ async function llmGenerateWithProvider(opts: LLMOptions, provider: LlmProvider):
     return await Promise.race([collect, hardGuard]);
   } finally {
     clearTimeout(timer);
+    if (hardTimer) clearTimeout(hardTimer);
+  }
+}
+
+async function volcanoRestGenerate(opts: LLMOptions, provider: LlmProvider): Promise<string> {
+  const timeoutMs = opts.timeoutMs ?? 120000;
+  const isImage = isImageProvider(provider);
+  const url = isImage
+    ? isImageEndpoint(provider.baseUrl)
+      ? normalizeBaseUrl(provider.baseUrl) // 火山等：端点本身就是 /images/generations
+      : `${normalizeBaseUrl(provider.baseUrl)}/images/generations` // 通用 OpenAI：补 /images/generations
+    : volcanoRestChatUrl(provider.baseUrl);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let hardTimer: ReturnType<typeof setTimeout> | undefined;
+  const hardGuard = new Promise<never>((_, reject) => {
+    hardTimer = setTimeout(() => reject(new Error('AI generation hard timeout')), timeoutMs + 10000);
+  });
+
+  try {
+    const collect = (async () => {
+      const body = isImage
+        ? {
+            model: provider.model,
+            prompt: opts.prompt,
+            size: '2K',
+            response_format: 'url',
+            watermark: false,
+            stream: false,
+          }
+        : {
+            model: provider.model,
+            messages: [
+              { role: 'system', content: opts.systemPrompt },
+              { role: 'user', content: opts.prompt },
+            ],
+            temperature: opts.temperature ?? 0.7,
+            max_tokens: 1024,
+            stream: false,
+            ...(opts.jsonMode ? { response_format: { type: 'json_object' } } : {}),
+          };
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${provider.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`LLM API ${res.status}: ${text.slice(0, 200)}`);
+      }
+
+      if (isImage) {
+        const data = (await res.json()) as ImageGenerationResponse;
+        const imageUrl = data?.data?.[0]?.url || data?.data?.[0]?.b64_json;
+        if (!imageUrl) {
+          throw new Error('图片生成 API 未返回 url');
+        }
+        return imageUrl;
+      }
+
+      const data = (await res.json()) as OpenAICompletionResponse;
+      const content = data?.choices?.[0]?.message?.content;
+      if (typeof content !== 'string') {
+        throw new Error('LLM API returned empty content');
+      }
+      return content.trim();
+    })();
+
+    return await Promise.race([collect, hardGuard]);
+  } finally {
+    clearTimeout(timer);
+    if (hardTimer) clearTimeout(hardTimer);
+  }
+}
+
+async function volcanoSdkGenerate(opts: LLMOptions, provider: LlmProvider): Promise<string> {
+  const timeoutMs = opts.timeoutMs ?? 120000;
+  const isImage = isImageProvider(provider);
+  let baseURL = provider.baseUrl || undefined;
+  if (baseURL && isImageEndpoint(baseURL)) {
+    // 图片生成 SDK 共用 /api/v3，不需要 /images/generations 后缀
+    baseURL = baseURL.toLowerCase().split('/images/generations')[0] || undefined;
+  }
+  const client = new ArkRuntimeClient({
+    apiKey: provider.apiKey,
+    baseURL,
+  });
+
+  let hardTimer: ReturnType<typeof setTimeout> | undefined;
+  const hardGuard = new Promise<never>((_, reject) => {
+    hardTimer = setTimeout(() => reject(new Error('AI generation hard timeout')), timeoutMs + 10000);
+  });
+
+  try {
+    const collect = (async () => {
+      if (isImage) {
+        const resp = await client.generateImages({
+          model: provider.model,
+          prompt: opts.prompt,
+          n: 1,
+          size: '2K',
+          response_format: 'url',
+          watermark: false,
+        } as any);
+        const imageUrl = (resp as any)?.data?.[0]?.url;
+        if (!imageUrl) throw new Error('SDK 图片生成未返回 url');
+        return imageUrl;
+      }
+      const resp = await client.createChatCompletion({
+        model: provider.model,
+        messages: [
+          { role: 'system', content: opts.systemPrompt },
+          { role: 'user', content: opts.prompt },
+        ],
+        temperature: opts.temperature ?? 0.7,
+        max_tokens: 1024,
+      } as any);
+      const content = (resp as any)?.choices?.[0]?.message?.content;
+      if (typeof content !== 'string') throw new Error('SDK 返回空内容');
+      return content.trim();
+    })();
+
+    return await Promise.race([collect, hardGuard]);
+  } finally {
     if (hardTimer) clearTimeout(hardTimer);
   }
 }
@@ -568,9 +744,30 @@ export async function testLlmTranslation(
   raw?: string;
   error?: string;
 }> {
-  if (!provider) {
-    const cfg = getLlmConfig();
-    if (!cfg) return { success: false, error: 'LLM 未配置' };
+  const resolved = provider || getLlmConfig();
+  if (!resolved) return { success: false, error: 'LLM 未配置' };
+
+  // 图片生成模型：直接生成一张图并返回图片 URL
+  if (isImageProvider(resolved)) {
+    try {
+      const raw = await llmGenerate(
+        {
+          prompt: '一只可爱的卡通小猫，白底，高清',
+          systemPrompt: '',
+          timeoutMs: 120000,
+        },
+        resolved,
+      );
+      if (!raw || !raw.startsWith('http')) {
+        return { success: false, error: `图片生成返回异常：${raw?.slice(0, 200)}` };
+      }
+      return { success: true, sample: { imageUrl: raw }, raw };
+    } catch (err: any) {
+      let error = err?.message || String(err);
+      const code = err?.cause?.code || err?.code;
+      if (code) error += ` (网络/错误码: ${code})`;
+      return { success: false, error };
+    }
   }
 
   const keywords = ['mochila'];
@@ -591,7 +788,7 @@ export async function testLlmTranslation(
         timeoutMs: 30000,
         jsonMode: true,
       },
-      provider,
+      resolved,
     );
     const map = extractJsonObject(raw) as Record<string, string> | undefined;
     if (!map) {
@@ -634,9 +831,10 @@ export async function probeLlmReachability(baseUrl: string, timeoutMs = 8000): P
   status?: number;
   error?: string;
 }> {
-  const url = chatCompletionsUrl(baseUrl);
+  // 图片生成端点直接探测，不要拼 /chat/completions
+  const url = isImageEndpoint(baseUrl) ? normalizeBaseUrl(baseUrl) : chatCompletionsUrl(baseUrl);
   try {
-    // 用 OPTIONS 探测 chat completions 端点：网络层可达即可，不需要鉴权。
+    // 用 OPTIONS 探测端点：网络层可达即可，不需要鉴权。
     // 大多数厂商会返回 401/404，但 DNS/TCP 通了；若返回 2xx 也视为可达。
     const res = await fetch(url, {
       method: 'OPTIONS',

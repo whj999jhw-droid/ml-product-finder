@@ -30,6 +30,7 @@
     "@types/react-dom": "^18.2.17",
     "@types/uuid": "^9.0.7",
     "@vitejs/plugin-react": "^4.2.1",
+    "@volcengine/ark-runtime": "^1.0.10",
     "autoprefixer": "^10.4.20",
     "better-sqlite3": "^12.6.2",
     "concurrently": "^8.2.2",

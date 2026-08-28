@@ -9,6 +9,7 @@ import {
   MessagePlugin,
   Loading,
   Link,
+  Select,
 } from 'tdesign-react';
 import { RefreshIcon, DeleteIcon, AddIcon } from 'tdesign-icons-react';
 import { NotificationSettingsPage } from './NotificationSettingsPage';
@@ -20,7 +21,15 @@ interface LlmProviderForm {
   apiKey: string;
   /** 多个模型用逗号隔开，如 gpt-4o, gpt-4o-mini, deepseek-chat */
   models: string;
+  /** 调用方式：openai 兼容 / 火山方舟 REST / 火山方舟 SDK */
+  type?: 'openai' | 'volcano-rest' | 'volcano-sdk';
 }
+
+const LLM_TYPE_OPTIONS: { label: string; value: LlmProviderForm['type'] }[] = [
+  { label: 'OpenAI 兼容 (REST)', value: 'openai' },
+  { label: '火山方舟 REST', value: 'volcano-rest' },
+  { label: '火山方舟 SDK', value: 'volcano-sdk' },
+];
 
 interface FeatureInfo {
   key: string;
@@ -60,12 +69,13 @@ function AiConfigPanel() {
       const res = await fetch('/api/ml/llm-config');
       const data = await res.json();
       const raw: any[] = data.providers || [];
-      // 合并「同一 baseUrl 的多个 model」为一条表单记录（models 用逗号拼接）
+      // 合并「同一 baseUrl + type 的多个 model」为一条表单记录（models 用逗号拼接）
       const byBase = new Map<string, LlmProviderForm>();
       for (const p of raw) {
         const base = (p.baseUrl || '').trim();
         if (!base) continue;
-        const key = base;
+        const type = p.type || 'openai';
+        const key = `${base}|${type}`;
         const existing = byBase.get(key);
         if (existing) {
           if (p.model && !existing.models.split(/[,，]/).map((m: string) => m.trim()).includes(p.model)) {
@@ -77,13 +87,14 @@ function AiConfigPanel() {
             baseUrl: p.baseUrl || '',
             apiKey: '', // 出于安全不回显 Key；留空=复用已保存
             models: p.model || '',
+            type,
           });
         }
       }
       const list = Array.from(byBase.values());
-      setProviders(list.length ? list : [{ name: '平台 1', baseUrl: '', apiKey: '', models: '' }]);
+      setProviders(list.length ? list : [{ name: '平台 1', baseUrl: '', apiKey: '', models: '', type: 'openai' }]);
     } catch {
-      setProviders([{ name: '平台 1', baseUrl: '', apiKey: '', models: '' }]);
+      setProviders([{ name: '平台 1', baseUrl: '', apiKey: '', models: '', type: 'openai' }]);
     }
   };
 
@@ -199,7 +210,21 @@ function AiConfigPanel() {
                   onClick={() => setProviders((prev) => prev.filter((_, idx) => idx !== i))}
                 />
               </div>
-              {/* 第二行：多个模型，逗号隔开 */}
+              {/* 第二行：调用方式 */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500 shrink-0">调用方式</span>
+                <Select
+                  className="w-44"
+                  size="small"
+                  value={p.type || 'openai'}
+                  options={LLM_TYPE_OPTIONS}
+                  onChange={(v) => updateProvider(i, { type: v as LlmProviderForm['type'] })}
+                />
+                <span className="text-xs text-gray-400">
+                  火山图片生成选「火山方舟 REST」并填 <code>https://ark.cn-beijing.volces.com/api/v3/images/generations</code>；想用官方 SDK 选「火山方舟 SDK」。
+                </span>
+              </div>
+              {/* 第三行：多个模型，逗号隔开 */}
               <div className="flex items-center gap-2">
                 <span className="text-xs text-gray-500 shrink-0">模型（逗号隔开）</span>
                 <Input
@@ -216,7 +241,7 @@ function AiConfigPanel() {
               </div>
             </div>
           ))}
-          <Button size="small" variant="dashed" icon={<AddIcon />} onClick={() => setProviders((prev) => [...prev, { name: `平台 ${prev.length + 1}`, baseUrl: '', apiKey: '', models: '' }])}>
+          <Button size="small" variant="dashed" icon={<AddIcon />} onClick={() => setProviders((prev) => [...prev, { name: `平台 ${prev.length + 1}`, baseUrl: '', apiKey: '', models: '', type: 'openai' }])}>
             添加平台
           </Button>
           <div className="flex items-center gap-2 pt-1">

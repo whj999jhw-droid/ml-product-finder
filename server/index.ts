@@ -3132,7 +3132,7 @@ app.post('/api/ml/llm-config/test', async (req, res) => {
       }
 
       try {
-        const providerCfg: any = { name: p.name || '未命名平台', baseUrl, apiKey: p.apiKey, model: p.model };
+        const providerCfg: any = { name: p.name || '未命名平台', baseUrl, apiKey: p.apiKey, model: p.model, type: p.type || 'openai' };
         const diag = await testLlmTranslation('MLM', providerCfg);
         if (diag.success && diag.sample) {
           perProvider.push({
