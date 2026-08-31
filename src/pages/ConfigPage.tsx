@@ -10,8 +10,13 @@ import {
   Loading,
   Link,
   Select,
+  Table,
+  Pagination,
+  Dialog,
+  Textarea,
 } from 'tdesign-react';
-import { RefreshIcon, DeleteIcon, AddIcon } from 'tdesign-icons-react';
+import type { PrimaryTableCol } from 'tdesign-react';
+import { RefreshIcon, DeleteIcon, AddIcon, EditIcon } from 'tdesign-icons-react';
 import { DialogPlugin } from 'tdesign-react';
 import { NotificationSettingsPage } from './NotificationSettingsPage';
 import { StoreManagementPage } from './StoreManagementPage';
@@ -48,12 +53,37 @@ interface AiStatus {
 }
 
 // ============ AI 大模型配置面板 ============
+/** 前端简单识别 provider 能力类型，用于列表展示 */
+function detectCapabilities(baseUrl: string, models: string): string[] {
+  const u = (baseUrl || '').toLowerCase();
+  const m = (models || '').toLowerCase();
+  const caps = new Set<string>();
+  if (u.includes('/images/generations') || m.includes('seedream') || m.includes('dall-e') || m.includes('glm-image') || m.includes('agnes-image') || m.includes('kling-image')) caps.add('image');
+  if (u.includes('/videos/generations') || m.includes('cogvideox') || m.includes('kling') || m.includes('seedance') || m.includes('agnes-video')) caps.add('video');
+  if (u.includes('/layout_parsing') || m.includes('glm-ocr')) caps.add('ocr');
+  if (u.includes('/embeddings') || m.includes('embedding')) caps.add('embedding');
+  if (u.includes('/audio/')) caps.add('audio');
+  if (caps.size === 0) caps.add('chat');
+  return Array.from(caps);
+}
+
+const CAP_LABELS: Record<string, string> = { chat: '对话', image: '图像', video: '视频', ocr: 'OCR', embedding: '嵌入', audio: '音频' };
+const TYPE_LABELS: Record<string, string> = { openai: 'OpenAI 兼容', 'volcano-rest': '火山 REST', 'volcano-sdk': '火山 SDK' };
+
 function AiConfigPanel() {
   const [status, setStatus] = useState<AiStatus | null>(null);
   const [providers, setProviders] = useState<LlmProviderForm[]>([]);
+  const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<any>(null);
+
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(8);
+
+  const [dialogVisible, setDialogVisible] = useState(false);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [form, setForm] = useState<LlmProviderForm>({ name: '', baseUrl: '', apiKey: '', models: '', type: 'openai' });
 
   const loadStatus = async () => {
     try {
@@ -66,6 +96,7 @@ function AiConfigPanel() {
   };
 
   const loadProviders = async () => {
+    setLoading(true);
     try {
       const res = await fetch('/api/ml/llm-config');
       const data = await res.json();
@@ -84,7 +115,7 @@ function AiConfigPanel() {
           }
         } else {
           byBase.set(key, {
-            name: p.name || '平台 1',
+            name: p.name || `平台 ${byBase.size + 1}`,
             baseUrl: p.baseUrl || '',
             apiKey: '', // 出于安全不回显 Key；留空=复用已保存
             models: p.model || '',
@@ -92,10 +123,12 @@ function AiConfigPanel() {
           });
         }
       }
-      const list = Array.from(byBase.values());
-      setProviders(list.length ? list : [{ name: '平台 1', baseUrl: '', apiKey: '', models: '', type: 'openai' }]);
+      setProviders(Array.from(byBase.values()));
+      setPage(1);
     } catch {
-      setProviders([{ name: '平台 1', baseUrl: '', apiKey: '', models: '', type: 'openai' }]);
+      MessagePlugin.error('加载配置失败');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -104,23 +137,61 @@ function AiConfigPanel() {
     loadProviders();
   }, []);
 
-  const updateProvider = (i: number, patch: Partial<LlmProviderForm>) => {
-    setProviders((prev) => prev.map((p, idx) => (idx === i ? { ...p, ...patch } : p)));
+  const resetForm = () => {
+    setForm({ name: '', baseUrl: '', apiKey: '', models: '', type: 'openai' });
+    setEditingIndex(null);
   };
 
-  const handleSave = async () => {
+  const openAdd = () => {
+    resetForm();
+    setDialogVisible(true);
+  };
+
+  const openEdit = (idx: number) => {
+    const p = providers[idx];
+    setForm({ ...p });
+    setEditingIndex(idx);
+    setDialogVisible(true);
+  };
+
+  const closeDialog = () => {
+    setDialogVisible(false);
+    resetForm();
+  };
+
+  const validateForm = (): boolean => {
+    if (!form.name.trim()) { MessagePlugin.warning('请填写平台名'); return false; }
+    if (!form.baseUrl.trim()) { MessagePlugin.warning('请填写 baseUrl'); return false; }
+    if (!form.models.trim()) { MessagePlugin.warning('请填写至少一个模型'); return false; }
+    if (editingIndex === null && !form.apiKey.trim()) { MessagePlugin.warning('新增平台必须填写 API Key'); return false; }
+    return true;
+  };
+
+  const handleDialogConfirm = async () => {
+    if (!validateForm()) return;
+    const next = [...providers];
+    if (editingIndex !== null) {
+      next[editingIndex] = { ...form };
+    } else {
+      next.push({ ...form });
+    }
+    await doSave(next);
+    closeDialog();
+  };
+
+  const doSave = async (list: LlmProviderForm[]) => {
     setSaving(true);
     try {
       const res = await fetch('/api/ml/llm-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ providers }),
+        body: JSON.stringify({ providers: list }),
       });
       const data = await res.json();
       if (data.success) {
         MessagePlugin.success(data.message || 'AI 配置已保存');
+        setProviders(list);
         loadStatus();
-        loadProviders();
         setTestResult(null);
       } else {
         MessagePlugin.error(data.message || '保存失败');
@@ -133,6 +204,7 @@ function AiConfigPanel() {
   };
 
   const handleTest = async () => {
+    if (providers.length === 0) { MessagePlugin.warning('请先添加平台'); return; }
     setTesting(true);
     setTestResult(null);
     try {
@@ -152,48 +224,28 @@ function AiConfigPanel() {
     }
   };
 
-  // 直接删除：调用后端接口从已保存配置中移除（不通的提供商一键清理）
-  const callDelete = async (body: { baseUrl?: string; model?: string; type?: string }) => {
-    const res = await fetch('/api/ml/llm-config/delete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    return data as { success: boolean; message?: string };
-  };
-
-  // 删除整个平台（baseUrl+type 下所有模型）
-  const handleDeleteProvider = (baseUrl: string, type?: string, label?: string) => {
+  const handleDeleteProvider = (idx: number) => {
+    const p = providers[idx];
     const inst = DialogPlugin.confirm({
       header: '删除该 LLM 平台',
-      body: `确定删除「${label || baseUrl}」下所有已保存模型？删除后系统不再尝试该平台。`,
+      body: `确定删除「${p.name || p.baseUrl}」及其下所有模型？删除后系统不再尝试该平台。`,
       theme: 'danger',
       onConfirm: async () => {
-        try {
-          const data = await callDelete({ baseUrl, type });
-          if (data.success) {
-            MessagePlugin.success(data.message || '已删除');
-            inst.hide();
-            loadStatus();
-            loadProviders();
-            setTestResult(null);
-          } else {
-            MessagePlugin.error(data.message || '删除失败');
-            inst.hide();
-          }
-        } catch (e: any) {
-          MessagePlugin.error(e?.message || '网络错误');
-          inst.hide();
-        }
+        const next = providers.filter((_, i) => i !== idx);
+        await doSave(next);
+        inst.hide();
       },
     });
   };
 
-  // 删除单个不通的模型（测试结果里用，baseUrl+model 精确定位）
   const handleDeleteModel = async (baseUrl: string, model: string) => {
     try {
-      const data = await callDelete({ baseUrl, model });
+      const res = await fetch('/api/ml/llm-config/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseUrl, model }),
+      });
+      const data = await res.json();
       if (data.success) {
         MessagePlugin.success(data.message || '已删除');
         setTestResult((prev: any) => prev ? { ...prev, perProvider: prev.perProvider.filter((r: any) => !(r.baseUrl === baseUrl && r.model === model)) } : prev);
@@ -205,6 +257,62 @@ function AiConfigPanel() {
       MessagePlugin.error(e?.message || '网络错误');
     }
   };
+
+  const columns: PrimaryTableCol<LlmProviderForm>[] = [
+    { colKey: 'name', title: '平台名', width: 160, cell: ({ row }) => <span className="font-medium">{row.name}</span> },
+    {
+      colKey: 'baseUrl',
+      title: '链接 / baseUrl',
+      width: 280,
+      cell: ({ row }) => <span className="text-xs text-gray-600 break-all" title={row.baseUrl}>{row.baseUrl}</span>,
+    },
+    {
+      colKey: 'models',
+      title: '模型',
+      cell: ({ row }) => {
+        const list = row.models.split(/[,，]/).map((m) => m.trim()).filter(Boolean);
+        return (
+          <div className="text-xs text-gray-600" title={row.models}>
+            {list.slice(0, 3).join(', ')}
+            {list.length > 3 && <span className="text-gray-400"> +{list.length - 3}</span>}
+          </div>
+        );
+      },
+    },
+    {
+      colKey: 'type',
+      title: '调用方式',
+      width: 120,
+      cell: ({ row }) => <Tag size="small" variant="light">{TYPE_LABELS[row.type || 'openai']}</Tag>,
+    },
+    {
+      colKey: 'capability',
+      title: '能力类型',
+      width: 160,
+      cell: ({ row }) => (
+        <div className="flex flex-wrap gap-1">
+          {detectCapabilities(row.baseUrl, row.models).map((cap) => (
+            <Tag key={cap} size="small" theme={cap === 'chat' ? 'primary' : 'default'} variant="light">{CAP_LABELS[cap] || cap}</Tag>
+          ))}
+        </div>
+      ),
+    },
+    {
+      colKey: 'operation',
+      title: '操作',
+      width: 140,
+      fixed: 'right',
+      cell: ({ rowIndex }) => (
+        <div className="flex items-center gap-1">
+          <Button size="small" variant="text" icon={<EditIcon />} onClick={() => openEdit(rowIndex as number)}>修改</Button>
+          <Button size="small" variant="text" theme="danger" icon={<DeleteIcon />} onClick={() => handleDeleteProvider(rowIndex as number)}>删除</Button>
+        </div>
+      ),
+    },
+  ];
+
+  const total = providers.length;
+  const pagedProviders = providers.slice((page - 1) * pageSize, page * pageSize);
 
   return (
     <div className="space-y-5">
@@ -227,125 +335,134 @@ function AiConfigPanel() {
       )}
 
       {/* 平台列表 */}
-      <Card title="LLM 平台（多平台自动 failover）" headerBordered>
-        <div className="space-y-3">
-          {providers.map((p, i) => (
-            <div key={i} className="border border-gray-100 rounded p-3 space-y-3">
-              <div className="text-xs font-medium text-gray-500">平台 {i + 1}</div>
-              {/* 第一行：平台名 · 链接 · API Key */}
-              <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center">
-                <Input
-                  className="md:col-span-2"
-                  size="small"
-                  value={p.name}
-                  onChange={(v) => updateProvider(i, { name: v as string })}
-                  placeholder="平台名"
-                />
-                <Input
-                  className="md:col-span-6"
-                  size="small"
-                  value={p.baseUrl}
-                  onChange={(v) => updateProvider(i, { baseUrl: v as string })}
-                  placeholder="链接 / baseUrl（https://.../v1）"
-                />
-                <Input
-                  className="md:col-span-3"
-                  size="small"
-                  type="password"
-                  value={p.apiKey}
-                  onChange={(v) => updateProvider(i, { apiKey: v as string })}
-                  placeholder={status ? '留空=复用已保存' : 'API Key'}
-                />
-                <Button
-                  className="md:col-span-1"
-                  size="small"
-                  variant="text"
-                  theme="danger"
-                  icon={<DeleteIcon />}
-                  onClick={() => handleDeleteProvider(p.baseUrl, p.type, p.name)}
-                />
-              </div>
-              {/* 第二行：调用方式 */}
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-500 shrink-0">调用方式</span>
-                <Select
-                  className="w-44"
-                  size="small"
-                  value={p.type || 'openai'}
-                  options={LLM_TYPE_OPTIONS}
-                  onChange={(v) => updateProvider(i, { type: v as LlmProviderForm['type'] })}
-                />
-                <span className="text-xs text-gray-400">
-                  火山图片生成选「火山方舟 REST」并填 <code>https://ark.cn-beijing.volces.com/api/v3/images/generations</code>；想用官方 SDK 选「火山方舟 SDK」。
-                </span>
-              </div>
-              {/* 第三行：多个模型，逗号隔开 */}
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-500 shrink-0">模型（逗号隔开）</span>
-                <Input
-                  className="flex-1"
-                  size="small"
-                  value={p.models}
-                  onChange={(v) => updateProvider(i, { models: v as string })}
-                  placeholder="gpt-4o, gpt-4o-mini, deepseek-chat"
-                />
-              </div>
-              <div className="text-xs text-gray-400">
-                第一行填平台名 / 链接(baseUrl) / API Key（修改其他项时 Key 留空即复用已保存，不会丢失）；
-                第二行多个模型用<strong>逗号</strong>隔开，会按序自动 failover。
-              </div>
-            </div>
-          ))}
-          <Button size="small" variant="dashed" icon={<AddIcon />} onClick={() => setProviders((prev) => [...prev, { name: `平台 ${prev.length + 1}`, baseUrl: '', apiKey: '', models: '', type: 'openai' }])}>
-            添加平台
-          </Button>
-          <div className="flex items-center gap-2 pt-1">
-            <Button size="small" theme="primary" loading={saving} onClick={handleSave}>
-              保存配置
-            </Button>
-            <Button size="small" variant="outline" loading={testing} onClick={handleTest}>
-              测试连接
-            </Button>
-            <Button size="small" variant="text" icon={<RefreshIcon />} onClick={() => { loadStatus(); loadProviders(); }}>
-              刷新
-            </Button>
+      <Card title={`LLM 平台（共 ${total} 个，多平台自动 failover）`} headerBordered>
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-xs text-gray-500">
+            图片/视频/OCR 模型请填写厂商对应的专用 endpoint，否则会被识别但测试 404。
+          </div>
+          <div className="flex items-center gap-2">
+            <Button size="small" variant="outline" loading={testing} onClick={handleTest}>测试连接</Button>
+            <Button size="small" variant="text" icon={<RefreshIcon />} onClick={() => { loadStatus(); loadProviders(); }}>刷新</Button>
+            <Button size="small" theme="primary" icon={<AddIcon />} onClick={openAdd}>添加平台</Button>
           </div>
         </div>
 
+        <Table
+          loading={loading}
+          data={pagedProviders}
+          columns={columns}
+          rowKey="baseUrl"
+          size="small"
+          bordered
+          hover
+          empty={<div className="text-center text-gray-400 py-8">暂无平台配置，点击右上角「添加平台」</div>}
+        />
+
+        {total > pageSize && (
+          <div className="mt-3 flex justify-end">
+            <Pagination
+              total={total}
+              current={page}
+              pageSize={pageSize}
+              pageSizeOptions={[8, 12, 20, 50]}
+              onChange={(p) => setPage(p.current || 1)}
+              onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
+            />
+          </div>
+        )}
+
         {/* 测试结果 */}
         {testResult?.perProvider && (
-          <div className="mt-3 space-y-2">
-            {testResult.perProvider.map((r: any, i: number) => {
-              const capLabels: Record<string, string> = { chat: '对话', image: '图像', video: '视频', ocr: 'OCR', embedding: '嵌入', audio: '音频', unknown: '未知' };
-              return (
-              <div key={i} className="text-xs border border-gray-100 rounded p-2">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <Tag size="small" theme={r.success ? 'success' : 'danger'}>{r.success ? '成功' : '失败'}</Tag>
-                  <Tag size="small" theme="default" variant="light">{capLabels[r.capability] || r.capability || '对话'}</Tag>
-                  <span className="font-medium">{r.name}</span>
-                  <span className="text-gray-500">{r.model}</span>
-                  {!r.success && (
-                    <Button
-                      size="small"
-                      variant="text"
-                      theme="danger"
-                      className="ml-auto"
-                      icon={<DeleteIcon />}
-                      onClick={() => handleDeleteModel(r.baseUrl, r.model)}
-                    >
-                      删除该不通模型
-                    </Button>
-                  )}
+          <div className="mt-4 border-t border-gray-100 pt-3">
+            <div className="text-sm font-medium mb-2">测试结果</div>
+            <div className="space-y-2">
+              {testResult.perProvider.map((r: any, i: number) => (
+                <div key={i} className="text-xs border border-gray-100 rounded p-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Tag size="small" theme={r.success ? 'success' : 'danger'}>{r.success ? '成功' : '失败'}</Tag>
+                    <Tag size="small" theme="default" variant="light">{CAP_LABELS[r.capability] || r.capability || '对话'}</Tag>
+                    <span className="font-medium">{r.name}</span>
+                    <span className="text-gray-500">{r.model}</span>
+                    {!r.success && (
+                      <Button
+                        size="small"
+                        variant="text"
+                        theme="danger"
+                        className="ml-auto"
+                        icon={<DeleteIcon />}
+                        onClick={() => handleDeleteModel(r.baseUrl, r.model)}
+                      >
+                        删除该不通模型
+                      </Button>
+                    )}
+                  </div>
+                  <div className="text-gray-600 mt-1">{r.message || ''}</div>
+                  {r.sample && <div className="text-gray-500 mt-1">示例：{JSON.stringify(r.sample)}</div>}
                 </div>
-                <div className="text-gray-600 mt-1">{r.message || ''}</div>
-                {r.sample && (
-                  <div className="text-gray-500 mt-1">示例：{JSON.stringify(r.sample)}</div>
-                )}
-              </div>
-            );})}
+              ))}
+            </div>
           </div>
         )}
       </Card>
+
+      {/* 添加/修改弹窗 */}
+      <Dialog
+        visible={dialogVisible}
+        onClose={closeDialog}
+        header={editingIndex !== null ? '修改 LLM 平台' : '添加 LLM 平台'}
+        onConfirm={handleDialogConfirm}
+        confirmLoading={saving}
+      >
+        <div className="space-y-4 py-2" style={{ minWidth: 480 }}>
+          <div>
+            <label className="block text-xs text-gray-600 mb-1">平台名</label>
+            <Input
+              value={form.name}
+              onChange={(v) => setForm((f) => ({ ...f, name: v as string }))}
+              placeholder="例如：火山、智谱、七牛云"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-600 mb-1">链接 / baseUrl</label>
+            <Input
+              value={form.baseUrl}
+              onChange={(v) => setForm((f) => ({ ...f, baseUrl: v as string }))}
+              placeholder="https://.../v1 或专用 endpoint"
+            />
+            <div className="text-xs text-gray-400 mt-1">
+              对话模型填 chat 入口；图片/视频/OCR 填厂商给出的专用入口（如 <code>/images/generations</code>）。
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-600 mb-1">API Key</label>
+            <Input
+              type="password"
+              value={form.apiKey}
+              onChange={(v) => setForm((f) => ({ ...f, apiKey: v as string }))}
+              placeholder={editingIndex !== null ? '留空=复用已保存' : '必填'}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-600 mb-1">调用方式</label>
+            <Select
+              className="w-full"
+              value={form.type || 'openai'}
+              options={LLM_TYPE_OPTIONS}
+              onChange={(v) => setForm((f) => ({ ...f, type: v as LlmProviderForm['type'] }))}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-600 mb-1">模型（英文逗号隔开）</label>
+            <Textarea
+              value={form.models}
+              onChange={(v) => setForm((f) => ({ ...f, models: v as string }))}
+              placeholder="doubao-seed-2-0-mini, deepseek-v4-flash"
+              rows={3}
+            />
+            <div className="text-xs text-gray-400 mt-1">同一 baseUrl 下多个模型会按序自动 failover。</div>
+          </div>
+        </div>
+      </Dialog>
 
       {/* 规则引擎兜底 */}
       <Card title="兜底机制（AI 不可用时）" headerBordered>

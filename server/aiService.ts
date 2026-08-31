@@ -215,9 +215,9 @@ export function saveLlmConfig(cfg: Partial<LlmProvider> | { providers?: Partial<
       };
     }
     const providerType = ((p as any).type || 'openai') as LlmProviderType;
-    modelList.forEach((m: string, idx: number) => {
+    modelList.forEach((m: string) => {
       expanded.push({
-        name: modelList.length > 1 ? `${p.name || '平台'} · ${m}` : (p.name || `平台 ${i + 1}`).trim(),
+        name: (p.name || `平台 ${i + 1}`).trim(),
         baseUrl,
         apiKey,
         model: m,
@@ -500,7 +500,7 @@ async function volcanoRestGenerate(opts: LLMOptions, provider: LlmProvider): Pro
         ? {
             model: provider.model,
             prompt: opts.prompt,
-            size: '2K',
+            size: '1024x1024',
             response_format: 'url',
             watermark: false,
             stream: false,
@@ -581,7 +581,7 @@ async function volcanoSdkGenerate(opts: LLMOptions, provider: LlmProvider): Prom
           model: provider.model,
           prompt: opts.prompt,
           n: 1,
-          size: '2K',
+          size: '1024x1024',
           response_format: 'url',
           watermark: false,
         } as any);
@@ -821,7 +821,7 @@ async function probeImageProvider(provider: LlmProvider): Promise<{ success: boo
         body: JSON.stringify({
           model: provider.model,
           prompt: '一只可爱的卡通小猫，白底，高清',
-          size: '1024x1024',
+          size: '512x512',
           n: 1,
         }),
         signal: AbortSignal.timeout(120000),
