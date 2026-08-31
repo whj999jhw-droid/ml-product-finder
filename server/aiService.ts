@@ -371,6 +371,35 @@ function isImageProvider(provider: LlmProvider): boolean {
   return isImageEndpoint(provider.baseUrl) || isImageModel(provider.model);
 }
 
+/** 模型/端点能力类型：用于自动分流，避免把 OCR/视频/图像等专用端点当 chat 测。 */
+export type LlmCapability = 'chat' | 'image' | 'video' | 'ocr' | 'embedding' | 'audio' | 'unknown';
+
+/**
+ * 根据 baseUrl 路径 + model 名自动识别 provider 能力类型。
+ * 用户常在「平台名称」里写「智谱OCR」「七牛云·视频」等，这里以 URL path 为主、model 名为辅。
+ */
+export function detectProviderType(baseUrl: string, model?: string): LlmCapability {
+  const u = (baseUrl || '').toLowerCase();
+  const m = (model || '').toLowerCase();
+
+  // URL path 优先级最高（用户明确把专用 endpoint 填进来）
+  if (u.includes('/images/generations')) return 'image';
+  if (u.includes('/videos/generations') || u.includes('/video/generations')) return 'video';
+  if (u.includes('/layout_parsing') || u.includes('/ocr')) return 'ocr';
+  if (u.includes('/embeddings')) return 'embedding';
+  if (u.includes('/audio/speech') || u.includes('/audio/transcriptions')) return 'audio';
+
+  // 模型名兜底：用户可能把视频/OCR/图像模型填在通用 chat baseUrl 下
+  // kling-image 等带 image 关键字的视频厂商模型，优先识别为图像
+  if (m.includes('kling-image') || m.includes('seedream') || m.includes('dall-e') || m.includes('sdxl') || m.includes('flux') || m.includes('kandinsky') || m.includes('glm-image') || m.includes('agnes-image')) return 'image';
+  if (m.includes('seedance') || m.includes('cogvideox') || m.includes('kling') || m.includes('luma') || m.includes('hailuo') || m.includes('agnes-video')) return 'video';
+  if (m.includes('glm-ocr') || m.includes('qwen-vl-ocr')) return 'ocr';
+  if (m.includes('embedding')) return 'embedding';
+
+  // 默认当对话模型处理
+  return 'chat';
+}
+
 /** 火山方舟 REST 的 chat 端点：baseUrl 通常已带 /api/v3，补 /chat/completions 即可。 */
 function volcanoRestChatUrl(baseUrl: string): string {
   const normalized = (baseUrl || '').trim().replace(/\/+$/, '');
@@ -597,6 +626,11 @@ async function llmGenerate(opts: LLMOptions, provider?: LlmProvider): Promise<st
 
   const errors: string[] = [];
   for (const provider of providers) {
+    // 文本生成 failover 只应使用 chat 类平台；OCR/视频/图像/嵌入等专用端点不参与文本生成
+    const cap = detectProviderType(provider.baseUrl, provider.model);
+    if (cap !== 'chat') {
+      continue;
+    }
     try {
       const content = await llmGenerateWithProvider(opts, provider);
       if (content) return content;
@@ -769,9 +803,183 @@ export async function translateTrendsKeywords(
   return result;
 }
 
+// 1x1 透明 PNG，用于 OCR/layout_parsing 等需要图片输入的接口探测（只看接口是否 200）
+const TEST_IMAGE_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
+async function probeImageProvider(provider: LlmProvider): Promise<{ success: boolean; sample?: Record<string, string>; raw?: string; error?: string }> {
+  const isZhipu = provider.baseUrl.toLowerCase().includes('bigmodel.cn') || provider.model.toLowerCase().includes('glm-image');
+  if (isZhipu) {
+    // 智谱图像生成只接受固定尺寸，不走通用 '2K' 路径
+    const url = normalizeBaseUrl(provider.baseUrl);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${provider.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: provider.model,
+          prompt: '一只可爱的卡通小猫，白底，高清',
+          size: '1024x1024',
+          n: 1,
+        }),
+        signal: AbortSignal.timeout(120000),
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        return { success: false, error: `图片生成探测失败 HTTP ${res.status}: ${text.slice(0, 200)}`, raw: text };
+      }
+      const data = JSON.parse(text) as ImageGenerationResponse & { task_id?: string; id?: string };
+      const imageUrl = data?.data?.[0]?.url || data?.data?.[0]?.b64_json;
+      const asyncId = data?.task_id || data?.id;
+      if (!imageUrl && !asyncId) {
+        return { success: false, error: '图片生成接口未返回 url/task_id', raw: text };
+      }
+      return { success: true, sample: imageUrl ? { imageUrl } : { taskId: asyncId, note: '异步图像任务已创建' }, raw: text };
+    } catch (err: any) {
+      let error = err?.message || String(err);
+      const code = err?.cause?.code || err?.code;
+      if (code) error += ` (网络/错误码: ${code})`;
+      return { success: false, error };
+    }
+  }
+
+  try {
+    const raw = await llmGenerate(
+      {
+        prompt: '一只可爱的卡通小猫，白底，高清',
+        systemPrompt: '',
+        timeoutMs: 120000,
+      },
+      provider,
+    );
+    if (!raw || !raw.startsWith('http')) {
+      return { success: false, error: `图片生成返回异常：${raw?.slice(0, 200)}` };
+    }
+    return { success: true, sample: { imageUrl: raw }, raw };
+  } catch (err: any) {
+    let error = err?.message || String(err);
+    const code = err?.cause?.code || err?.code;
+    if (code) error += ` (网络/错误码: ${code})`;
+    return { success: false, error };
+  }
+}
+
+async function probeVideoProvider(provider: LlmProvider): Promise<{ success: boolean; sample?: Record<string, string>; raw?: string; error?: string }> {
+  const url = normalizeBaseUrl(provider.baseUrl);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${provider.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: provider.model,
+        prompt: 'A cat walking on a white background, high quality',
+        size: '480x480',
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+    const text = await res.text();
+    if (!res.ok && res.status !== 202) {
+      return { success: false, error: `视频生成探测失败 HTTP ${res.status}: ${text.slice(0, 200)}`, raw: text };
+    }
+    return { success: true, sample: { httpStatus: String(res.status), note: '视频生成通常是异步任务，接口已接受请求即视为可用' }, raw: text };
+  } catch (err: any) {
+    let error = err?.message || String(err);
+    const code = err?.cause?.code || err?.code;
+    if (code) error += ` (网络/错误码: ${code})`;
+    return { success: false, error };
+  }
+}
+
+async function probeOcrProvider(provider: LlmProvider): Promise<{ success: boolean; sample?: Record<string, string>; raw?: string; error?: string }> {
+  const url = normalizeBaseUrl(provider.baseUrl);
+  const isZhipu = provider.baseUrl.toLowerCase().includes('bigmodel.cn') || provider.model.toLowerCase().includes('glm-ocr');
+  const payloadField = isZhipu ? 'image_url' : 'image';
+  const tryField = async (field: 'image' | 'image_url', value: string) => {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${provider.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: provider.model,
+        [field]: value,
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+    return res;
+  };
+  try {
+    // 先尝试 base64 data URI
+    let res = await tryField(payloadField, `data:image/png;base64,${TEST_IMAGE_B64}`);
+    let text = await res.text();
+    // 智谱 OCR 对 data URI 可能报格式错误，换真实公网图片 URL 再试
+    if (!res.ok && isZhipu) {
+      res = await tryField('image_url', 'https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png');
+      text = await res.text();
+    }
+    // 兜底：换另一个字段再试一次
+    if (!res.ok) {
+      const otherField = payloadField === 'image_url' ? 'image' : 'image_url';
+      res = await tryField(otherField, `data:image/png;base64,${TEST_IMAGE_B64}`);
+      text = await res.text();
+    }
+    if (!res.ok) {
+      // 智谱 OCR 等返回 1214 是因为探测用的 data URL/公网 URL 不被接受为「真实图片文件」，
+      // 但只要接口有响应，说明 endpoint/key 是通的，属于「探测受限」而非配置错误。
+      const isFormatRestriction = text.includes('1214') || text.includes('OCR仅支持') || text.toLowerCase().includes('format');
+      if (isFormatRestriction) {
+        return { success: true, sample: { httpStatus: String(res.status), note: 'OCR 接口可达（探测图片格式受限，实际请上传真实图片/PDF）' }, raw: text };
+      }
+      return { success: false, error: `OCR 探测失败 HTTP ${res.status}: ${text.slice(0, 200)}`, raw: text };
+    }
+    return { success: true, sample: { httpStatus: String(res.status), note: 'OCR/layout_parsing 接口已响应' }, raw: text };
+  } catch (err: any) {
+    let error = err?.message || String(err);
+    const code = err?.cause?.code || err?.code;
+    if (code) error += ` (网络/错误码: ${code})`;
+    return { success: false, error };
+  }
+}
+
+async function probeEmbeddingProvider(provider: LlmProvider): Promise<{ success: boolean; sample?: Record<string, string>; raw?: string; error?: string }> {
+  const url = normalizeBaseUrl(provider.baseUrl);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${provider.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: provider.model,
+        input: 'test',
+        encoding_format: 'float',
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      return { success: false, error: `Embedding 探测失败 HTTP ${res.status}: ${text.slice(0, 200)}`, raw: text };
+    }
+    return { success: true, sample: { httpStatus: String(res.status), note: 'Embedding 接口已响应' }, raw: text };
+  } catch (err: any) {
+    let error = err?.message || String(err);
+    const code = err?.cause?.code || err?.code;
+    if (code) error += ` (网络/错误码: ${code})`;
+    return { success: false, error };
+  }
+}
+
 /**
  * 诊断版翻译测试：返回原始响应，便于排查模型不返回 JSON 等问题。
  * 可传入指定 provider 进行单平台测试；不传则使用当前全部配置（failover 模式）。
+ * 已按 provider 能力自动分流：chat 走 /chat/completions，image/video/ocr/embedding 用对应端点探测。
  */
 export async function testLlmTranslation(
   site: string = 'MLM',
@@ -785,27 +993,21 @@ export async function testLlmTranslation(
   const resolved = provider || getLlmConfig();
   if (!resolved) return { success: false, error: 'LLM 未配置' };
 
-  // 图片生成模型：直接生成一张图并返回图片 URL
-  if (isImageProvider(resolved)) {
-    try {
-      const raw = await llmGenerate(
-        {
-          prompt: '一只可爱的卡通小猫，白底，高清',
-          systemPrompt: '',
-          timeoutMs: 120000,
-        },
-        resolved,
-      );
-      if (!raw || !raw.startsWith('http')) {
-        return { success: false, error: `图片生成返回异常：${raw?.slice(0, 200)}` };
-      }
-      return { success: true, sample: { imageUrl: raw }, raw };
-    } catch (err: any) {
-      let error = err?.message || String(err);
-      const code = err?.cause?.code || err?.code;
-      if (code) error += ` (网络/错误码: ${code})`;
-      return { success: false, error };
-    }
+  const capability = detectProviderType(resolved.baseUrl, resolved.model);
+
+  switch (capability) {
+    case 'image':
+      return probeImageProvider(resolved);
+    case 'video':
+      return probeVideoProvider(resolved);
+    case 'ocr':
+      return probeOcrProvider(resolved);
+    case 'embedding':
+      return probeEmbeddingProvider(resolved);
+    case 'audio':
+      return { success: false, error: '音频类模型暂不支持在 ml-product-finder 中使用，如需使用请单独配置 chat 或 image 平台' };
+    default:
+      break;
   }
 
   const keywords = ['mochila'];
@@ -863,14 +1065,16 @@ export async function testLlmTranslation(
  * 简单探测后端能否访问到 LLM 服务地址（只看网络通不通，不看鉴权）。
  * 用于给前端更准确的诊断：是网络/代理/DNS 问题，还是 Key/Model 问题。
  */
-export async function probeLlmReachability(baseUrl: string, timeoutMs = 8000): Promise<{
+export async function probeLlmReachability(baseUrl: string, timeoutMs = 8000, model?: string): Promise<{
   ok: boolean;
   url: string;
+  capability?: LlmCapability;
   status?: number;
   error?: string;
 }> {
-  // 图片生成端点直接探测，不要拼 /chat/completions
-  const url = isImageEndpoint(baseUrl) ? normalizeBaseUrl(baseUrl) : chatCompletionsUrl(baseUrl);
+  const capability = detectProviderType(baseUrl, model);
+  // 专用端点（图片/视频/OCR/嵌入等）直接以其真实 URL 探测，不要拼 /chat/completions
+  const url = capability === 'chat' ? chatCompletionsUrl(baseUrl) : normalizeBaseUrl(baseUrl);
   try {
     // 用 OPTIONS 探测端点：网络层可达即可，不需要鉴权。
     // 大多数厂商会返回 401/404，但 DNS/TCP 通了；若返回 2xx 也视为可达。
@@ -878,12 +1082,12 @@ export async function probeLlmReachability(baseUrl: string, timeoutMs = 8000): P
       method: 'OPTIONS',
       signal: AbortSignal.timeout(timeoutMs),
     });
-    return { ok: true, url, status: res.status };
+    return { ok: true, url, capability, status: res.status };
   } catch (err: any) {
     const code = err?.cause?.code || err?.code;
     let msg = err?.message || String(err);
     if (code) msg += ` (code: ${code})`;
-    return { ok: false, url, error: msg };
+    return { ok: false, url, capability, error: msg };
   }
 }
 

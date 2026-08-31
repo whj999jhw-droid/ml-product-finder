@@ -769,6 +769,7 @@ import {
   probeLlmReachability,
   translateOrderTexts,
   deleteLlmProvider,
+  detectProviderType,
 } from './aiService.js';
 import * as imagePipeline from './imagePipeline.js';
 import { getTrendsKeywords, getTrends } from './trends.js';
@@ -3110,6 +3111,7 @@ app.post('/api/ml/llm-config/test', async (req, res) => {
           name: p.name || '未命名平台',
           baseUrl: baseUrl || p.baseUrl || '',
           model: p.model || '',
+          capability: 'unknown',
           reachable: false,
           success: false,
           message: 'baseUrl/apiKey/model 不完整',
@@ -3121,18 +3123,21 @@ app.post('/api/ml/llm-config/test', async (req, res) => {
           name: p.name || '未命名平台',
           baseUrl,
           model: p.model,
+          capability: detectProviderType(baseUrl, p.model),
           reachable: false,
           success: false,
           message: 'baseUrl 不能包含省略号',
         });
         continue;
       }
-      const reachability = await probeLlmReachability(baseUrl, 8000);
+      const reachability = await probeLlmReachability(baseUrl, 8000, p.model);
+      const capability = reachability.capability || detectProviderType(baseUrl, p.model);
       if (!reachability.ok) {
         perProvider.push({
           name: p.name || '未命名平台',
           baseUrl,
           model: p.model,
+          capability,
           reachable: false,
           success: false,
           message: `无法访问 LLM 服务：${reachability.error}`,
@@ -3145,25 +3150,27 @@ app.post('/api/ml/llm-config/test', async (req, res) => {
         const providerCfg: any = { name: p.name || '未命名平台', baseUrl, apiKey: p.apiKey, model: p.model, type: p.type || 'openai' };
         const diag = await testLlmTranslation('MLM', providerCfg);
         if (diag.success && diag.sample) {
-          perProvider.push({
-            name: p.name || '未命名平台',
-            baseUrl,
-            model: p.model,
-            reachable: true,
-            success: true,
-            message: '连接成功',
-            sample: diag.sample,
-            url: reachability.url,
-          });
+        perProvider.push({
+          name: p.name || '未命名平台',
+          baseUrl,
+          model: p.model,
+          capability,
+          reachable: true,
+          success: true,
+          message: `连接成功 [${capability}]`,
+          sample: diag.sample,
+          url: reachability.url,
+        });
           if (!firstSuccess) firstSuccess = { sample: diag.sample, url: reachability.url };
         } else {
           perProvider.push({
             name: p.name || '未命名平台',
             baseUrl,
             model: p.model,
+            capability,
             reachable: true,
             success: false,
-            message: diag.error || '翻译测试失败',
+            message: diag.error || '测试失败',
             url: reachability.url,
           });
         }
@@ -3172,6 +3179,7 @@ app.post('/api/ml/llm-config/test', async (req, res) => {
           name: p.name || '未命名平台',
           baseUrl,
           model: p.model,
+          capability,
           reachable: true,
           success: false,
           message: `测试异常：${err?.message || String(err)}`,

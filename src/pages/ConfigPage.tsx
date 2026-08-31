@@ -315,10 +315,13 @@ function AiConfigPanel() {
         {/* 测试结果 */}
         {testResult?.perProvider && (
           <div className="mt-3 space-y-2">
-            {testResult.perProvider.map((r: any, i: number) => (
+            {testResult.perProvider.map((r: any, i: number) => {
+              const capLabels: Record<string, string> = { chat: '对话', image: '图像', video: '视频', ocr: 'OCR', embedding: '嵌入', audio: '音频', unknown: '未知' };
+              return (
               <div key={i} className="text-xs border border-gray-100 rounded p-2">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <Tag size="small" theme={r.success ? 'success' : 'danger'}>{r.success ? '成功' : '失败'}</Tag>
+                  <Tag size="small" theme="default" variant="light">{capLabels[r.capability] || r.capability || '对话'}</Tag>
                   <span className="font-medium">{r.name}</span>
                   <span className="text-gray-500">{r.model}</span>
                   {!r.success && (
@@ -339,7 +342,7 @@ function AiConfigPanel() {
                   <div className="text-gray-500 mt-1">示例：{JSON.stringify(r.sample)}</div>
                 )}
               </div>
-            ))}
+            );})}
           </div>
         )}
       </Card>
