@@ -247,7 +247,7 @@ export function OrdersPage() {
   const activeSite = stores.find((s) => s.id === activeStore)?.site || 'MLM';
 
   const orderColumns = [
-    { colKey: 'id', title: '订单号', width: 160, cell: ({ row }: any) => <span className="font-mono">{row.id}</span> },
+    { colKey: 'id', title: '订单号', width: 220, cell: ({ row }: any) => <span className="font-mono text-xs">{row.pack_id ? `${row.pack_id}/${row.id}` : row.id}</span> },
     { colKey: 'date_created', title: '下单时间', width: 170, cell: ({ row }: any) => fmtDate(row.date_created) },
     {
       colKey: 'buyer',
@@ -454,7 +454,7 @@ export function OrdersPage() {
           <div className="space-y-4 text-sm">
             <Section title="基本信息">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4">
-                <KV k="订单号" v={String(detailItems.id)} />
+                <KV k="订单号" v={detailItems.pack_id ? `${detailItems.pack_id}/${detailItems.id}` : String(detailItems.id)} />
                 <KV k="国家/站点" v={`${SITE_COUNTRY_NAME[activeSite] || activeSite}（${activeSite}）`} />
                 <KV k="状态" v={STATUS_TEXT[detail?.category || detailItems.status] || detail?.category || detailItems.status} />
                 <KV k="物流方式" v={detail?.shippingMethod || '—'} />

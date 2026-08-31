@@ -70,6 +70,47 @@ function detectCapabilities(baseUrl: string, models: string): string[] {
 const CAP_LABELS: Record<string, string> = { chat: '对话', image: '图像', video: '视频', ocr: 'OCR', embedding: '嵌入', audio: '音频' };
 const TYPE_LABELS: Record<string, string> = { openai: 'OpenAI 兼容', 'volcano-rest': '火山 REST', 'volcano-sdk': '火山 SDK' };
 
+/** 根据平台名 + 模型名推断 endpoint（best-effort，已知平台自动补，未知不覆盖） */
+function inferEndpoint(name: string, models: string, type: string): string | null {
+  const n = (name || '').toLowerCase();
+  const m = (models || '').toLowerCase();
+  const caps = detectCapabilities('', models);
+  const isImage = caps.includes('image');
+  const isVideo = caps.includes('video');
+  const isOcr = caps.includes('ocr');
+  const isEmbedding = caps.includes('embedding');
+
+  // 智谱
+  if (n.includes('智谱') || n.includes('bigmodel') || n.includes('glm')) {
+    if (isOcr) return 'https://open.bigmodel.cn/api/paas/v4/layout_parsing';
+    if (isImage) return 'https://open.bigmodel.cn/api/paas/v4/images/generations';
+    if (isVideo) return 'https://open.bigmodel.cn/api/paas/v4/videos/generations';
+    return 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
+  }
+
+  // 火山方舟
+  if (n.includes('火山') || n.includes('volces') || n.includes('ark')) {
+    if (type === 'volcano-sdk') return 'https://ark.cn-beijing.volces.com/api/v3';
+    if (isImage) return 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
+    return 'https://ark.cn-beijing.volces.com/api/v3/chat/completions';
+  }
+
+  // 七牛云（OpenAI 兼容聚合）
+  if (n.includes('七牛') || n.includes('qnaigc')) {
+    if (isVideo) return 'https://api.qnaigc.com/v1/videos/generations';
+    if (isImage) return 'https://api.qnaigc.com/v1/images/generations';
+    return 'https://api.qnaigc.com/v1';
+  }
+
+  // 小红书（dots 系列）
+  if (n.includes('小红书') || n.includes('note3') || n.includes('dots')) {
+    return 'https://note3-preview-api.xiaohongshu.com/api/llm/v1/chat/completions';
+  }
+
+  // agnes：未知具体地址，不猜
+  return null;
+}
+
 function AiConfigPanel() {
   const [status, setStatus] = useState<AiStatus | null>(null);
   const [providers, setProviders] = useState<LlmProviderForm[]>([]);
@@ -412,13 +453,20 @@ function AiConfigPanel() {
         header={editingIndex !== null ? '修改 LLM 平台' : '添加 LLM 平台'}
         onConfirm={handleDialogConfirm}
         confirmLoading={saving}
+        width={760}
       >
-        <div className="space-y-4 py-2" style={{ minWidth: 480 }}>
+        <div className="space-y-4 py-2" style={{ minWidth: 720 }}>
           <div>
             <label className="block text-xs text-gray-600 mb-1">平台名</label>
             <Input
               value={form.name}
               onChange={(v) => setForm((f) => ({ ...f, name: v as string }))}
+              onBlur={() => {
+                if (!form.baseUrl.trim()) {
+                  const url = inferEndpoint(form.name, form.models, form.type || 'openai');
+                  if (url) setForm((f) => ({ ...f, baseUrl: url }));
+                }
+              }}
               placeholder="例如：火山、智谱、七牛云"
             />
           </div>
@@ -428,9 +476,16 @@ function AiConfigPanel() {
               value={form.baseUrl}
               onChange={(v) => setForm((f) => ({ ...f, baseUrl: v as string }))}
               placeholder="https://.../v1 或专用 endpoint"
+              suffixIcon={
+                <Button size="small" variant="text" onClick={() => {
+                  const url = inferEndpoint(form.name, form.models, form.type || 'openai');
+                  if (url) setForm((f) => ({ ...f, baseUrl: url }));
+                  else MessagePlugin.warning('暂不支持自动补全该平台，请手动填写');
+                }}>自动补全</Button>
+              }
             />
             <div className="text-xs text-gray-400 mt-1">
-              对话模型填 chat 入口；图片/视频/OCR 填厂商给出的专用入口（如 <code>/images/generations</code>）。
+              填平台名后失焦会自动补全；若不准可手动修改。对话模型填 chat 入口；图片/视频/OCR 填专用入口。
             </div>
           </div>
           <div>
@@ -456,10 +511,24 @@ function AiConfigPanel() {
             <Textarea
               value={form.models}
               onChange={(v) => setForm((f) => ({ ...f, models: v as string }))}
+              onBlur={() => {
+                if (!form.baseUrl.trim()) {
+                  const url = inferEndpoint(form.name, form.models, form.type || 'openai');
+                  if (url) setForm((f) => ({ ...f, baseUrl: url }));
+                }
+              }}
               placeholder="doubao-seed-2-0-mini, deepseek-v4-flash"
               rows={3}
             />
             <div className="text-xs text-gray-400 mt-1">同一 baseUrl 下多个模型会按序自动 failover。</div>
+            {(() => {
+              const caps = detectCapabilities('', form.models);
+              const mixed = caps.filter((c) => c !== 'chat');
+              if (mixed.length > 0 && caps.includes('chat')) {
+                return <div className="text-xs text-orange-500 mt-1">检测到对话模型与 {mixed.map((c) => CAP_LABELS[c]).join('/')} 模型混填，建议拆分为不同平台（endpoint 不同）。</div>;
+              }
+              return null;
+            })()}
           </div>
         </div>
       </Dialog>
