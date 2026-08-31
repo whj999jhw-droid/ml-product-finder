@@ -211,7 +211,7 @@ export function saveLlmConfig(cfg: Partial<LlmProvider> | { providers?: Partial<
     if (!baseUrl || modelList.length === 0) {
       return {
         success: false,
-        message: `第 ${i + 1} 个平台必须填写 baseUrl 与至少一个 model（多个 model 用逗号隔开）`,
+        message: `平台「${p.name || baseUrl || '未命名'}」必须填写 baseUrl 与至少一个 model（多个 model 用逗号隔开）`,
       };
     }
     const providerType = ((p as any).type || 'openai') as LlmProviderType;
@@ -241,22 +241,22 @@ export function saveLlmConfig(cfg: Partial<LlmProvider> | { providers?: Partial<
     if (baseUrl.includes('...')) {
       return {
         success: false,
-        message: `第 ${i + 1} 个平台的 baseUrl 不能包含省略号 "..."，请填写完整地址`,
+        message: `平台「${p.name || baseUrl}」的 baseUrl 不能包含省略号 "..."，请填写完整地址`,
       };
     }
     try {
       const parsed = new URL(baseUrl);
       if (!['http:', 'https:'].includes(parsed.protocol)) {
-        return { success: false, message: `第 ${i + 1} 个平台的 baseUrl 必须是 http:// 或 https:// 开头` };
+        return { success: false, message: `平台「${p.name || baseUrl}」的 baseUrl 必须是 http:// 或 https:// 开头` };
       }
     } catch {
-      return { success: false, message: `第 ${i + 1} 个平台的 baseUrl 不是合法 URL` };
+      return { success: false, message: `平台「${p.name || baseUrl}」的 baseUrl 不是合法 URL` };
     }
     // apiKey 最终仍为空且不是已有配置：首次保存必须提供
     if (!apiKey) {
       const old = existingByBoth.get(`${baseUrl}|${model}`);
       if (!old) {
-        return { success: false, message: `第 ${i + 1} 个平台首次保存必须提供 apiKey` };
+        return { success: false, message: `平台「${p.name || baseUrl}」模型「${model}」首次保存必须提供 apiKey` };
       }
       apiKey = old.apiKey;
     }

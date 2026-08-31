@@ -125,6 +125,8 @@ function AiConfigPanel() {
   const [dialogVisible, setDialogVisible] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [form, setForm] = useState<LlmProviderForm>({ name: '', baseUrl: '', apiKey: '', models: '', type: 'openai' });
+  // 已保存的 baseUrl|type 组合，用于判断某行是否为“新增平台”
+  const [savedKeys, setSavedKeys] = useState<Set<string>>(new Set());
 
   const loadStatus = async () => {
     try {
@@ -165,6 +167,7 @@ function AiConfigPanel() {
         }
       }
       setProviders(Array.from(byBase.values()));
+      setSavedKeys(new Set(raw.map((p: any) => `${(p.baseUrl || '').trim()}|${p.type || 'openai'}`)));
       setPage(1);
     } catch {
       MessagePlugin.error('加载配置失败');
@@ -204,7 +207,11 @@ function AiConfigPanel() {
     if (!form.name.trim()) { MessagePlugin.warning('请填写平台名'); return false; }
     if (!form.baseUrl.trim()) { MessagePlugin.warning('请填写 baseUrl'); return false; }
     if (!form.models.trim()) { MessagePlugin.warning('请填写至少一个模型'); return false; }
-    if (editingIndex === null && !form.apiKey.trim()) { MessagePlugin.warning('新增平台必须填写 API Key'); return false; }
+    const isNewBase = !savedKeys.has(`${form.baseUrl.trim()}|${form.type || 'openai'}`);
+    if (isNewBase && !form.apiKey.trim()) {
+      MessagePlugin.warning(`平台「${form.name.trim()}」是首次保存，必须填写 API Key`);
+      return false;
+    }
     return true;
   };
 
