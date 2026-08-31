@@ -12,6 +12,7 @@ import {
   Select,
 } from 'tdesign-react';
 import { RefreshIcon, DeleteIcon, AddIcon } from 'tdesign-icons-react';
+import { DialogPlugin } from 'tdesign-react';
 import { NotificationSettingsPage } from './NotificationSettingsPage';
 import { StoreManagementPage } from './StoreManagementPage';
 
@@ -151,6 +152,60 @@ function AiConfigPanel() {
     }
   };
 
+  // 直接删除：调用后端接口从已保存配置中移除（不通的提供商一键清理）
+  const callDelete = async (body: { baseUrl?: string; model?: string; type?: string }) => {
+    const res = await fetch('/api/ml/llm-config/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    return data as { success: boolean; message?: string };
+  };
+
+  // 删除整个平台（baseUrl+type 下所有模型）
+  const handleDeleteProvider = (baseUrl: string, type?: string, label?: string) => {
+    const inst = DialogPlugin.confirm({
+      header: '删除该 LLM 平台',
+      body: `确定删除「${label || baseUrl}」下所有已保存模型？删除后系统不再尝试该平台。`,
+      theme: 'danger',
+      onConfirm: async () => {
+        try {
+          const data = await callDelete({ baseUrl, type });
+          if (data.success) {
+            MessagePlugin.success(data.message || '已删除');
+            inst.hide();
+            loadStatus();
+            loadProviders();
+            setTestResult(null);
+          } else {
+            MessagePlugin.error(data.message || '删除失败');
+            inst.hide();
+          }
+        } catch (e: any) {
+          MessagePlugin.error(e?.message || '网络错误');
+          inst.hide();
+        }
+      },
+    });
+  };
+
+  // 删除单个不通的模型（测试结果里用，baseUrl+model 精确定位）
+  const handleDeleteModel = async (baseUrl: string, model: string) => {
+    try {
+      const data = await callDelete({ baseUrl, model });
+      if (data.success) {
+        MessagePlugin.success(data.message || '已删除');
+        setTestResult((prev: any) => prev ? { ...prev, perProvider: prev.perProvider.filter((r: any) => !(r.baseUrl === baseUrl && r.model === model)) } : prev);
+        loadProviders();
+      } else {
+        MessagePlugin.error(data.message || '删除失败');
+      }
+    } catch (e: any) {
+      MessagePlugin.error(e?.message || '网络错误');
+    }
+  };
+
   return (
     <div className="space-y-5">
       {/* 环境变量兜底提示 */}
@@ -207,7 +262,7 @@ function AiConfigPanel() {
                   variant="text"
                   theme="danger"
                   icon={<DeleteIcon />}
-                  onClick={() => setProviders((prev) => prev.filter((_, idx) => idx !== i))}
+                  onClick={() => handleDeleteProvider(p.baseUrl, p.type, p.name)}
                 />
               </div>
               {/* 第二行：调用方式 */}
@@ -266,6 +321,18 @@ function AiConfigPanel() {
                   <Tag size="small" theme={r.success ? 'success' : 'danger'}>{r.success ? '成功' : '失败'}</Tag>
                   <span className="font-medium">{r.name}</span>
                   <span className="text-gray-500">{r.model}</span>
+                  {!r.success && (
+                    <Button
+                      size="small"
+                      variant="text"
+                      theme="danger"
+                      className="ml-auto"
+                      icon={<DeleteIcon />}
+                      onClick={() => handleDeleteModel(r.baseUrl, r.model)}
+                    >
+                      删除该不通模型
+                    </Button>
+                  )}
                 </div>
                 <div className="text-gray-600 mt-1">{r.message || ''}</div>
                 {r.sample && (

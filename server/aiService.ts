@@ -277,6 +277,44 @@ export function saveLlmConfig(cfg: Partial<LlmProvider> | { providers?: Partial<
   return { success: true };
 }
 
+export interface DeleteLlmProviderResult {
+  success: boolean;
+  removed?: number;
+  message?: string;
+}
+
+/**
+ * 直接删除已保存的 LLM 配置中的提供商。
+ * 匹配规则（未提供的字段不参与匹配）：
+ *   - baseUrl：归一化后精确匹配（删除整个平台时只传 baseUrl 即可）
+ *   - model：精确匹配（删除单个不通的模型时传 baseUrl+model）
+ *   - type：调用方式匹配
+ * 命中即从 data/llm-config.json 中移除并落盘，后续 llmGenerate 不再尝试该配置。
+ */
+export function deleteLlmProvider(filter: { baseUrl?: string; model?: string; type?: LlmProviderType }): DeleteLlmProviderResult {
+  const raw = loadLlmConfigFileRaw();
+  if (!raw?.providers || raw.providers.length === 0) {
+    return { success: false, message: '没有已保存的 LLM 配置' };
+  }
+  const normBase = (filter.baseUrl || '').trim();
+  const normModel = (filter.model || '').trim().toLowerCase();
+  const type = filter.type;
+  const before = raw.providers.length;
+  const after = raw.providers.filter((p) => {
+    const baseMatch = !normBase || normalizeBaseUrl(p.baseUrl) === normalizeBaseUrl(normBase);
+    const modelMatch = !normModel || (p.model || '').trim().toLowerCase() === normModel;
+    const typeMatch = !type || (p.type || 'openai') === type;
+    const hit = baseMatch && modelMatch && typeMatch;
+    return !hit; // 命中则剔除
+  });
+  const removed = before - after.length;
+  if (removed === 0) {
+    return { success: false, removed: 0, message: '没有匹配的提供商可删除（请检查 baseUrl / model 是否一致）' };
+  }
+  writeLlmConfigFile({ providers: after });
+  return { success: true, removed };
+}
+
 // ============ 通用 LLM 调用 ============
 
 interface LLMOptions {

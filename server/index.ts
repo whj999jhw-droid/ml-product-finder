@@ -768,6 +768,7 @@ import {
   testLlmTranslation,
   probeLlmReachability,
   translateOrderTexts,
+  deleteLlmProvider,
 } from './aiService.js';
 import * as imagePipeline from './imagePipeline.js';
 import { getTrendsKeywords, getTrends } from './trends.js';
@@ -3191,6 +3192,21 @@ app.post('/api/ml/llm-config/test', async (req, res) => {
     });
   } catch (err: any) {
     res.json({ success: false, message: err?.message || '测试异常' });
+  }
+});
+
+// 直接删除已保存的 LLM 提供商（不通的配置一键移除，后续不再尝试）
+app.post('/api/ml/llm-config/delete', (req, res) => {
+  try {
+    const { baseUrl, model, type } = req.body || {};
+    if (!baseUrl && !model) {
+      return res.status(400).json({ success: false, message: '请提供 baseUrl 或 model 用于定位要删除的提供商' });
+    }
+    const result = deleteLlmProvider({ baseUrl, model, type });
+    if (!result.success) return res.json({ success: false, message: result.message });
+    res.json({ success: true, message: `已删除 ${result.removed} 个提供商配置`, removed: result.removed });
+  } catch (err: any) {
+    res.json({ success: false, message: err?.message || '删除失败' });
   }
 });
 
