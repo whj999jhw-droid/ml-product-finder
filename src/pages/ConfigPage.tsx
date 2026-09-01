@@ -118,6 +118,7 @@ function AiConfigPanel() {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<any>(null);
+  const [showTestResult, setShowTestResult] = useState(false);
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(8);
@@ -263,6 +264,7 @@ function AiConfigPanel() {
       });
       const data = await res.json();
       setTestResult(data);
+      setShowTestResult(true);
       if (data.success) MessagePlugin.success('测试完成，见下方结果');
       else MessagePlugin.warning(data.message || '测试未通过');
     } catch (e: any) {
@@ -406,7 +408,7 @@ function AiConfigPanel() {
           empty={<div className="text-center text-gray-400 py-8">暂无平台配置，点击右上角「添加平台」</div>}
         />
 
-        {total > pageSize && (
+        {total > 0 && (
           <div className="mt-3 flex justify-end">
             <Pagination
               total={total}
@@ -419,36 +421,50 @@ function AiConfigPanel() {
           </div>
         )}
 
-        {/* 测试结果 */}
+        {/* 测试结果（可折叠） */}
         {testResult?.perProvider && (
           <div className="mt-4 border-t border-gray-100 pt-3">
-            <div className="text-sm font-medium mb-2">测试结果</div>
-            <div className="space-y-2">
-              {testResult.perProvider.map((r: any, i: number) => (
-                <div key={i} className="text-xs border border-gray-100 rounded p-2">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <Tag size="small" theme={r.success ? 'success' : 'danger'}>{r.success ? '成功' : '失败'}</Tag>
-                    <Tag size="small" theme="default" variant="light">{CAP_LABELS[r.capability] || r.capability || '对话'}</Tag>
-                    <span className="font-medium">{r.name}</span>
-                    <span className="text-gray-500">{r.model}</span>
-                    {!r.success && (
-                      <Button
-                        size="small"
-                        variant="text"
-                        theme="danger"
-                        className="ml-auto"
-                        icon={<DeleteIcon />}
-                        onClick={() => handleDeleteModel(r.baseUrl, r.model)}
-                      >
-                        删除该不通模型
-                      </Button>
-                    )}
-                  </div>
-                  <div className="text-gray-600 mt-1">{r.message || ''}</div>
-                  {r.sample && <div className="text-gray-500 mt-1">示例：{JSON.stringify(r.sample)}</div>}
-                </div>
-              ))}
+            <div
+              className="text-sm font-medium mb-2 flex items-center gap-2 cursor-pointer select-none hover:text-blue-600"
+              onClick={() => setShowTestResult(v => !v)}
+            >
+              <span
+                className="inline-block transition-transform text-xs"
+                style={{ transform: showTestResult ? 'rotate(90deg)' : 'rotate(0deg)' }}
+              >▶</span>
+              <span>测试结果</span>
+              <span className="text-xs text-gray-400 font-normal">
+                （共 {testResult.perProvider.length} 项{showTestResult ? '，点击收起' : '，点击展开'}）
+              </span>
             </div>
+            {showTestResult && (
+              <div className="space-y-2">
+                {testResult.perProvider.map((r: any, i: number) => (
+                  <div key={i} className="text-xs border border-gray-100 rounded p-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Tag size="small" theme={r.success ? 'success' : 'danger'}>{r.success ? '成功' : '失败'}</Tag>
+                      <Tag size="small" theme="default" variant="light">{CAP_LABELS[r.capability] || r.capability || '对话'}</Tag>
+                      <span className="font-medium">{r.name}</span>
+                      <span className="text-gray-500">{r.model}</span>
+                      {!r.success && (
+                        <Button
+                          size="small"
+                          variant="text"
+                          theme="danger"
+                          className="ml-auto"
+                          icon={<DeleteIcon />}
+                          onClick={() => handleDeleteModel(r.baseUrl, r.model)}
+                        >
+                          删除该不通模型
+                        </Button>
+                      )}
+                    </div>
+                    <div className="text-gray-600 mt-1">{r.message || ''}</div>
+                    {r.sample && <div className="text-gray-500 mt-1">示例：{JSON.stringify(r.sample)}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </Card>
