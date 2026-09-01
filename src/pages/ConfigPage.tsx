@@ -10,6 +10,8 @@ import {
   Loading,
   Link,
   Select,
+  Table,
+  Textarea,
 } from 'tdesign-react';
 import { RefreshIcon, DeleteIcon, AddIcon } from 'tdesign-icons-react';
 import { DialogPlugin } from 'tdesign-react';
@@ -54,6 +56,8 @@ function AiConfigPanel() {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<any>(null);
+  const [pageNum, setPageNum] = useState(1);
+  const pageSize = 5;
 
   const loadStatus = async () => {
     try {
@@ -206,6 +210,57 @@ function AiConfigPanel() {
     }
   };
 
+  const llmColumns = [
+    {
+      colKey: 'name',
+      title: '平台名',
+      width: 120,
+      cell: ({ row }: any) => (
+        <Input size="small" value={row.name} onChange={(v: string) => updateProvider(row._idx, { name: v })} placeholder="平台名" />
+      ),
+    },
+    {
+      colKey: 'baseUrl',
+      title: '链接 / baseUrl',
+      width: 260,
+      cell: ({ row }: any) => (
+        <Input size="small" value={row.baseUrl} onChange={(v: string) => updateProvider(row._idx, { baseUrl: v })} placeholder="https://.../v1" />
+      ),
+    },
+    {
+      colKey: 'apiKey',
+      title: 'API Key',
+      width: 160,
+      cell: ({ row }: any) => (
+        <Input size="small" type="password" value={row.apiKey} onChange={(v: string) => updateProvider(row._idx, { apiKey: v })} placeholder={status ? '留空=复用已保存' : 'API Key'} />
+      ),
+    },
+    {
+      colKey: 'type',
+      title: '调用方式',
+      width: 170,
+      cell: ({ row }: any) => (
+        <Select size="small" value={row.type || 'openai'} options={LLM_TYPE_OPTIONS} onChange={(v: any) => updateProvider(row._idx, { type: v })} />
+      ),
+    },
+    {
+      colKey: 'models',
+      title: '模型（逗号隔开，可多行）',
+      width: 240,
+      cell: ({ row }: any) => (
+        <Textarea size="small" autosize={{ minRows: 1, maxRows: 4 }} value={row.models} onChange={(v: string) => updateProvider(row._idx, { models: v })} placeholder="gpt-4o, gpt-4o-mini, ..." />
+      ),
+    },
+    {
+      colKey: 'op',
+      title: '操作',
+      width: 70,
+      cell: ({ row }: any) => (
+        <Button size="small" variant="text" theme="danger" icon={<DeleteIcon />} onClick={() => handleDeleteProvider(row.baseUrl, row.type, row.name)} />
+      ),
+    },
+  ];
+
   return (
     <div className="space-y-5">
       {/* 环境变量兜底提示 */}
@@ -228,88 +283,27 @@ function AiConfigPanel() {
 
       {/* 平台列表 */}
       <Card title="LLM 平台（多平台自动 failover）" headerBordered>
-        <div className="space-y-3">
-          {providers.map((p, i) => (
-            <div key={i} className="border border-gray-100 rounded p-3 space-y-3">
-              <div className="text-xs font-medium text-gray-500">平台 {i + 1}</div>
-              {/* 第一行：平台名 · 链接 · API Key */}
-              <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center">
-                <Input
-                  className="md:col-span-2"
-                  size="small"
-                  value={p.name}
-                  onChange={(v) => updateProvider(i, { name: v as string })}
-                  placeholder="平台名"
-                />
-                <Input
-                  className="md:col-span-6"
-                  size="small"
-                  value={p.baseUrl}
-                  onChange={(v) => updateProvider(i, { baseUrl: v as string })}
-                  placeholder="链接 / baseUrl（https://.../v1）"
-                />
-                <Input
-                  className="md:col-span-3"
-                  size="small"
-                  type="password"
-                  value={p.apiKey}
-                  onChange={(v) => updateProvider(i, { apiKey: v as string })}
-                  placeholder={status ? '留空=复用已保存' : 'API Key'}
-                />
-                <Button
-                  className="md:col-span-1"
-                  size="small"
-                  variant="text"
-                  theme="danger"
-                  icon={<DeleteIcon />}
-                  onClick={() => handleDeleteProvider(p.baseUrl, p.type, p.name)}
-                />
-              </div>
-              {/* 第二行：调用方式 */}
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-500 shrink-0">调用方式</span>
-                <Select
-                  className="w-44"
-                  size="small"
-                  value={p.type || 'openai'}
-                  options={LLM_TYPE_OPTIONS}
-                  onChange={(v) => updateProvider(i, { type: v as LlmProviderForm['type'] })}
-                />
-                <span className="text-xs text-gray-400">
-                  火山图片生成选「火山方舟 REST」并填 <code>https://ark.cn-beijing.volces.com/api/v3/images/generations</code>；想用官方 SDK 选「火山方舟 SDK」。
-                </span>
-              </div>
-              {/* 第三行：多个模型，逗号隔开 */}
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-500 shrink-0">模型（逗号隔开）</span>
-                <Input
-                  className="flex-1"
-                  size="small"
-                  value={p.models}
-                  onChange={(v) => updateProvider(i, { models: v as string })}
-                  placeholder="gpt-4o, gpt-4o-mini, deepseek-chat"
-                />
-              </div>
-              <div className="text-xs text-gray-400">
-                第一行填平台名 / 链接(baseUrl) / API Key（修改其他项时 Key 留空即复用已保存，不会丢失）；
-                第二行多个模型用<strong>逗号</strong>隔开，会按序自动 failover。
-              </div>
-            </div>
-          ))}
+        <Table
+          rowKey="_idx"
+          size="small"
+          data={providers.map((p, i) => ({ ...p, _idx: i }))}
+          columns={llmColumns}
+          pagination={{ current: pageNum, pageSize, total: providers.length, showJumper: true, onChange: (pi: any) => setPageNum(pi.current) }}
+          bordered
+        />
+        <div className="flex items-center gap-2 pt-2 flex-wrap">
           <Button size="small" variant="dashed" icon={<AddIcon />} onClick={() => setProviders((prev) => [...prev, { name: `平台 ${prev.length + 1}`, baseUrl: '', apiKey: '', models: '', type: 'openai' }])}>
             添加平台
           </Button>
-          <div className="flex items-center gap-2 pt-1">
-            <Button size="small" theme="primary" loading={saving} onClick={handleSave}>
-              保存配置
-            </Button>
-            <Button size="small" variant="outline" loading={testing} onClick={handleTest}>
-              测试连接
-            </Button>
-            <Button size="small" variant="text" icon={<RefreshIcon />} onClick={() => { loadStatus(); loadProviders(); }}>
-              刷新
-            </Button>
-          </div>
+          <Button size="small" theme="primary" loading={saving} onClick={handleSave}>
+            保存配置
+          </Button>
+          <Button size="small" variant="outline" loading={testing} onClick={handleTest}>
+            测试连接
+          </Button>
+          <Button size="small" variant="text" icon={<RefreshIcon />} onClick={() => { loadStatus(); loadProviders(); setPageNum(1); }}>
+            刷新
+          </Button>
         </div>
 
         {/* 测试结果 */}
