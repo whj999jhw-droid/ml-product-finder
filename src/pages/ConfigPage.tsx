@@ -16,7 +16,7 @@ import {
   Textarea,
 } from 'tdesign-react';
 import type { PrimaryTableCol } from 'tdesign-react';
-import { RefreshIcon, DeleteIcon, AddIcon, EditIcon } from 'tdesign-icons-react';
+import { RefreshIcon, DeleteIcon, AddIcon, EditIcon, CopyIcon } from 'tdesign-icons-react';
 import { DialogPlugin } from 'tdesign-react';
 import { NotificationSettingsPage } from './NotificationSettingsPage';
 import { StoreManagementPage } from './StoreManagementPage';
@@ -111,6 +111,28 @@ function inferEndpoint(name: string, models: string, type: string): string | nul
   return null;
 }
 
+function copyText(text: string) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise<void>((resolve, reject) => {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand('copy');
+      resolve();
+    } catch (e) {
+      reject(e);
+    } finally {
+      document.body.removeChild(ta);
+    }
+  });
+}
+
 function AiConfigPanel() {
   const [status, setStatus] = useState<AiStatus | null>(null);
   const [providers, setProviders] = useState<LlmProviderForm[]>([]);
@@ -118,6 +140,48 @@ function AiConfigPanel() {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<any>(null);
+
+  const [exampleTab, setExampleTab] = useState<'rest' | 'sdk'>('rest');
+  const [copiedExample, setCopiedExample] = useState<'rest' | 'sdk' | null>(null);
+
+  const firstProvider = providers[0];
+  const exampleBase = (firstProvider?.baseUrl || 'https://ark.cn-beijing.volces.com/api/v3').replace(/\/+$/, '');
+  const exampleKey = '<YOUR_API_KEY>';
+  const exampleModel = firstProvider?.models?.split(/[,，]/).map((m) => m.trim()).filter(Boolean)[0] || '<MODEL>';
+
+  const restExample = `curl -X POST "${exampleBase}/chat/completions" \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${exampleKey}" \\
+  -d '{
+    "model": "${exampleModel}",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant"},
+      {"role": "user", "content": "Hello"}
+    ],
+    "temperature": 0.7,
+    "max_tokens": 1024,
+    "stream": false
+  }'`;
+
+  const sdkExample = `from volcenginesdkarkruntime import Ark
+
+client = Ark(
+    api_key="${exampleKey}",
+    base_url="${exampleBase}"
+)
+
+completion = client.chat.completions.create(
+    model="${exampleModel}",
+    messages=[
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": "Hello"}
+    ],
+    temperature=0.7,
+    max_tokens=1024,
+    stream=False
+)
+
+print(completion.choices[0].message.content)`;
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(8);
@@ -539,6 +603,62 @@ function AiConfigPanel() {
           </div>
         </div>
       </Dialog>
+
+      {/* 调用示例 */}
+      <Card title="调用示例" headerBordered>
+        <Tabs value={exampleTab} onChange={(v) => setExampleTab(v as 'rest' | 'sdk')}>
+          <Tabs.TabPanel value="rest" label="REST API 调用示例">
+            <div className="relative group">
+              <pre className="bg-gray-50 border border-gray-100 rounded p-3 text-xs overflow-x-auto whitespace-pre-wrap" style={{ maxHeight: 320 }}>
+                {restExample}
+              </pre>
+              <Button
+                size="small"
+                variant="outline"
+                className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity"
+                icon={<CopyIcon />}
+                onClick={() => {
+                  copyText(restExample).then(() => {
+                    setCopiedExample('rest');
+                    MessagePlugin.success('已复制 REST 示例');
+                    setTimeout(() => setCopiedExample(null), 1500);
+                  }).catch(() => MessagePlugin.error('复制失败'));
+                }}
+              >
+                {copiedExample === 'rest' ? '已复制' : '复制'}
+              </Button>
+            </div>
+            <div className="text-xs text-gray-400 mt-2">
+              把 <code>{exampleKey}</code> 替换为你的真实 API Key；baseUrl / model 会按上方第一个已保存平台自动填充（未保存时显示火山方舟默认值）。
+            </div>
+          </Tabs.TabPanel>
+          <Tabs.TabPanel value="sdk" label="火山引擎 SDK 调用示例">
+            <div className="relative group">
+              <pre className="bg-gray-50 border border-gray-100 rounded p-3 text-xs overflow-x-auto whitespace-pre-wrap" style={{ maxHeight: 320 }}>
+                {sdkExample}
+              </pre>
+              <Button
+                size="small"
+                variant="outline"
+                className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity"
+                icon={<CopyIcon />}
+                onClick={() => {
+                  copyText(sdkExample).then(() => {
+                    setCopiedExample('sdk');
+                    MessagePlugin.success('已复制 SDK 示例');
+                    setTimeout(() => setCopiedExample(null), 1500);
+                  }).catch(() => MessagePlugin.error('复制失败'));
+                }}
+              >
+                {copiedExample === 'sdk' ? '已复制' : '复制'}
+              </Button>
+            </div>
+            <div className="text-xs text-gray-400 mt-2">
+              需先安装 <code>pip install volcenginesdkarkruntime</code>；同样的 key / baseUrl / model 请替换成你的真实值。
+            </div>
+          </Tabs.TabPanel>
+        </Tabs>
+      </Card>
 
       {/* 规则引擎兜底 */}
       <Card title="兜底机制（AI 不可用时）" headerBordered>
