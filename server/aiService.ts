@@ -56,6 +56,44 @@ function normalizeBaseUrl(url: string): string {
   return (url || '').trim().replace(/\/+$/, '');
 }
 
+/**
+ * 根据 baseUrl 解析视频生成接口的真实 URL。
+ * 不同厂商的视频接口路径并不统一：
+ *  - 七牛云 AI GC（api.qnaigc.com）：任务式接口 POST /v1/videos（再轮询 /v1/videos/:id）
+ *  - OpenAI 兼容（veo / sora 等）：POST /v1/videos/generations
+ */
+function videoEndpointUrl(baseUrl: string): string {
+  const base = normalizeBaseUrl(baseUrl);
+  try {
+    const host = new URL(base).host;
+    // 七牛云 AI GC 与 agnes 均为任务式视频接口：POST /v1/videos（再轮询 /v1/videos/:id）
+    if (host === 'api.qnaigc.com' || host === 'apihub.agnes-ai.com') return `${base}/videos`;
+    // 火山方舟(Ark) 视频生成：任务式接口 POST /api/v3/contents/generations/tasks
+    if (host.includes('volces.com')) {
+      return base.includes('/contents/generations/tasks') ? base : `${base}/contents/generations/tasks`;
+    }
+  } catch {
+    /* ignore */
+  }
+  // OpenAI 兼容（veo / sora 等）：POST /v1/videos/generations
+  return `${base}/videos/generations`;
+}
+
+/**
+ * 根据 baseUrl 解析图片生成接口的真实 URL。
+ * 七牛云 AI GC：POST /v1/images/generations；其余按 OpenAI 兼容 /images/generations。
+ */
+function imageEndpointUrl(baseUrl: string): string {
+  const base = normalizeBaseUrl(baseUrl);
+  try {
+    const host = new URL(base).host;
+    if (host === 'api.qnaigc.com') return `${base}/images/generations`;
+  } catch {
+    /* ignore */
+  }
+  return `${base}/images/generations`;
+}
+
 function isValidProvider(p: Partial<LlmProvider>): p is LlmProvider {
   return !!(p.baseUrl?.trim() && p.apiKey?.trim() && p.model?.trim());
 }
@@ -325,6 +363,8 @@ interface LLMOptions {
   jsonMode?: boolean;
   /** 采样温度，默认 0.7。翻译等需要稳定的任务可降到 0.2 以减少退化/重复输出。 */
   temperature?: number;
+  /** 生成最大 token 数，默认 1024；长文本任务（如睡前故事、电影剧情）可上调到 2000。 */
+  maxTokens?: number;
 }
 
 /**
@@ -451,7 +491,7 @@ async function openaiCompatibleGenerate(opts: LLMOptions, provider: LlmProvider)
             { role: 'user', content: opts.prompt },
           ],
           temperature,
-          max_tokens: 1024,
+          max_tokens: opts.maxTokens ?? 1024,
           stream: false,
           ...(opts.jsonMode ? { response_format: { type: 'json_object' } } : {}),
         }),
@@ -512,7 +552,7 @@ async function volcanoRestGenerate(opts: LLMOptions, provider: LlmProvider): Pro
               { role: 'user', content: opts.prompt },
             ],
             temperature: opts.temperature ?? 0.7,
-            max_tokens: 1024,
+            max_tokens: opts.maxTokens ?? 1024,
             stream: false,
             ...(opts.jsonMode ? { response_format: { type: 'json_object' } } : {}),
           };
@@ -614,7 +654,7 @@ async function volcanoSdkGenerate(opts: LLMOptions, provider: LlmProvider): Prom
  * 多平台自动降级：依次尝试所有已配置平台，一个失败自动换下一个。
  * 如传入 provider，则只使用该平台（用于单平台测试）。
  */
-async function llmGenerate(opts: LLMOptions, provider?: LlmProvider): Promise<string> {
+export async function llmGenerate(opts: LLMOptions, provider?: LlmProvider): Promise<string> {
   if (provider) {
     const content = await llmGenerateWithProvider(opts, provider);
     if (content) return content;
@@ -846,18 +886,33 @@ async function probeImageProvider(provider: LlmProvider): Promise<{ success: boo
   }
 
   try {
-    const raw = await llmGenerate(
-      {
-        prompt: '一只可爱的卡通小猫，白底，高清',
-        systemPrompt: '',
-        timeoutMs: 120000,
+    // 非智谱图片模型走 OpenAI 兼容 /images/generations 接口（七牛云、agnes 等）
+    const url = imageEndpointUrl(provider.baseUrl);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${provider.apiKey}`,
       },
-      provider,
-    );
-    if (!raw || !raw.startsWith('http')) {
-      return { success: false, error: `图片生成返回异常：${raw?.slice(0, 200)}` };
+      body: JSON.stringify({
+        model: provider.model,
+        prompt: '一只可爱的卡通小猫，白底，高清',
+        size: '1024x1024',
+        n: 1,
+      }),
+      signal: AbortSignal.timeout(120000),
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      return { success: false, error: `图片生成探测失败 HTTP ${res.status}: ${text.slice(0, 200)}`, raw: text };
     }
-    return { success: true, sample: { imageUrl: raw }, raw };
+    const data = JSON.parse(text) as ImageGenerationResponse & { task_id?: string; id?: string };
+    const imageUrl = data?.data?.[0]?.url || data?.data?.[0]?.b64_json;
+    const asyncId = data?.task_id || data?.id;
+    if (!imageUrl && !asyncId) {
+      return { success: false, error: '图片生成接口未返回 url/task_id', raw: text };
+    }
+    return { success: true, sample: imageUrl ? { imageUrl } : { taskId: asyncId, note: '异步图像任务已创建' }, raw: text };
   } catch (err: any) {
     let error = err?.message || String(err);
     const code = err?.cause?.code || err?.code;
@@ -867,7 +922,35 @@ async function probeImageProvider(provider: LlmProvider): Promise<{ success: boo
 }
 
 async function probeVideoProvider(provider: LlmProvider): Promise<{ success: boolean; sample?: Record<string, string>; raw?: string; error?: string }> {
-  const url = normalizeBaseUrl(provider.baseUrl);
+  const url = videoEndpointUrl(provider.baseUrl);
+  const baseUrlL = provider.baseUrl.toLowerCase();
+  const isQiniu = baseUrlL.includes('api.qnaigc.com');
+  const isAgnes = baseUrlL.includes('apihub.agnes-ai.com');
+  const isVolces = baseUrlL.includes('volces.com');
+  const body = isQiniu
+    ? {
+        model: provider.model,
+        prompt: 'A cat walking on a white background, high quality',
+        size: '1280x720',
+        mode: 'std',
+      }
+    : isAgnes
+      ? {
+          model: provider.model,
+          prompt: 'A cat walking on a white background, high quality',
+          mode: 'ti2vid',
+        }
+      : isVolces
+        ? {
+            model: provider.model,
+            content: [
+              { type: 'text', text: 'A cat walking on a white background, high quality' },
+            ],
+          }
+        : {
+          model: provider.model,
+          prompt: 'A cat walking on a white background, high quality',
+        };
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -875,11 +958,7 @@ async function probeVideoProvider(provider: LlmProvider): Promise<{ success: boo
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${provider.apiKey}`,
       },
-      body: JSON.stringify({
-        model: provider.model,
-        prompt: 'A cat walking on a white background, high quality',
-        size: '480x480',
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(30000),
     });
     const text = await res.text();
@@ -1074,7 +1153,14 @@ export async function probeLlmReachability(baseUrl: string, timeoutMs = 8000, mo
 }> {
   const capability = detectProviderType(baseUrl, model);
   // 专用端点（图片/视频/OCR/嵌入等）直接以其真实 URL 探测，不要拼 /chat/completions
-  const url = capability === 'chat' ? chatCompletionsUrl(baseUrl) : normalizeBaseUrl(baseUrl);
+  const url =
+    capability === 'chat'
+      ? chatCompletionsUrl(baseUrl)
+      : capability === 'video'
+        ? videoEndpointUrl(baseUrl)
+        : capability === 'image'
+          ? imageEndpointUrl(baseUrl)
+          : normalizeBaseUrl(baseUrl);
   try {
     // 用 OPTIONS 探测端点：网络层可达即可，不需要鉴权。
     // 大多数厂商会返回 401/404，但 DNS/TCP 通了；若返回 2xx 也视为可达。
