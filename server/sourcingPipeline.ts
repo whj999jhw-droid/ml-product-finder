@@ -11,7 +11,13 @@ import {
   type RawCandidate,
   type ScannerOptions,
 } from './sourcingScanner.js';
-import { search1688ByQuery, get1688ProductDetail, type Ali1688Product } from './ali1688Skill.js';
+import {
+  search1688ByQuery,
+  get1688ProductDetail,
+  resetAli1688SearchStats,
+  getAli1688SearchStats,
+  type Ali1688Product,
+} from './ali1688Skill.js';
 import { runNewtonAutoSourcing, isNewtonConfigured } from './newtonService.js';
 import { calculateProfit, reverseEngineerPrice, type ProfitResult } from './profit.js';
 import { scoreCandidate, isScorePass, type ScoreBreakdown } from './scoring.js';
@@ -36,6 +42,11 @@ export interface PipelineOptions extends ScannerOptions {
   newtonPriorityEnabled?: boolean;
   /** 单次运行最多用牛顿处理多少个候选（默认 10），防止整体运行时间过长 */
   newtonMaxPerRun?: number;
+  /**
+   * 候选处理并发度（默认 3，1~8）。不传则读环境变量 SOURCING_CONCURRENCY。
+   * 注意：1688 请求由 ali1688Skill 全局节流器串行化，并发不会加剧 429。
+   */
+  concurrency?: number;
 }
 
 export interface PipelineResult {
@@ -124,40 +135,57 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
     let newtonHits = 0;
     const rejectReasons: Record<string, number> = {};
 
-    // 2) 逐个查 1688 + 利润 + 评分 + 入库
+    // 2) 并发查 1688 + 利润 + 评分 + 入库
+    //    并发度默认 3，可用 SOURCING_CONCURRENCY 热调（1~8）。
+    //    1688 请求本身由 ali1688Skill 的全局节流器串行化（默认最小间隔 1.2s）
+    //    + 去重缓存 + 429 退避重试，因此并发不会加剧 429，而是把牛顿寻源
+    //    （单次约 45s）与 enrich / LLM 相关性校验的重叠等待时间省下来。
+    const concurrency = Math.max(1, Math.min(8, Number(process.env.SOURCING_CONCURRENCY ?? opts.concurrency ?? 3)));
     const totalToProcess = Math.min(rawCandidates.length, maxCandidatesToSource);
-    for (let i = 0; i < totalToProcess; i++) {
-      const raw = rawCandidates[i];
-      const allowNewton = newtonEnabled && newtonAttempts < newtonMax;
-      updateSourcingRun(runId, {
-        message: allowNewton
-          ? `正在用牛顿寻源：第 ${i + 1}/${totalToProcess} 个（${raw.title.slice(0, 30)}）`
-          : `正在匹配 1688：第 ${i + 1}/${totalToProcess} 个（${raw.title.slice(0, 30)}）`,
-        total_scored: totalScored,
-        total_approved: totalApproved,
-        total_rejected: totalRejected,
-      });
-      try {
-      const { result, reason, isNew, sourceOrigin } = await processOneCandidate(runId, raw, targetNetRate, minScore, scanToken, allowNewton);
-      if (sourceOrigin === 'newton') newtonAttempts++;
-      totalScored++;
-      if (result) {
-        totalApproved++;
-        if (isNew) totalNew++;
-        if (sourceOrigin === 'newton') newtonHits++;
-      } else {
-          totalRejected++;
-          rejectReasons[reason] = (rejectReasons[reason] || 0) + 1;
-          console.log(`[SourcingPipeline] 候选 ${raw.itemId} 未通过: ${reason}`);
+    resetAli1688SearchStats();
+    let cursor = 0;
+    let doneCount = 0;
+
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const i = cursor++;
+        if (i >= totalToProcess) return;
+        const raw = rawCandidates[i];
+        // 牛顿软上限：并发下按索引预分配，避免多 worker 同时读到同一计数而超标
+        const allowNewton = newtonEnabled && i < newtonMax;
+        updateSourcingRun(runId, {
+          message: allowNewton
+            ? `并行寻源(并发${concurrency})：牛顿 ${doneCount + 1}/${totalToProcess}（${raw.title.slice(0, 24)}）`
+            : `并行寻源(并发${concurrency})：1688 ${doneCount + 1}/${totalToProcess}（${raw.title.slice(0, 24)}）`,
+          total_scored: totalScored,
+          total_approved: totalApproved,
+          total_rejected: totalRejected,
+        });
+        try {
+          const { result, reason, isNew, sourceOrigin } = await processOneCandidate(runId, raw, targetNetRate, minScore, scanToken, allowNewton);
+          if (sourceOrigin === 'newton') newtonAttempts++;
+          totalScored++;
+          if (result) {
+            totalApproved++;
+            if (isNew) totalNew++;
+            if (sourceOrigin === 'newton') newtonHits++;
+          } else {
+            totalRejected++;
+            rejectReasons[reason] = (rejectReasons[reason] || 0) + 1;
+            console.log(`[SourcingPipeline] 候选 ${raw.itemId} 未通过: ${reason}`);
+          }
+        } catch (err: any) {
+          const msg = `处理候选 ${raw.itemId} 失败: ${err?.message || String(err)}`.slice(0, 200);
+          console.warn('[SourcingPipeline]', msg);
+          errors.push(msg);
         }
-      } catch (err: any) {
-        const msg = `处理候选 ${raw.itemId} 失败: ${err?.message || String(err)}`.slice(0, 200);
-        console.warn('[SourcingPipeline]', msg);
-        errors.push(msg);
+        doneCount++;
+        // 每个 worker 自身限速（1688 侧另由全局节流器保证最小间隔）
+        await sleep(800);
       }
-      // 限速，避免 1688/ML 被封
-      await sleep(800);
-    }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(concurrency, totalToProcess) }, () => worker()));
 
     // 将「进入匹配但未核价」的尾部商品也落库（status='matched'），便于前端按漏斗查看
     for (let i = totalToProcess; i < rawCandidates.length; i++) {
@@ -188,6 +216,13 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
       .sort((a, b) => b[1] - a[1])
       .map(([k, v]) => `${k}:${v}`)
       .join(', ');
+    // 1688 命中率统计（验证限流治理效果：缓存省了多少请求、还剩多少 429）
+    const s1688 = getAli1688SearchStats();
+    const hitRate = s1688.requests > 0 ? Math.round((s1688.successes / s1688.requests) * 100) : 0;
+    const searchStatsSummary = s1688.requests
+      ? `；1688 请求 ${s1688.requests} 次，成功 ${s1688.successes} 次（命中率 ${hitRate}%），去重缓存省 ${s1688.cacheHits} 次，限流失败 ${s1688.rateLimited} 次`
+      : '';
+    console.log(`[SourcingPipeline] runId=${runId} 1688 统计:`, JSON.stringify(s1688), `命中率=${hitRate}%`);
     updateSourcingRun(runId, {
       status: 'done',
       finished_at: new Date().toISOString(),
@@ -197,7 +232,7 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
       total_approved: totalApproved,
       total_new: totalNew,
       total_rejected: totalRejected,
-      message: `选品完成：扫描 ${scan.totalScanned} 个，入库 ${totalApproved} 个${newtonEnabled ? `（牛顿命中 ${newtonHits}/${newtonAttempts}）` : ''}${rejectSummary ? `，淘汰原因 [${rejectSummary}]` : ''}`,
+      message: `选品完成：扫描 ${scan.totalScanned} 个，入库 ${totalApproved} 个${newtonEnabled ? `（牛顿命中 ${newtonHits}/${newtonAttempts}）` : ''}${rejectSummary ? `，淘汰原因 [${rejectSummary}]` : ''}${searchStatsSummary}`,
       error: errors.length ? errors.join('; ') : null,
     });
 
@@ -434,9 +469,13 @@ async function processOneCandidate(
       console.log(`[SourcingPipeline] 候选 ${raw.itemId} 1688 搜索 raw:`, JSON.stringify(searchResult.raw).slice(0, 500));
     }
     if (!searchResult.success || searchResult.products.length === 0) {
-      const reason = searchResult.message?.includes('CLI 未安装')
-        ? searchResult.message.slice(0, 80)
-        : '1688无货源';
+      let reason = '1688无货源';
+      if (searchResult.message?.includes('CLI 未安装')) {
+        reason = searchResult.message.slice(0, 80);
+      } else if (searchResult.rateLimited) {
+        // 429 是被限流而非没货源，原因必须区分，否则会误判为无货源而淘汰
+        reason = '1688限流(429)，稍后重试';
+      }
       insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: reason, searchQuery, sourceOrigin }));
       return { result: null, reason, sourceOrigin };
     }
@@ -639,17 +678,35 @@ function buildNewtonSearchQuery(enriched: Awaited<ReturnType<typeof enrichCandid
  */
 function build1688SearchQuery(mlTitle: string): string {
   const stop = new Set([
+    // 促销/营销词（原有）
     'envio', 'gratis', 'oferta', 'promocion', 'descuento', 'nuevo', 'original', 'garantia',
     'calidad', 'premium', 'super', 'mejor', 'top', 'venta', 'stock', 'rapido', 'unidad', 'unidades',
     'frete', 'grátis', 'promoção', 'desconto', 'novo', 'nova', 'garantia', 'qualidade', 'pronta',
     'entrega', 'estoque', 'rápido', 'emagrecedor', 'milagroso',
+    // 西语虚词/介词/冠词/代词：实测会占满前 5 个词的名额
+    // （如 "panele cortinas blackout para para" 里 para 纯噪声）
+    'de', 'del', 'la', 'el', 'los', 'las', 'un', 'una', 'unos', 'unas', 'y', 'o', 'os', 'as',
+    'para', 'por', 'con', 'sin', 'en', 'sobre', 'entre', 'hacia', 'desde', 'hasta', 'como',
+    'mas', 'muy', 'todo', 'todos', 'toda', 'todas', 'cada', 'otro', 'otros', 'esta', 'este',
+    'estos', 'estas', 'ese', 'esa', 'esos', 'esas', 'que', 'al', 'lo', 'se', 'su', 'sus',
+    'the', 'of', 'for', 'with', 'and',
+    // 葡语虚词（MLB 站点标题）
+    'do', 'da', 'dos', 'das', 'com', 'sem', 'no', 'na', 'nos', 'nas', 'um', 'uma', 'uns', 'umas',
+    'em', 'ao', 'aos', 'pelo', 'pela',
+    // 数量/包装单位：对找同款无帮助
+    'pack', 'set', 'kit', 'pieza', 'piezas', 'pcs', 'und', 'conjunto', 'juego', 'par', 'pares',
   ]);
-  const tokens = (mlTitle || '')
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .split(/\s+/)
-    .filter((t) => t.length >= 3 && !stop.has(t) && !/^\d+$/.test(t))
-    .slice(0, 5);
+  const tokens: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of (mlTitle || '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/)) {
+    if (raw.length < 3) continue;
+    if (stop.has(raw)) continue;
+    if (/^\d+$/.test(raw)) continue;
+    if (seen.has(raw)) continue; // 词内去重，避免 "para para" 这类重复噪声
+    seen.add(raw);
+    tokens.push(raw);
+    if (tokens.length >= 5) break;
+  }
   return tokens.join(' ') || mlTitle.slice(0, 40);
 }
 
