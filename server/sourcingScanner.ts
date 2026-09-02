@@ -446,8 +446,9 @@ export async function scanNewRisingProducts(
   const sites = opts.sites || DEFAULT_SITES;
   const maxAgeDays = opts.maxAgeDays ?? 30;
   const minSold = opts.minSold ?? 1;
-  const maxPriceUsd = opts.maxPriceUsd ?? 50;
-  const minPriceUsd = opts.minPriceUsd ?? 5;
+  // 价格门槛放宽（原默认 $5~$50 过严：低价配件<$5、高价品>$50 被一刀切），支持环境变量热调，无需改代码
+  const minPriceUsd = process.env.SCAN_MIN_PRICE_USD ? Number(process.env.SCAN_MIN_PRICE_USD) : (opts.minPriceUsd ?? 2);
+  const maxPriceUsd = process.env.SCAN_MAX_PRICE_USD ? Number(process.env.SCAN_MAX_PRICE_USD) : (opts.maxPriceUsd ?? 200);
   const limitPerCategory = opts.limitPerCategory ?? 50;
   const minDailySales = opts.minDailySales ?? 0.5;
   const onProgress = opts.onProgress;
@@ -526,7 +527,7 @@ export async function scanNewRisingProducts(
                 } catch {
                   /* 单个 product 失败忽略 */
                 }
-                await sleep(300);
+                await sleep(150);
               }
               fromHighlights = true;
             }
@@ -560,7 +561,7 @@ export async function scanNewRisingProducts(
             console.warn('[SourcingScanner]', msg);
             errors.push(msg);
           }
-          await sleep(600);
+          await sleep(350);
         }
       }
     }
