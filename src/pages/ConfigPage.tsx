@@ -68,6 +68,23 @@ function detectCapabilities(baseUrl: string, models: string): string[] {
 }
 
 const CAP_LABELS: Record<string, string> = { chat: '对话', image: '图像', video: '视频', ocr: 'OCR', embedding: '嵌入', audio: '音频' };
+
+// 最后一次「测试连接」结果持久化（localStorage），刷新/重进页面仍可查看
+const LLM_TEST_STORAGE_KEY = 'ml_ai_config_last_test';
+function loadPersistedTest(): { testResult: any; showTestResult: boolean; testedAt: number | null } {
+  try {
+    const s = localStorage.getItem(LLM_TEST_STORAGE_KEY);
+    if (!s) return { testResult: null, showTestResult: true, testedAt: null };
+    const o = JSON.parse(s);
+    return {
+      testResult: o.testResult ?? null,
+      showTestResult: o.showTestResult ?? true,
+      testedAt: o.testedAt ?? null,
+    };
+  } catch {
+    return { testResult: null, showTestResult: true, testedAt: null };
+  }
+}
 const TYPE_LABELS: Record<string, string> = { openai: 'OpenAI 兼容', 'volcano-rest': '火山 REST', 'volcano-sdk': '火山 SDK' };
 
 /** 根据平台名 + 模型名推断 endpoint（best-effort，已知平台自动补，未知不覆盖） */
@@ -117,8 +134,25 @@ function AiConfigPanel() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<any>(null);
-  const [showTestResult, setShowTestResult] = useState(false);
+  const [testResult, setTestResult] = useState<any>(() => loadPersistedTest().testResult);
+  const [showTestResult, setShowTestResult] = useState<boolean>(() => loadPersistedTest().showTestResult);
+  const [testedAt, setTestedAt] = useState<number | null>(() => loadPersistedTest().testedAt);
+
+  // 持久化「最后一次测试结果」：状态变更即写入 localStorage（刷新/重进页面仍可见）
+  useEffect(() => {
+    try {
+      if (testResult) {
+        localStorage.setItem(
+          LLM_TEST_STORAGE_KEY,
+          JSON.stringify({ testResult, showTestResult, testedAt: testedAt ?? Date.now(), ts: Date.now() }),
+        );
+      } else {
+        localStorage.removeItem(LLM_TEST_STORAGE_KEY);
+      }
+    } catch {
+      /* localStorage 不可用（隐私模式/配额）时静默忽略 */
+    }
+  }, [testResult, showTestResult, testedAt]);
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(8);
@@ -265,6 +299,7 @@ function AiConfigPanel() {
       const data = await res.json();
       setTestResult(data);
       setShowTestResult(true);
+      setTestedAt(Date.now());
       if (data.success) MessagePlugin.success('测试完成，见下方结果');
       else MessagePlugin.warning(data.message || '测试未通过');
     } catch (e: any) {
@@ -433,6 +468,11 @@ function AiConfigPanel() {
                 style={{ transform: showTestResult ? 'rotate(90deg)' : 'rotate(0deg)' }}
               >▶</span>
               <span>测试结果</span>
+              {testedAt && (
+                <span className="text-xs text-gray-400 font-normal">
+                  （{new Date(testedAt).toLocaleString('zh-CN', { hour12: false })}）
+                </span>
+              )}
               <span className="text-xs text-gray-400 font-normal">
                 （共 {testResult.perProvider.length} 项{showTestResult ? '，点击收起' : '，点击展开'}）
               </span>
