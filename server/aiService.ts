@@ -1271,7 +1271,7 @@ Requirements:
 - IMPORTANT: Provide a concise Chinese translation immediately below each title, prefixed with "ZH: "`;
 
   try {
-    const raw = await llmGenerate({ prompt, systemPrompt, timeoutMs: 25000 });
+    const raw = await llmGenerate({ prompt, systemPrompt, timeoutMs: 20000 });
     const parsed = parseTitleList(raw, count);
     if (parsed.titles.length === 0) {
       return { titles: [], translations: [], used: 'fallback', error: 'AI returned no parseable titles' };
@@ -1423,7 +1423,7 @@ Write a compelling description covering:
   }
 
   try {
-    const raw = await llmGenerate({ prompt, systemPrompt, timeoutMs: 75000 });
+    const raw = await llmGenerate({ prompt, systemPrompt, timeoutMs: 40000 });
     const desc = raw.replace(/^["'\s]+|["'\s]+$/g, '').trim();
     if (desc.length < 20) {
       return { description: '', used: 'fallback', error: 'AI description too short' };

@@ -21,6 +21,7 @@ import {
   createSourcingRun,
   updateSourcingRun,
   insertCandidate,
+  updateCandidateAi,
   getCandidateById,
   getSourcingRun,
 } from './db.js';
@@ -359,6 +360,33 @@ function buildTrendNote(
  * 通过则入库为 pending；1688 无货源/评分未通过等也入库为 rejected（带原因），便于人工复核。
  * @returns SourcedCandidate 如果通过评分；null 如果未通过或处理失败
  */
+// ===== 后台 AI 标题/描述生成池（限并发，避免打爆 LLM 速率；best-effort，失败不阻断入库）=====
+const AI_GEN_MAX_CONCURRENCY = 3;
+let aiGenActive = 0;
+const aiGenQueue: Array<() => Promise<void>> = [];
+
+function aiGenEnqueue(task: () => Promise<void>): void {
+  if (aiGenActive >= AI_GEN_MAX_CONCURRENCY) {
+    aiGenQueue.push(task);
+    return;
+  }
+  aiGenActive++;
+  aiGenRun(task);
+}
+
+function aiGenRun(task: () => Promise<void>): void {
+  task()
+    .catch(() => {})
+    .finally(() => {
+      aiGenActive--;
+      const next = aiGenQueue.shift();
+      if (next) {
+        aiGenActive++;
+        aiGenRun(next);
+      }
+    });
+}
+
 async function processOneCandidate(
   runId: string,
   raw: RawCandidate,
@@ -513,45 +541,10 @@ async function processOneCandidate(
     console.warn(`[SourcingPipeline] 候选 ${raw.itemId} AI 研判失败:`, err?.message || err);
   }
 
-  // 2.5b AI 精化上架标题/描述（#2：把已有但零调用的生成函数接进流水线）
-  // best-effort：LLM 未配置或失败都不阻断入库。
-  let aiTitle = '';
-  let aiDescription = '';
-  if (getLlmConfig()) {
-    try {
-      const titles = await aiGenerateTitles({
-        competitorTitle: enriched.title,
-        site: enriched.site,
-        sourceTitle: source.title,
-        sourcePriceCNY: source.price,
-        count: 3,
-        trendKeywords: enriched.trendKeyword ? [enriched.trendKeyword] : undefined,
-      });
-      aiTitle = titles.titles[0] || '';
-    } catch (e: any) {
-      console.warn(`[SourcingPipeline] 候选 ${raw.itemId} AI 标题生成失败:`, e?.message || e);
-    }
-    if (aiTitle) {
-      try {
-        const desc = await aiGenerateDescription({
-          title: aiTitle,
-          site: enriched.site,
-          sourceTitle: source.title,
-          sourcePriceCNY: source.price,
-          categoryName: enriched.categoryName,
-          trendKeywords: enriched.trendKeyword ? [enriched.trendKeyword] : undefined,
-        });
-        aiDescription = desc.description || '';
-      } catch (e: any) {
-        console.warn(`[SourcingPipeline] 候选 ${raw.itemId} AI 描述生成失败:`, e?.message || e);
-      }
-    }
-  }
-
   // 2.5c 定制新品信号（#4 MVP）：从 1688 货源标题/上架时间抽取
   const flags = classifyCustom(source);
 
-  // 2.6 入库（通过 → pending）
+  // 2.6 先入库（通过 → pending）：source_origin 等关键字段立即可见、不丢失，不被后续 LLM 生成拖慢
   const ins = insertCandidate(
     buildCandidateRow(runId, enriched, {
       status: 'pending',
@@ -562,13 +555,49 @@ async function processOneCandidate(
       score,
       aiEvaluation,
       flags,
-      aiTitle,
-      aiDescription,
+      aiTitle: '',
+      aiDescription: '',
       sourceOrigin,
     })
   );
 
   if (!ins.id) return { result: null, reason: '数据库写入失败', sourceOrigin };
+
+  // 2.5b AI 精化上架标题/描述（#2）：best-effort，入库后后台异步生成并回填，不阻塞入库与后续候选
+  if (getLlmConfig()) {
+    aiGenEnqueue(async () => {
+      try {
+        const titles = await aiGenerateTitles({
+          competitorTitle: enriched.title,
+          site: enriched.site,
+          sourceTitle: source.title,
+          sourcePriceCNY: source.price,
+          count: 3,
+          trendKeywords: enriched.trendKeyword ? [enriched.trendKeyword] : undefined,
+        });
+        const t = titles.titles[0] || '';
+        let d = '';
+        if (t) {
+          try {
+            const desc = await aiGenerateDescription({
+              title: t,
+              site: enriched.site,
+              sourceTitle: source.title,
+              sourcePriceCNY: source.price,
+              categoryName: enriched.categoryName,
+              trendKeywords: enriched.trendKeyword ? [enriched.trendKeyword] : undefined,
+            });
+            d = desc.description || '';
+          } catch (e: any) {
+            console.warn(`[SourcingPipeline] 候选 ${raw.itemId} AI 描述生成失败:`, e?.message || e);
+          }
+        }
+        if (t || d) updateCandidateAi(ins.id, t, d);
+      } catch (e: any) {
+        console.warn(`[SourcingPipeline] 候选 ${raw.itemId} AI 标题生成失败:`, e?.message || e);
+      }
+    });
+  }
 
   return {
     result: {
