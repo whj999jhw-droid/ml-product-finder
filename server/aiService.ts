@@ -432,7 +432,7 @@ export function detectProviderType(baseUrl: string, model?: string): LlmCapabili
   // 模型名兜底：用户可能把视频/OCR/图像模型填在通用 chat baseUrl 下
   // kling-image 等带 image 关键字的视频厂商模型，优先识别为图像
   if (m.includes('kling-image') || m.includes('seedream') || m.includes('dall-e') || m.includes('sdxl') || m.includes('flux') || m.includes('kandinsky') || m.includes('glm-image') || m.includes('agnes-image')) return 'image';
-  if (m.includes('seedance') || m.includes('cogvideox') || m.includes('kling') || m.includes('luma') || m.includes('hailuo') || m.includes('agnes-video')) return 'video';
+  if (m.includes('seedance') || m.includes('cogvideox') || (m.includes('kling') && !m.includes('inkling')) || m.includes('luma') || m.includes('hailuo') || m.includes('agnes-video')) return 'video';
   if (m.includes('glm-ocr') || m.includes('qwen-vl-ocr')) return 'ocr';
   if (m.includes('embedding')) return 'embedding';
 
