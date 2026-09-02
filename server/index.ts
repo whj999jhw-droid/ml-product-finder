@@ -1,3 +1,6 @@
+// 加载项目根目录 .env（dotenv 默认不覆盖已存在的环境变量，
+// 因此 pm2 已注入的 LLM_API_KEY 等保持原值，仅补齐缺失的键）
+import 'dotenv/config';
 import express from "express";
 import { query, unstable_v2_createSession, unstable_v2_authenticate, PermissionResult, CanUseTool } from "@tencent-ai/agent-sdk";
 import { v4 as uuidv4 } from "uuid";
@@ -12,6 +15,7 @@ import * as db from "./db.js";
 import session from 'express-session';
 import authRouter, { requireAuth } from './auth.js';
 import { runSourcingPipeline } from './sourcingPipeline.js';
+import * as newton from './newtonService.js';
 import {
   getCandidates,
   getCandidateById,
@@ -27,6 +31,8 @@ import { getAllStores } from './stores.js';
 import { publishCandidate } from './publishFromCandidate.js';
 import { get1688ProductDetail } from './ali1688Skill.js';
 import { configure1688AK, check1688Config } from './ali1688Skill.js';
+import profitLicenseRouter from './profitLicense.js';
+import shippingRouter from './shippingRules.js';
 import {
   isYouTubeConfigured,
   saveYouTubeClient,
@@ -2847,6 +2853,63 @@ app.post('/api/ml/sourcing/1688/auto', async (req, res) => {
   }
 });
 
+// ============ 云牛顿 AI 货源发现（Newton Cloud）============
+// 牛顿是交互式多轮 Agent：提需求 -> 可能直接返回商品（END），或先弹澄清卡（WAIT_USER）-> 用户选完 resume 续跑
+app.get('/api/ml/newton/status', (req, res) => {
+  try {
+    res.json({ success: true, configured: newton.isNewtonConfigured() });
+  } catch (err: any) {
+    res.json({ success: false, message: err?.message || '查询牛顿状态失败' });
+  }
+});
+
+app.post('/api/ml/newton/sourcing', async (req, res) => {
+  try {
+    const { message } = req.body || {};
+    if (!message || !message.trim()) {
+      return res.json({ success: false, message: '请输入找货源的需求描述（例如：在1688找手机壳跨境无货源货源）' });
+    }
+    const { taskId, sessionId } = await newton.createNewtonTask(message.trim());
+    res.json({ success: true, taskId, sessionId });
+  } catch (err: any) {
+    res.json({ success: false, message: err?.message || '牛顿任务创建失败' });
+  }
+});
+
+// 轮询任务状态：前端每 2~3 秒调用一次，直到 status=END 或 WAIT_USER
+app.post('/api/ml/newton/sourcing/get', async (req, res) => {
+  try {
+    const { taskId, sessionId } = req.body || {};
+    if (!taskId || !sessionId) return res.json({ success: false, message: 'taskId/sessionId 缺失' });
+    const state = await newton.getNewtonTask(taskId, sessionId);
+    const { content, items } = newton.summarizeNewtonResult(state);
+    res.json({
+      success: true,
+      status: state.status,
+      content,
+      items,
+      clarification: state.clarification || null,
+    });
+  } catch (err: any) {
+    res.json({ success: false, message: err?.message || '牛顿状态查询失败' });
+  }
+});
+
+// 澄清卡续跑：answer={kind:'userInput'|'selectedData'|'skipped', text/values}
+app.post('/api/ml/newton/sourcing/resume', async (req, res) => {
+  try {
+    const { taskId, sessionId, toolCallId, answer } = req.body || {};
+    if (!taskId || !sessionId || !toolCallId || !answer) {
+      return res.json({ success: false, message: '续跑参数缺失' });
+    }
+    await newton.resumeNewtonTask(taskId, sessionId, toolCallId, answer);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.json({ success: false, message: err?.message || '牛顿续跑失败' });
+  }
+});
+
+
 // 写出含利润的 enriched xlsx（可跟卖清单）
 app.post('/api/ml/sourcing/export', async (req, res) => {
   try {
@@ -3635,6 +3698,11 @@ app.get('/api/ml/debug/test', async (req, res) => {
 
   res.json({ tokenPreview: token ? token.slice(0, 12) + '...' + token.slice(-4) : '(无)', results });
 });
+
+// 美客多利润计算器：授权 + 资讯（从 CloudBase 云函数迁移到 ml-finder，公开，不加 requireAuth）
+// 必须挂在下方静态文件服务的 app.get('*') 兜底之前，否则 GET 类接口（/extract /daily /news）会被 SPA 页面截走
+app.use('/api/profit/license-server', profitLicenseRouter);
+app.use('/api/profit/shipping', shippingRouter);
 
 // ============= 静态文件服务 (Electron 模式) =============
 

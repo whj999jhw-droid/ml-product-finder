@@ -418,7 +418,38 @@ CREATE TABLE IF NOT EXISTS app_config (
     } catch (e: any) {
       console.warn('[DB] 检查/补加 trend_note/seller_sku/source_origin 列失败:', e?.message || String(e));
     }
-    console.log(`[DB] SQLite initialized at ${DB_PATH}`);
+      // ---- 美客多利润计算器：授权 + 资讯（从 CloudBase 云函数迁移到 ml-finder）----
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS licenses (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          code TEXT UNIQUE NOT NULL,
+          status TEXT NOT NULL DEFAULT 'unused',
+          kind TEXT NOT NULL DEFAULT 'user',
+          device_id TEXT,
+          device_info TEXT,
+          activated_at INTEGER,
+          created_at INTEGER,
+          note TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_licenses_device ON licenses(device_id);
+        CREATE TABLE IF NOT EXISTS daily_content (
+          date TEXT PRIMARY KEY,
+          items TEXT,
+          complete INTEGER DEFAULT 0,
+          updated_at INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS news_cache (
+          key TEXT PRIMARY KEY,
+          at INTEGER,
+          feeds TEXT
+        );
+        CREATE TABLE IF NOT EXISTS profit_meta (
+          key TEXT PRIMARY KEY,
+          val TEXT
+        );
+      `);
+      console.log('[DB] profit 表（licenses/daily_content/news_cache/profit_meta）已就绪');
+      console.log(`[DB] SQLite initialized at ${DB_PATH}`);
   } catch (e: any) {
     console.error('[DB] SQLite 不可用（已跳过本地数据库功能）:', e?.message || String(e));
     console.error('[DB] 后续依赖本地数据库的功能（AI 选品运行记录、候选列表、订单缓存等）将无法写入！');
@@ -843,6 +874,14 @@ export function updateCandidateStatus(
     params.seller_sku = extra.seller_sku;
   }
   db.prepare(`UPDATE candidates SET ${sets.join(', ')} WHERE id = @id`).run(params);
+}
+
+// 回填 AI 生成的标题/描述（流水线中先入库、后异步生成时调用）
+export function updateCandidateAi(id: number, aiTitle: string, aiDescription: string): void {
+  if (!db) return;
+  db.prepare(
+    `UPDATE candidates SET ai_title = @ai_title, ai_description = @ai_description, updated_at = @now WHERE id = @id`
+  ).run({ id, ai_title: aiTitle || '', ai_description: aiDescription || '', now: new Date().toISOString() });
 }
 
 export function createPublishJob(data: { candidate_id: number; store_id: string; site: string; payload_json?: string }): number {

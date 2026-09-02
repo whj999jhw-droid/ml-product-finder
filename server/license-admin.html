@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>授权码管理后台 · Mercado Profit</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f6f8; color: #1f2329; font-size: 14px; line-height: 1.6;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #8a9099; font-size: 13px; margin-bottom: 16px; }
+  .card { background: #fff; border: 1px solid #e5e6eb; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input, select, button {
+    font-family: inherit; font-size: 14px; padding: 8px 12px;
+    border: 1px solid #d0d3d9; border-radius: 6px; background: #fff; color: #1f2329;
+  }
+  input { min-width: 200px; }
+  button { cursor: pointer; background: #fff; }
+  button:hover { background: #f2f3f5; }
+  button.primary { background: #2b6cb0; border-color: #2b6cb0; color: #fff; }
+  button.primary:hover { background: #255a94; }
+  button.danger { color: #c53030; border-color: #e0b4b4; }
+  button.danger:hover { background: #fff5f5; }
+  button.small { padding: 4px 10px; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #eef0f3; font-size: 13px; vertical-align: middle; }
+  th { color: #6b7280; font-weight: 600; background: #fafbfc; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; letter-spacing: .3px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+  .b-unused { background: #f0f1f3; color: #6b7280; }
+  .b-active { background: #e6f4ea; color: #1e7e34; }
+  .b-revoked { background: #fdeaea; color: #c53030; }
+  .b-admin { background: #eaf1fb; color: #2b6cb0; }
+  .b-user { background: #f4f5f7; color: #6b7280; }
+  .muted { color: #8a9099; }
+  .msg { margin-top: 10px; font-size: 13px; }
+  .msg.err { color: #c53030; }
+  .msg.ok { color: #1e7e34; }
+  details { margin-bottom: 14px; background: #fff; border: 1px solid #e5e6eb; border-radius: 10px; padding: 12px 16px; }
+  summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+  details p { margin: 10px 0 0; color: #4b5563; font-size: 13px; }
+  details ol { margin: 8px 0 0 20px; color: #4b5563; font-size: 13px; }
+  .hidden { display: none; }
+  .spacer { flex: 1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>授权码管理后台</h1>
+  <div class="sub">Mercado Profit · 服务地址 ml.w999w.dpdns.org</div>
+
+  <details>
+    <summary>使用说明（点击展开，第一次用请看）</summary>
+    <p>这个页面用来管理 App 的激活码：<b>看所有码、生成新码、解绑、吊销</b>。</p>
+    <ol>
+      <li><b>登录</b>：在下面填入「管理员码」，点登录。管理员码可以在任意多台设备上激活，不会被"一码一设备"限制。</li>
+      <li><b>生成</b>：填数量（1–500）和类型，点「生成新码」。生成的码会出现在下方列表，点码即可复制。</li>
+      <li><b>解绑</b>：客户换了手机、或者码被占住了，点「解绑」，这个码就恢复成未使用，可以在新设备上重新激活。<b>码本身还在</b>。</li>
+      <li><b>吊销</b>：不想让这个码再用了，点「吊销」。吊销是不可用的，再想用只能重新生成。</li>
+      <li><b>状态</b>：未使用＝还没人激活；已激活＝已绑定某台设备；已吊销＝作废。</li>
+    </ol>
+    <p>普通用户码是"一码一设备"：一个码只能绑一台设备，换设备要先解绑。</p>
+  </details>
+
+  <div class="card" id="loginCard">
+    <div class="row">
+      <input id="adminCode" placeholder="请输入管理员码，例如 ML-ADMIN-WH999" autocomplete="off">
+      <button class="primary" id="btnLogin">登录</button>
+    </div>
+    <div class="msg" id="loginMsg"></div>
+  </div>
+
+  <div id="main" class="hidden">
+    <div class="card">
+      <div class="row">
+        <button id="btnRefresh">刷新列表</button>
+        <span class="spacer"></span>
+        <span class="muted">生成数量</span>
+        <input id="genCount" type="number" min="1" max="500" value="1" style="min-width:80px">
+        <select id="genKind">
+          <option value="user">普通用户码</option>
+          <option value="admin">管理员码</option>
+        </select>
+        <button class="primary" id="btnGen">生成新码</button>
+      </div>
+      <div class="msg" id="genMsg"></div>
+    </div>
+
+    <div class="card" style="padding:0">
+      <table>
+        <thead>
+          <tr>
+            <th>激活码</th><th style="width:90px">类型</th><th style="width:90px">状态</th>
+            <th style="width:220px">绑定设备</th><th style="width:150px">激活时间</th>
+            <th style="width:150px">操作</th>
+          </tr>
+        </thead>
+        <tbody id="tb"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="msg" id="listMsg"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var BASE = 'https://ml.w999w.dpdns.org/api/profit/license-server';
+  var TK = 'ml_license_admin_token';
+  var DEV = 'ml_license_admin_device';
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  function deviceId() {
+    var d = localStorage.getItem(DEV);
+    if (!d) {
+      d = 'web-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+      localStorage.setItem(DEV, d);
+    }
+    return d;
+  }
+
+  function post(path, body) {
+    return fetch(BASE + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {})
+    }).then(function (r) { return r.json(); });
+  }
+
+  function show(el, text, isErr) {
+    el.textContent = text || '';
+    el.className = 'msg ' + (isErr ? 'err' : 'ok');
+  }
+
+  function fmtTime(ts) {
+    if (!ts) return '—';
+    var d = new Date(ts);
+    var p = function (n) { return n < 10 ? '0' + n : '' + n; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+           ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function statusBadge(s) {
+    var map = { unused: ['b-unused', '未使用'], active: ['b-active', '已激活'], revoked: ['b-revoked', '已吊销'] };
+    var m = map[s] || ['b-unused', s];
+    return '<span class="badge ' + m[0] + '">' + m[1] + '</span>';
+  }
+
+  function copyText(t) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t).then(function () {}, function () { fallbackCopy(t); });
+    } else { fallbackCopy(t); }
+  }
+  function fallbackCopy(t) {
+    var ta = document.createElement('textarea');
+    ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+  }
+
+  function loadList() {
+    var token = localStorage.getItem(TK);
+    if (!token) return;
+    $('tb').innerHTML = '<tr><td colspan="6" class="muted">加载中…</td></tr>';
+    post('/list', { token: token }).then(function (j) {
+      if (!j.ok) {
+        if ((j.error || '').indexOf('token') >= 0) { doLogout('登录已过期，请重新登录'); return; }
+        show($('listMsg'), j.error || '加载失败', true);
+        return;
+      }
+      show($('listMsg'), '');
+      var rows = j.codes || [];
+      if (!rows.length) {
+        $('tb').innerHTML = '<tr><td colspan="6" class="muted">还没有任何激活码，点上方「生成新码」创建。</td></tr>';
+        return;
+      }
+      var order = { active: 0, unused: 1, revoked: 2 };
+      rows.sort(function (a, b) {
+        if (a.kind !== b.kind) return a.kind === 'admin' ? -1 : 1;
+        return (order[a.status] == null ? 9 : order[a.status]) - (order[b.status] == null ? 9 : order[b.status]);
+      });
+      var html = '';
+      rows.forEach(function (c) {
+        var isAdm = c.kind === 'admin';
+        html += '<tr>' +
+          '<td><code style="cursor:pointer" title="点击复制" onclick="(function(){var t=this.textContent;if(navigator.clipboard){navigator.clipboard.writeText(t)}else{};var o=this;o.textContent=\'已复制\';setTimeout(function(){o.textContent=t},900)}).call(this)">' + c.code + '</code></td>' +
+          '<td><span class="badge ' + (isAdm ? 'b-admin">管理员' : 'b-user">普通') + '</span></td>' +
+          '<td>' + statusBadge(c.status) + '</td>' +
+          '<td class="muted">' + (c.deviceId ? String(c.deviceId) : '—') + '</td>' +
+          '<td class="muted">' + fmtTime(c.activatedAt) + '</td>' +
+          '<td>' +
+            (c.status === 'revoked' ? '' : '<button class="small" data-act="unbind" data-code="' + c.code + '">解绑</button> ') +
+            '<button class="small danger" data-act="revoke" data-code="' + c.code + '">吊销</button>' +
+          '</td>' +
+        '</tr>';
+      });
+      $('tb').innerHTML = html;
+      Array.prototype.forEach.call($('tb').querySelectorAll('button[data-act]'), function (b) {
+        b.addEventListener('click', function () {
+          var code = b.getAttribute('data-code');
+          var act = b.getAttribute('data-act');
+          if (act === 'unbind') {
+            if (!confirm('确定解绑 ' + code + ' 吗？\n解绑后这个码恢复为「未使用」，可以在新设备上重新激活。')) return;
+          } else {
+            if (!confirm('确定吊销 ' + code + ' 吗？\n吊销后这个码永久不可用，需要重新生成。')) return;
+          }
+          b.disabled = true;
+          post('/' + act, { token: localStorage.getItem(TK), code: code }).then(function (j2) {
+            if (!j2.ok) { show($('listMsg'), j2.error || '操作失败', true); b.disabled = false; return; }
+            show($('listMsg'), (act === 'unbind' ? '已解绑：' : '已吊销：') + code, false);
+            loadList();
+          }).catch(function (e) {
+            show($('listMsg'), '网络错误：' + e.message, true); b.disabled = false;
+          });
+        });
+      });
+    }).catch(function (e) {
+      show($('listMsg'), '网络错误：' + e.message, true);
+    });
+  }
+
+  function doLogout(msg) {
+    localStorage.removeItem(TK);
+    $('main').classList.add('hidden');
+    $('loginCard').classList.remove('hidden');
+    if (msg) show($('loginMsg'), msg, true);
+  }
+
+  $('btnLogin').addEventListener('click', function () {
+    var code = ($('adminCode').value || '').trim().toUpperCase();
+    if (!code) { show($('loginMsg'), '请输入管理员码', true); return; }
+    show($('loginMsg'), '登录中…', false);
+    post('/activate', { code: code, deviceId: deviceId(), deviceInfo: { brand: 'Web', model: 'AdminConsole' } })
+      .then(function (j) {
+        if (!j.ok) { show($('loginMsg'), j.error || '登录失败', true); return; }
+        if (!j.admin) { show($('loginMsg'), '这个码不是管理员码，无法进入后台', true); return; }
+        localStorage.setItem(TK, j.token);
+        $('adminCode').value = '';
+        $('loginCard').classList.add('hidden');
+        $('main').classList.remove('hidden');
+        show($('loginMsg'), '', false);
+        loadList();
+      })
+      .catch(function (e) { show($('loginMsg'), '网络错误：' + e.message, true); });
+  });
+
+  $('btnRefresh').addEventListener('click', loadList);
+
+  $('btnGen').addEventListener('click', function () {
+    var n = parseInt($('genCount').value, 10) || 1;
+    if (n < 1) n = 1; if (n > 500) n = 500;
+    var kind = $('genKind').value;
+    show($('genMsg'), '生成中…', false);
+    post('/generate', { token: localStorage.getItem(TK), count: n, kind: kind }).then(function (j) {
+      if (!j.ok) { show($('genMsg'), j.error || '生成失败', true); return; }
+      var codes = (j.codes || []).join('\n');
+      show($('genMsg'), '已生成 ' + j.count + ' 个' + (j.kind === 'admin' ? '管理员' : '普通') + '码（点列表中的码可复制）', false);
+      copyText(codes);
+      loadList();
+    }).catch(function (e) { show($('genMsg'), '网络错误：' + e.message, true); });
+  });
+
+  $('adminCode').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') $('btnLogin').click();
+  });
+
+  if (localStorage.getItem(TK)) {
+    $('loginCard').classList.add('hidden');
+    $('main').classList.remove('hidden');
+    loadList();
+  }
+})();
+</script>
+</body>
+</html>

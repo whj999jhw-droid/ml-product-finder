@@ -16,6 +16,7 @@ import {
 } from 'tdesign-react';
 import type { PrimaryTableCol } from 'tdesign-react';
 import { FeatureIntro } from '../components/FeatureIntro';
+import { NewtonSourcing } from '../components/NewtonSourcing';
 
 interface SourcingRow {
   site: string;
@@ -1082,6 +1083,8 @@ export function SourcingPage() {
         </div>
 
         {/* 功能说明（默认折叠） */}
+        <NewtonSourcing rows={rows} updateRow={updateRow} />
+
         <FeatureIntro title="功能说明与使用步骤" summary="M2 是做什么的、怎么算利润、合规红线" defaultOpen={false}>
           <p>本页（M2）承接「美客多商品抓取（M1）」导出的爆款清单：填入 1688 货源价，系统实时测算 <strong>净利润 / ROI</strong>，自动标记「可跟卖」清单，并可一键生成标题/描述/配图后上架。</p>
           <ul className="list-disc pl-5 space-y-1">
