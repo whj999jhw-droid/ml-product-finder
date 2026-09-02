@@ -155,8 +155,13 @@ function parseJson(stdout: string): any {
 /**
  * 按自然语言描述搜索 1688 商品。
  * @param query 自然语言，例如 "露营椅 一件代发 包邮"
+ * @param opts.timeoutMs 搜索超时（ms），默认 120000；可用环境变量 ALI1688_SEARCH_TIMEOUT_MS 覆盖。
+ *   长 AI 标题检索 1688 常 >60s，原默认 60000 会中途被杀，故放宽到 120s。
  */
-export async function search1688ByQuery(query: string): Promise<Ali1688SearchResult> {
+export async function search1688ByQuery(
+  query: string,
+  opts?: { timeoutMs?: number },
+): Promise<Ali1688SearchResult> {
   if (!query?.trim()) {
     return { success: false, message: '搜索词为空', products: [] };
   }
@@ -167,7 +172,8 @@ export async function search1688ByQuery(query: string): Promise<Ali1688SearchRes
     return { success: false, message: msg, products: [] };
   }
   try {
-    const { stdout, stderr } = await runCli(['search', '--query', query.trim(), '--channel', '']);
+    const searchTimeoutMs = opts?.timeoutMs ?? Number(process.env.ALI1688_SEARCH_TIMEOUT_MS ?? 120000);
+    const { stdout, stderr } = await runCli(['search', '--query', query.trim(), '--channel', ''], searchTimeoutMs);
     if (stderr) {
       console.warn('[Ali1688Skill] search stderr:', stderr.slice(0, 400));
     }
