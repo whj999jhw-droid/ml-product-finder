@@ -341,7 +341,7 @@ export async function runNewtonAutoSourcing(opts: NewtonAutoSourcingOptions): Pr
     return { success: false, message: '牛顿未配置，跳过', products: [], sourceOrigin: 'newton' };
   }
 
-  const timeoutMs = opts.timeoutMs ?? 35000;
+  const timeoutMs = opts.timeoutMs ?? 90000;
   const pollIntervalMs = opts.pollIntervalMs ?? 2500;
   const maxItems = opts.maxItems ?? 5;
   const autoAnswer = opts.autoAnswerClarification !== false;

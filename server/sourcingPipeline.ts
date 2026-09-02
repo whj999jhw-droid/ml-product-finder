@@ -383,7 +383,7 @@ async function processOneCandidate(
       query: newtonQuery,
       competitorPriceUsd: enriched.priceUsd,
       site: enriched.site,
-      timeoutMs: 35000,
+      timeoutMs: 90000,
       maxItems: 5,
       autoAnswerClarification: true,
     });
