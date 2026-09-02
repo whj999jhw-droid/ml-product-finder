@@ -410,8 +410,13 @@ CREATE TABLE IF NOT EXISTS app_config (
         db.exec("ALTER TABLE candidates ADD COLUMN flags TEXT");
         console.log('[DB] candidates.flags 列已添加');
       }
+      // 兼容旧数据库：若 candidates 表缺少 source_origin 列则补加（标记货源来自 newton 或 1688-shopkeeper）
+      if (!cols.find((c) => c.name === 'source_origin')) {
+        db.exec("ALTER TABLE candidates ADD COLUMN source_origin TEXT");
+        console.log('[DB] candidates.source_origin 列已添加');
+      }
     } catch (e: any) {
-      console.warn('[DB] 检查/补加 trend_note/seller_sku 列失败:', e?.message || String(e));
+      console.warn('[DB] 检查/补加 trend_note/seller_sku/source_origin 列失败:', e?.message || String(e));
     }
     console.log(`[DB] SQLite initialized at ${DB_PATH}`);
   } catch (e: any) {

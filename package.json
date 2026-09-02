@@ -15,6 +15,7 @@
     "electron:dist": "node build-electron.mjs"
   },
   "dependencies": {
+    "@newton-cloud/server": "0.2.0",
     "date-holidays": "^3.35.0"
   },
   "devDependencies": {

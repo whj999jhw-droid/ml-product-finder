@@ -12,6 +12,7 @@ import {
   type ScannerOptions,
 } from './sourcingScanner.js';
 import { search1688ByQuery, get1688ProductDetail, type Ali1688Product } from './ali1688Skill.js';
+import { runNewtonAutoSourcing, isNewtonConfigured } from './newtonService.js';
 import { calculateProfit, reverseEngineerPrice, type ProfitResult } from './profit.js';
 import { scoreCandidate, isScorePass, type ScoreBreakdown } from './scoring.js';
 import { aiEvaluateCandidate, assessSourceRelevance, aiGenerateTitles, aiGenerateDescription, getLlmConfig, type AIEvaluationResult } from './aiService.js';
@@ -30,6 +31,10 @@ export interface PipelineOptions extends ScannerOptions {
   maxCandidatesToSource?: number; // 最多对多少个候选查 1688，控制成本，默认 30
   minScoreThreshold?: number; // 覆盖 scoring.SCORE_THRESHOLD
   skip1688IfNoAK?: boolean; // AK 未配置时是否跳过（默认 false，会报错）
+  /** 是否优先使用牛顿寻源（默认 true）；牛顿未配置或超限时自动回退 1688-shopkeeper */
+  newtonPriorityEnabled?: boolean;
+  /** 单次运行最多用牛顿处理多少个候选（默认 10），防止整体运行时间过长 */
+  newtonMaxPerRun?: number;
 }
 
 export interface PipelineResult {
@@ -42,6 +47,10 @@ export interface PipelineResult {
   totalRejected: number;
   errors: string[];
 }
+
+// 牛顿优先级配置（可被环境变量覆盖，也可被单次 PipelineOptions 覆盖）
+const NEWTON_PRIORITY_ENABLED = process.env.NEWTON_PRIORITY_ENABLED !== 'false';
+const NEWTON_MAX_PER_RUN = Number(process.env.NEWTON_MAX_CANDIDATES_PER_RUN || 10);
 
 export interface SourcedCandidate {
   candidate: RawCandidate;
@@ -61,6 +70,8 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
   const targetNetRate = opts.targetNetRate ?? 0.15;
   const maxCandidatesToSource = opts.maxCandidatesToSource ?? 40;
   const minScore = opts.minScoreThreshold ?? 0.55;
+  const newtonEnabled = (opts.newtonPriorityEnabled ?? NEWTON_PRIORITY_ENABLED) && isNewtonConfigured?.();
+  const newtonMax = opts.newtonMaxPerRun ?? NEWTON_MAX_PER_RUN;
 
   // run 记录应由调用方（API 端点）预先创建，这里兜底创建
   try {
@@ -108,24 +119,31 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
     let totalApproved = 0;
     let totalRejected = 0;
     let totalNew = 0;
+    let newtonAttempts = 0;
+    let newtonHits = 0;
     const rejectReasons: Record<string, number> = {};
 
     // 2) 逐个查 1688 + 利润 + 评分 + 入库
     const totalToProcess = Math.min(rawCandidates.length, maxCandidatesToSource);
     for (let i = 0; i < totalToProcess; i++) {
       const raw = rawCandidates[i];
+      const allowNewton = newtonEnabled && newtonAttempts < newtonMax;
       updateSourcingRun(runId, {
-        message: `正在匹配 1688：第 ${i + 1}/${totalToProcess} 个（${raw.title.slice(0, 30)}）`,
+        message: allowNewton
+          ? `正在用牛顿寻源：第 ${i + 1}/${totalToProcess} 个（${raw.title.slice(0, 30)}）`
+          : `正在匹配 1688：第 ${i + 1}/${totalToProcess} 个（${raw.title.slice(0, 30)}）`,
         total_scored: totalScored,
         total_approved: totalApproved,
         total_rejected: totalRejected,
       });
       try {
-      const { result, reason, isNew } = await processOneCandidate(runId, raw, targetNetRate, minScore, scanToken);
+      const { result, reason, isNew, sourceOrigin } = await processOneCandidate(runId, raw, targetNetRate, minScore, scanToken, allowNewton);
+      if (sourceOrigin === 'newton') newtonAttempts++;
       totalScored++;
       if (result) {
         totalApproved++;
         if (isNew) totalNew++;
+        if (sourceOrigin === 'newton') newtonHits++;
       } else {
           totalRejected++;
           rejectReasons[reason] = (rejectReasons[reason] || 0) + 1;
@@ -178,7 +196,7 @@ export async function runSourcingPipeline(opts: PipelineOptions = {}): Promise<P
       total_approved: totalApproved,
       total_new: totalNew,
       total_rejected: totalRejected,
-      message: `选品完成：扫描 ${scan.totalScanned} 个，入库 ${totalApproved} 个${rejectSummary ? `，淘汰原因 [${rejectSummary}]` : ''}`,
+      message: `选品完成：扫描 ${scan.totalScanned} 个，入库 ${totalApproved} 个${newtonEnabled ? `（牛顿命中 ${newtonHits}/${newtonAttempts}）` : ''}${rejectSummary ? `，淘汰原因 [${rejectSummary}]` : ''}`,
       error: errors.length ? errors.join('; ') : null,
     });
 
@@ -217,10 +235,12 @@ function buildCandidateRow(
     aiEvaluation?: AIEvaluationResult;
   /** #4 MVP：定制新品信号标记（JSON 字符串） */
   flags?: CustomFlags;
-  /** #2：AI 精化上架标题（西/葡语） */
-  aiTitle?: string;
-  /** #2：AI 精化商品描述 */
-  aiDescription?: string;
+    /** #2：AI 精化上架标题（西/葡语） */
+    aiTitle?: string;
+    /** #2：AI 精化商品描述 */
+    aiDescription?: string;
+    /** 货源来源：newton / 1688-shopkeeper */
+    sourceOrigin?: 'newton' | '1688-shopkeeper' | null;
   }
 ): Record<string, any> {
   const zh = CATEGORY_ZH_BY_ID[enriched.categoryId] || '';
@@ -278,6 +298,8 @@ function buildCandidateRow(
   // #2：AI 精化标题/描述（best-effort 生成，可能为空；空则不写列）
   if (opts.aiTitle) row.ai_title = opts.aiTitle;
   if (opts.aiDescription) row.ai_description = opts.aiDescription;
+  // 货源来源标记（newton / 1688-shopkeeper）
+  if (opts.sourceOrigin) row.source_origin = opts.sourceOrigin;
   // #4 MVP：定制新品信号标记
   if (opts.flags) row.flags = JSON.stringify(opts.flags);
   // 趋势备注：简明说明为何选入（近期上架 + 上涨趋势 + 售价区间 + 竞争环境）
@@ -342,35 +364,62 @@ async function processOneCandidate(
   raw: RawCandidate,
   targetNetRate: number,
   minScore: number,
-  scanToken?: string
-): Promise<{ result: SourcedCandidate | null; reason: string; isNew?: boolean }> {
+  scanToken?: string,
+  allowNewton = false
+): Promise<{ result: SourcedCandidate | null; reason: string; isNew?: boolean; sourceOrigin?: 'newton' | '1688-shopkeeper' | null }> {
   // 2.1 补充详情（重量/尺寸/图片）
   const enriched = await enrichCandidate(raw, scanToken);
 
-  // 2.2 1688 找货源（用简化标题，去掉站点无关词）
-  const searchQuery = build1688SearchQuery(enriched.title);
-  console.log(`[SourcingPipeline] 候选 ${raw.itemId} 1688 搜索词: "${searchQuery}"`);
-  if (!searchQuery.trim()) {
-    insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: '标题为空，无法生成1688搜索词' }));
-    return { result: null, reason: '标题为空，无法生成1688搜索词' };
+  // 2.2 优先走牛顿 NL 寻源；未配置/超时/无结果则回退 1688-shopkeeper 关键词搜索
+  let sourceOrigin: 'newton' | '1688-shopkeeper' | null = null;
+  let searchQuery = build1688SearchQuery(enriched.title);
+  let newtonQuery = '';
+  let newtonResult: { success: boolean; message: string; products: Ali1688Product[] } | undefined;
+
+  if (allowNewton) {
+    newtonQuery = buildNewtonSearchQuery(enriched);
+    console.log(`[SourcingPipeline] 候选 ${raw.itemId} 牛顿查询: "${newtonQuery}"`);
+    newtonResult = await runNewtonAutoSourcing({
+      query: newtonQuery,
+      competitorPriceUsd: enriched.priceUsd,
+      site: enriched.site,
+      timeoutMs: 35000,
+      maxItems: 5,
+      autoAnswerClarification: true,
+    });
+    console.log(`[SourcingPipeline] 候选 ${raw.itemId} 牛顿结果: success=${newtonResult.success}, message=${newtonResult.message}, products=${newtonResult.products.length}`);
   }
-  const searchResult = await search1688ByQuery(searchQuery);
-  console.log(`[SourcingPipeline] 候选 ${raw.itemId} 1688 搜索结果: success=${searchResult.success}, message=${searchResult.message}, products=${searchResult.products.length}`);
-  if (searchResult.raw) {
-    console.log(`[SourcingPipeline] 候选 ${raw.itemId} 1688 搜索 raw:`, JSON.stringify(searchResult.raw).slice(0, 500));
-  }
-  if (!searchResult.success || searchResult.products.length === 0) {
-    const reason = searchResult.message?.includes('CLI 未安装')
-      ? searchResult.message.slice(0, 80)
-      : '1688无货源';
-    insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: reason, searchQuery }));
-    return { result: null, reason };
+
+  if (newtonResult?.success && newtonResult.products.length > 0) {
+    sourceOrigin = 'newton';
+    searchQuery = newtonQuery;
+  } else {
+    sourceOrigin = '1688-shopkeeper';
+    console.log(`[SourcingPipeline] 候选 ${raw.itemId} 1688 搜索词: "${searchQuery}"`);
+    if (!searchQuery.trim()) {
+      insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: '标题为空，无法生成1688搜索词' }));
+      return { result: null, reason: '标题为空，无法生成1688搜索词', sourceOrigin: null };
+    }
+    const searchResult = await search1688ByQuery(searchQuery);
+    console.log(`[SourcingPipeline] 候选 ${raw.itemId} 1688 搜索结果: success=${searchResult.success}, message=${searchResult.message}, products=${searchResult.products.length}`);
+    if (searchResult.raw) {
+      console.log(`[SourcingPipeline] 候选 ${raw.itemId} 1688 搜索 raw:`, JSON.stringify(searchResult.raw).slice(0, 500));
+    }
+    if (!searchResult.success || searchResult.products.length === 0) {
+      const reason = searchResult.message?.includes('CLI 未安装')
+        ? searchResult.message.slice(0, 80)
+        : '1688无货源';
+      insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: reason, searchQuery, sourceOrigin }));
+      return { result: null, reason, sourceOrigin };
+    }
+    newtonResult = { success: true, message: searchResult.message, products: searchResult.products };
   }
 
   // 取货源：先按价格/销量取 Top5 候选，再逐个性相关度校验，取最匹配的一个。
+  // 牛顿返回的结果同样走相关度校验，避免答非所问。
   // 这样避免「只看价格 → 便宜但不同类」的 1688 货源被错误入库（张冠李戴）。
   // LLM 不可用时退回按价格选最优，保持无 LLM 用户不被阻断。
-  const topSources = pickTopSources(searchResult.products, 5);
+  const topSources = pickTopSources(newtonResult!.products, 5);
   let source: Ali1688Product | undefined;
   let bestRelScore = -1;
   let fallback: Ali1688Product | undefined; // LLM 不可用时的兜底（价格最优）
@@ -395,8 +444,9 @@ async function processOneCandidate(
         status: 'rejected',
         rejectReason: `1688货源不匹配(${(rel?.score ?? 0).toFixed(2)}): ${rel?.reason || '无合适货源'}`,
         searchQuery,
+        sourceOrigin,
       }));
-      return { result: null, reason: '1688货源不匹配' };
+      return { result: null, reason: '1688货源不匹配', sourceOrigin };
     }
   }
 
@@ -433,8 +483,8 @@ async function processOneCandidate(
   const score = scoreCandidate({ candidate: enriched, source, profit });
   if (!isScorePass(score) || score.total < minScore) {
     const reason = `评分未通过(total=${score.total.toFixed(2)}, demand=${score.demand.toFixed(2)}, competition=${score.competition.toFixed(2)}, profit=${score.profit.toFixed(2)}, logistics=${score.logistics.toFixed(2)}, compliance=${score.compliance.toFixed(2)})`;
-    insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: reason, searchQuery, source, profit, listingPrice, score }));
-    return { result: null, reason };
+    insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: reason, searchQuery, source, profit, listingPrice, score, sourceOrigin }));
+    return { result: null, reason, sourceOrigin };
   }
 
   // 2.5 AI 选品研判（可选，失败不影响入库）
@@ -514,10 +564,11 @@ async function processOneCandidate(
       flags,
       aiTitle,
       aiDescription,
+      sourceOrigin,
     })
   );
 
-  if (!ins.id) return { result: null, reason: '数据库写入失败' };
+  if (!ins.id) return { result: null, reason: '数据库写入失败', sourceOrigin };
 
   return {
     result: {
@@ -530,12 +581,28 @@ async function processOneCandidate(
     },
     reason: '通过',
     isNew: ins.isNew,
+    sourceOrigin,
   };
 }
 
 // 供 runSourcingPipeline 在循环中回填 run_id
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * 生成牛顿自然语言寻源查询。
+ * 明确需求（快速发货、评价优、一件代发）可减少澄清卡概率，便于自动化流程。
+ */
+function buildNewtonSearchQuery(enriched: Awaited<ReturnType<typeof enrichCandidate>>): string {
+  const title = enriched.title || '';
+  const category = enriched.categoryName || '';
+  const site = enriched.site || '';
+  const priceHint = enriched.priceUsd && enriched.priceUsd > 0
+    ? `竞品售价约 $${enriched.priceUsd.toFixed(2)}（${site}），进货预算按竞品价 15%~45%`
+    : '';
+  const trend = enriched.trendKeyword ? `，热搜词「${enriched.trendKeyword}」` : '';
+  return `在1688上找「${title}${category ? `（${category}）` : ''}」的跨境无货源优质货源，要求12到48小时内发货、评价优、支持一件代发${priceHint ? '，' + priceHint : ''}${trend}。返回3-5个候选商品链接、进货价、起订量和供应商。`;
 }
 
 /**

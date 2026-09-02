@@ -56,6 +56,7 @@ interface Candidate {
   reject_reason: string;
   trend_note?: string;
   source_tag?: 'recent' | 'trend' | 'bestseller' | 'custom-new';
+  source_origin?: 'newton' | '1688-shopkeeper' | null;
   weight_kg: number;
   length_cm: number;
   width_cm: number;
@@ -1298,7 +1299,17 @@ export function CandidatesPage() {
           'custom-new': { label: '🛠定制新品', theme: 'primary' },
         };
         const s = map[row.source_tag || 'recent'] || map.recent;
-        return <Tag theme={s.theme} size="small">{s.label}</Tag>;
+        const originMap: Record<string, { label: string; theme: any }> = {
+          newton: { label: '牛顿', theme: 'warning' },
+          '1688-shopkeeper': { label: '1688', theme: 'default' },
+        };
+        const o = row.source_origin ? originMap[row.source_origin] : null;
+        return (
+          <div className="flex flex-col gap-1">
+            <Tag theme={s.theme} size="small">{s.label}</Tag>
+            {o && <Tag theme={o.theme} size="small" variant="outline">{o.label}</Tag>}
+          </div>
+        );
       },
     },
     {
