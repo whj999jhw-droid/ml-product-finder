@@ -778,8 +778,24 @@ export function cleanupStaleSourcingRuns(maxAgeMinutes: number = 30): number {
   return count;
 }
 
+// 美客多商品短链：由 site + ml_item_id 拼出（短链 302 到真实商品页，无需调 API）
+const ML_ITEM_DOMAIN: Record<string, string> = {
+  MLM: 'articulo.mercadolibre.com.mx',
+  MLB: 'produto.mercadolivre.com.br',
+  MLC: 'articulo.mercadolibre.cl',
+  MCO: 'articulo.mercadolibre.com.co',
+};
+
+export function mlPermalinkOf(site?: string | null, mlItemId?: string | null): string {
+  if (!site || !mlItemId) return '';
+  const domain = ML_ITEM_DOMAIN[site];
+  const num = mlItemId.replace(/^[A-Za-z]{3}-?/, '');
+  return domain && num ? `https://${domain}/${site}-${num}` : '';
+}
+
 export function insertCandidate(data: any): { id: number; isNew: boolean } {
   if (!db) return { id: 0, isNew: false };
+  data = { ...data, ml_permalink: data.ml_permalink || mlPermalinkOf(data.site, data.ml_item_id) };
   const now = new Date().toISOString();
   const cols = Object.keys(data).filter((k) => data[k] !== undefined);
   const placeholders = cols.map((k) => `@${k}`).join(', ');
@@ -833,12 +849,16 @@ export function getCandidates(opts?: {
     `SELECT * FROM candidates ${whereSql} ORDER BY ${order} LIMIT @limit OFFSET @offset`
   ).all({ ...params, limit, offset });
 
+  // 存量行 ml_permalink 为空时用 site+ml_item_id 兜底补全，避免前端 <a href=""> 跳回当前页
+  rows = rows.map((r: any) => (r.ml_permalink ? r : { ...r, ml_permalink: mlPermalinkOf(r.site, r.ml_item_id) }));
+
   return { rows, total };
 }
 
 export function getCandidateById(id: number): any {
   if (!db) return null;
-  return db.prepare('SELECT * FROM candidates WHERE id = ?').get(id);
+  const row = db.prepare('SELECT * FROM candidates WHERE id = ?').get(id) as any;
+  return row && !row.ml_permalink ? { ...row, ml_permalink: mlPermalinkOf(row.site, row.ml_item_id) } : row;
 }
 
 // 通用配置（key/value）。用于存放 YouTube OAuth 等凭证，避免写死在代码里。
