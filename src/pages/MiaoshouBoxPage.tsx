@@ -24,7 +24,7 @@ import {
 } from 'tdesign-react';
 import type { PrimaryTableCol } from 'tdesign-react';
 import { FeatureIntro } from '../components/FeatureIntro';
-import { Inbox } from 'lucide-react';
+import { Inbox, RefreshCw } from 'lucide-react';
 
 // ============ 类型定义 ============
 
@@ -121,7 +121,7 @@ export function MiaoshouBoxPage() {
 
   // 分页
   const [current, setCurrent] = useState(1);
-  const PAGE_SIZE = 50;
+  const [pageSize, setPageSize] = useState(50);
 
   // 搜索过滤
   const [searchKw, setSearchKw] = useState('');
@@ -151,7 +151,7 @@ export function MiaoshouBoxPage() {
 
   // ============ 加载采集箱列表 ============
 
-  const loadBox = useCallback(async (force = false) => {
+  const loadBox = useCallback(async (force = false, keepPage = false) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ status: 'notPublished', filterCidSite: 'CBT' });
@@ -162,7 +162,7 @@ export function MiaoshouBoxPage() {
       if (!json.success) throw new Error(json.message || '加载失败');
       setItems(json.items || []);
       setTotal(json.total || json.items?.length || 0);
-      setCurrent(1); // 刷新后回第1页
+      if (!keepPage) setCurrent(1); // 刷新本页时保持当前页码，其余回第1页
     } catch (e: any) {
       MessagePlugin.error(e.message || '加载采集箱失败');
     } finally {
@@ -205,7 +205,7 @@ export function MiaoshouBoxPage() {
   }, [searchKw, items]);
 
   // 当前页数据
-  const pagedItems = filteredItems.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE);
+  const pagedItems = filteredItems.slice((current - 1) * pageSize, current * pageSize);
 
   // ============ 打开商品详情 ============
 
@@ -504,6 +504,14 @@ export function MiaoshouBoxPage() {
         >
           刷新列表
         </Button>
+        <Button
+          icon={<RefreshCw size={16} />}
+          onClick={() => loadBox(true, true)}
+          loading={loading}
+          variant="outline"
+        >
+          刷新本页
+        </Button>
         <Input
           placeholder="搜索标题 / 类目 / ID..."
           value={searchKw}
@@ -544,11 +552,17 @@ export function MiaoshouBoxPage() {
           <div className="flex justify-end mt-3">
             <Pagination
               current={current}
-              pageSize={PAGE_SIZE}
+              pageSize={pageSize}
               total={filteredItems.length}
               showJumper
-              showPageSize={false}
+              pageSizeOptions={[20, 50, 100, 200]}
               onChange={({ current: c }) => setCurrent(c)}
+              onPageSizeChange={(size) => {
+                // 换每页数量后，尽量停留在原数据位置附近
+                const firstItem = (current - 1) * pageSize;
+                setPageSize(size);
+                setCurrent(Math.floor(firstItem / size) + 1);
+              }}
             />
           </div>
         )}

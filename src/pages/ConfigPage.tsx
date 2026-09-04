@@ -71,6 +71,16 @@ const CAP_LABELS: Record<string, string> = { chat: '对话', image: '图像', vi
 
 // 最后一次「测试连接」结果持久化（localStorage），刷新/重进页面仍可查看
 const LLM_TEST_STORAGE_KEY = 'ml_ai_config_last_test';
+// 单行测试结果持久化：key = baseUrl|type
+const LLM_ROW_TEST_STORAGE_KEY = 'ml_ai_config_row_test';
+type RowTestEntry = { data: any; testedAt: number };
+function loadRowTests(): Record<string, RowTestEntry> {
+  try {
+    return JSON.parse(localStorage.getItem(LLM_ROW_TEST_STORAGE_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
 function loadPersistedTest(): { testResult: any; showTestResult: boolean; testedAt: number | null } {
   try {
     const s = localStorage.getItem(LLM_TEST_STORAGE_KEY);
@@ -162,6 +172,18 @@ function AiConfigPanel() {
   const [form, setForm] = useState<LlmProviderForm>({ name: '', baseUrl: '', apiKey: '', models: '', type: 'openai' });
   // 已保存的 baseUrl|type 组合，用于判断某行是否为“新增平台”
   const [savedKeys, setSavedKeys] = useState<Set<string>>(new Set());
+
+  // 单行测试：进行中状态 + 每行最后一次测试结果（localStorage 持久化）
+  const [rowTesting, setRowTesting] = useState<Record<string, boolean>>({});
+  const [rowResults, setRowResults] = useState<Record<string, RowTestEntry>>(() => loadRowTests());
+  const [rowResultKey, setRowResultKey] = useState<string | null>(null); // 非空=打开单行结果弹窗
+  useEffect(() => {
+    try {
+      localStorage.setItem(LLM_ROW_TEST_STORAGE_KEY, JSON.stringify(rowResults));
+    } catch { /* ignore */ }
+  }, [rowResults]);
+
+  const rowKeyOf = (p: LlmProviderForm) => `${(p.baseUrl || '').trim()}|${p.type || 'openai'}`;
 
   const loadStatus = async () => {
     try {
@@ -300,12 +322,51 @@ function AiConfigPanel() {
       setTestResult(data);
       setShowTestResult(true);
       setTestedAt(Date.now());
+      // 整体测试的结果同步更新到每一行的「测试结果」
+      if (data?.perProvider?.length) {
+        setRowResults((prev) => {
+          const next = { ...prev };
+          const byBase = new Map<string, any[]>();
+          for (const r of data.perProvider) {
+            const k = (r.baseUrl || '').trim();
+            if (!byBase.has(k)) byBase.set(k, []);
+            byBase.get(k)!.push(r);
+          }
+          for (const p of providers) {
+            const rows = byBase.get((p.baseUrl || '').trim());
+            if (rows) next[rowKeyOf(p)] = { data: { success: rows.every((r: any) => r.success), perProvider: rows }, testedAt: Date.now() };
+          }
+          return next;
+        });
+      }
       if (data.success) MessagePlugin.success('测试完成，见下方结果');
       else MessagePlugin.warning(data.message || '测试未通过');
     } catch (e: any) {
       MessagePlugin.error(e?.message || '网络错误');
     } finally {
       setTesting(false);
+    }
+  };
+
+  const handleTestRow = async (idx: number) => {
+    const p = providers[idx];
+    if (!p) return;
+    const key = rowKeyOf(p);
+    setRowTesting((prev) => ({ ...prev, [key]: true }));
+    try {
+      const res = await fetch('/api/ml/llm-config/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providers: [p] }),
+      });
+      const data = await res.json();
+      setRowResults((prev) => ({ ...prev, [key]: { data, testedAt: Date.now() } }));
+      if (data.success) MessagePlugin.success(`「${p.name}」测试完成，全部通过`);
+      else MessagePlugin.warning(`「${p.name}」测试完成，有失败项，可点「测试结果」查看`);
+    } catch (e: any) {
+      MessagePlugin.error(e?.message || '网络错误');
+    } finally {
+      setRowTesting((prev) => ({ ...prev, [key]: false }));
     }
   };
 
@@ -385,14 +446,29 @@ function AiConfigPanel() {
     {
       colKey: 'operation',
       title: '操作',
-      width: 140,
+      width: 250,
       fixed: 'right',
-      cell: ({ rowIndex }) => (
-        <div className="flex items-center gap-1">
-          <Button size="small" variant="text" icon={<EditIcon />} onClick={() => openEdit(rowIndex as number)}>修改</Button>
-          <Button size="small" variant="text" theme="danger" icon={<DeleteIcon />} onClick={() => handleDeleteProvider(rowIndex as number)}>删除</Button>
-        </div>
-      ),
+      cell: ({ row }) => {
+        const key = rowKeyOf(row);
+        const entry = rowResults[key];
+        const allOk = entry?.data?.success;
+        return (
+          <div className="flex items-center gap-1">
+            <Button size="small" variant="text" loading={!!rowTesting[key]} onClick={() => handleTestRow(providers.indexOf(row))}>测试</Button>
+            <Button
+              size="small"
+              variant="text"
+              theme={entry ? (allOk ? 'success' : 'danger') : 'default'}
+              disabled={!entry}
+              onClick={() => setRowResultKey(key)}
+            >
+              测试结果{entry && <span className="text-gray-400 ml-0.5">{new Date(entry.testedAt).toLocaleTimeString('zh-CN', { hour12: false })}</span>}
+            </Button>
+            <Button size="small" variant="text" icon={<EditIcon />} onClick={() => openEdit(providers.indexOf(row))}>修改</Button>
+            <Button size="small" variant="text" theme="danger" icon={<DeleteIcon />} onClick={() => handleDeleteProvider(providers.indexOf(row))}>删除</Button>
+          </div>
+        );
+      },
     },
   ];
 
@@ -594,6 +670,52 @@ function AiConfigPanel() {
             })()}
           </div>
         </div>
+      </Dialog>
+
+      {/* 单行测试结果弹窗 */}
+      <Dialog
+        visible={!!rowResultKey}
+        onClose={() => setRowResultKey(null)}
+        header={`测试结果 - ${providers.find((p) => rowKeyOf(p) === rowResultKey)?.name || ''}`}
+        footer={false}
+        width={640}
+      >
+        {(() => {
+          const entry = rowResultKey ? rowResults[rowResultKey] : null;
+          if (!entry) return <div className="text-sm text-gray-400 py-4">暂无测试结果</div>;
+          const rows: any[] = entry.data?.perProvider || [];
+          return (
+            <div className="space-y-2 py-2">
+              <div className="text-xs text-gray-400">
+                测试时间：{new Date(entry.testedAt).toLocaleString('zh-CN', { hour12: false })}
+              </div>
+              {rows.map((r: any, i: number) => (
+                <div key={i} className="text-xs border border-gray-100 rounded p-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Tag size="small" theme={r.success ? 'success' : 'danger'}>{r.success ? '成功' : '失败'}</Tag>
+                    <Tag size="small" theme="default" variant="light">{CAP_LABELS[r.capability] || r.capability || '对话'}</Tag>
+                    <span className="font-medium">{r.name}</span>
+                    <span className="text-gray-500">{r.model}</span>
+                    {!r.success && (
+                      <Button
+                        size="small"
+                        variant="text"
+                        theme="danger"
+                        className="ml-auto"
+                        icon={<DeleteIcon />}
+                        onClick={() => handleDeleteModel(r.baseUrl, r.model)}
+                      >
+                        删除该不通模型
+                      </Button>
+                    )}
+                  </div>
+                  <div className="text-gray-600 mt-1">{r.message || ''}</div>
+                  {r.sample && <div className="text-gray-500 mt-1">示例：{JSON.stringify(r.sample)}</div>}
+                </div>
+              ))}
+            </div>
+          );
+        })()}
       </Dialog>
 
       {/* 规则引擎兜底 */}
