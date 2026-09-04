@@ -243,15 +243,22 @@ miaoshouRouter.post('/publish', async (req, res) => {
 
       try {
         const published = await createListing(draft);
+        // CBT 返回 site_items[]，每站点有独立 item_id，按站点回填
+        const siteItems = published.siteItems || [];
+        const bySite = new Map(siteItems.map((si: any) => [String(si?.site_id), si]));
         for (const s of target.sites) {
+          const si = bySite.get(s);
           results.push({
             detailId: itemRef.detailId,
             storeId: target.storeId,
             storeNick,
             site: s,
             success: true,
-            itemId: published.itemId,
-            permalink: published.permalink,
+            itemId: si?.item_id || published.itemId,
+            permalink:
+              si?.item_id
+                ? `https://www.mercadolibre.com/p/${si.item_id}`
+                : published.permalink,
           });
         }
       } catch (e: any) {

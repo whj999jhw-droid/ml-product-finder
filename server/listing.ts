@@ -111,6 +111,55 @@ async function resolvePictureId(url: string, token: string): Promise<string | un
   }
 }
 
+// ===== 类目预测与必填属性补齐（2026-09-04）=====
+// 妙手返回的 cid 是妙手内部类目 ID（如 1015338），不是 ML 类目；发布前需用标题预测真实 ML 类目。
+const categoryPredictionCache = new Map<string, string>();
+async function predictCategoryId(token: string, site: string, title: string): Promise<string | undefined> {
+  const key = `${site}|${title}`;
+  const cached = categoryPredictionCache.get(key);
+  if (cached) return cached;
+  try {
+    const resp = await fetch(
+      `https://api.mercadolibre.com/sites/${site}/domain_discovery/search?limit=1&q=${encodeURIComponent(title)}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!resp.ok) return undefined;
+    const list = await resp.json();
+    const cid = list?.[0]?.category_id;
+    if (cid) {
+      categoryPredictionCache.set(key, cid);
+      return cid;
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
+const categoryAttrsCache = new Map<string, any[]>();
+async function getCategoryAttributes(token: string, categoryId: string): Promise<any[]> {
+  const cached = categoryAttrsCache.get(categoryId);
+  if (cached) return cached;
+  try {
+    const resp = await fetch(`https://api.mercadolibre.com/categories/${categoryId}/attributes`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!resp.ok) return [];
+    const list = await resp.json();
+    categoryAttrsCache.set(categoryId, list);
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+// 这些属性由 createListing 统一处理，不参与枚举兜底
+const HANDLED_ATTR_IDS = new Set([
+  'BRAND', 'MODEL', 'ITEM_CONDITION', 'UPC', 'EAN',
+  'PACKAGE_HEIGHT', 'PACKAGE_WIDTH', 'PACKAGE_LENGTH', 'PACKAGE_WEIGHT',
+  'WARRANTY_TYPE', 'WARRANTY_TIME',
+]);
+
 export async function createListing(draft: ListingDraft, tokenOverride?: string): Promise<{ itemId: string; permalink: string; siteItems?: any[] }> {
   // 多店铺：优先用传入的店铺 token；其次按 draft.storeId 取对应店铺 token；最后回退全局 token
   let token = tokenOverride;
@@ -162,6 +211,35 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
   };
   const attributes = mergeAttributes(draft.attributes);
 
+  // 类目：CBT 全球售必须用 CBT 命名空间的类目（如 CBT10626）。
+  // 妙手 cid（如 10110626）是妙手内部类目 ID，直接用会被判 category_id invalid，需按标题走 domain_discovery(CBT) 预测。
+  let categoryId = draft.category_id;
+  if (!categoryId || !/^(CBT\d+|ML[A-Z]{3}\d+)$/.test(categoryId)) {
+    const predicted = await predictCategoryId(token, 'CBT', draft.title);
+    if (predicted) {
+      console.log(`[Listing] 类目自动预测: ${draft.category_id || '(空)'} -> ${predicted}（标题: ${draft.title.slice(0, 40)}）`);
+      categoryId = predicted;
+    }
+  }
+
+  // 补齐类目必填属性：缺失的 required 枚举属性用第一个可选值兜底，避免 body.required_fields 报错
+  // （兜底值仅供参考，发布后可在美客多后台修改）
+  if (categoryId && /^ML/.test(categoryId)) {
+    const catAttrs = await getCategoryAttributes(token, categoryId);
+    const haveIds = new Set(attributes.map((a) => a?.id));
+    for (const ca of catAttrs) {
+      const id = ca?.id;
+      if (!id || haveIds.has(id) || HANDLED_ATTR_IDS.has(id)) continue;
+      const required = ca?.tags?.required || ca?.required;
+      const values = ca?.values || [];
+      if (required && values.length > 0) {
+        attributes.push({ id, value_id: values[0].id, value_name: values[0].name });
+        haveIds.add(id);
+        console.log(`[Listing] 补必填属性 ${id}=${values[0].name}（类目 ${categoryId}，可在后台修改）`);
+      }
+    }
+  }
+
   // 多 SKU（规格）：把 1688 识别到的 SKU 标题附到描述，便于买家与后台核对；图片写入 pictureUrls
   let descriptionText = draft.description || '';
   if (draft.skus && draft.skus.length) {
@@ -176,24 +254,28 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
   }
 
   // CBT 创建：POST /global/items，价格按国家写在 sites_to_sell（USD）
-  // 保修（sale_terms）一般可选：仅当调用方提供保修信息时才发送，避免对不需要保修的类目强制填值
+  // sale_terms 是 body 必填字段（缺失/空数组会报 body.required_fields: [sale_terms]）。
+  // 元素格式是官方定义的 { id, value_id } 或 { id, value_name }（不是 { KEY: value }）。
+  // 合法值来自 GET /categories/{category_id}/sale_terms，WARRANTY_TYPE 取值：
+  //   2230280 Seller warranty / 2230279 Factory warranty / 6150835 No warranty
+  // 无保修信息时默认 No warranty，保证 schema 校验通过。
   const saleTerms: any[] = [];
   if (draft.warrantyType) saleTerms.push({ id: 'WARRANTY_TYPE', value_name: draft.warrantyType });
   if (draft.warrantyTime) saleTerms.push({ id: 'WARRANTY_TIME', value_name: draft.warrantyTime });
+  if (saleTerms.length === 0) saleTerms.push({ id: 'WARRANTY_TYPE', value_id: '6150835' });
 
   const payload: any = {
     title: draft.title, // CBT 要求英文标题（全局）
     currency_id: 'USD', // CBT 一律 USD
     catalog_listing: false,
-    category_id: draft.category_id,
+    category_id: categoryId, // 预测后的真实 ML 类目
     available_quantity: draft.available_quantity,
     description: { plain_text: descriptionText },
     pictures,
     // 卖家自定义 SKU 编号：自动生成或调用方传入；用于与美客多后台 seller_sku 对应追踪
     seller_custom_field: draft.seller_custom_field || generateSellerSku(draft.site),
     attributes,
-    // 仅在有保修信息时发送 sale_terms（保修在 CBT 一般可选）
-    ...(saleTerms.length ? { sale_terms: saleTerms } : {}),
+    sale_terms: saleTerms,
     sites_to_sell:
       draft.sites_to_sell && draft.sites_to_sell.length > 0
         ? draft.sites_to_sell.map((s) => ({
@@ -215,6 +297,11 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
           ],
   };
 
+  // 发布诊断日志：便于定位 ML 校验报错（类目/必填属性/sale_terms/站点）
+  console.log(
+    `[Listing] 请求创建: category=${categoryId} sale_terms=${JSON.stringify(saleTerms)} attrs=${attributes.map((a) => a.id).join(',')} sites=${JSON.stringify((payload.sites_to_sell || []).map((s: any) => s.site_id))} title=${draft.title.slice(0, 50)}`
+  );
+
   const resp = await fetch('https://api.mercadolibre.com/global/items', {
     method: 'POST',
     headers: {
@@ -225,6 +312,8 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
   });
   const data = await resp.json();
   if (!resp.ok) {
+    // 完整打印 ML 错误响应，便于定位 required_fields / invalid value 等细节
+    console.error(`[Listing] ML 创建失败 HTTP ${resp.status}: ${JSON.stringify(data).slice(0, 2000)}`);
     const cause = data?.cause?.[0]
       ? `${data.cause[0].type || ''}: ${data.cause[0].message || data.cause[0].code || ''}`.trim()
       : '';
@@ -234,7 +323,17 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
     err.mlError = data;
     throw err;
   }
-  return { itemId: data.id, permalink: data.permalink, siteItems: data.site_items };
+  // 打印 ML 返回体：确认 id / site_items 结构，便于回填每站点 itemId
+  console.log(`[Listing] ML 创建成功返回: ${JSON.stringify(data).slice(0, 800)}`);
+  // CBT /global/items 返回顶层 item_id（不是 id）+ site_items[]（每站点独立 item_id）
+  const siteItems: any[] = Array.isArray(data.site_items) ? data.site_items : [];
+  const firstSite = siteItems[0];
+  return {
+    itemId: data.item_id ?? data.id,
+    // ML 不返回 permalink 时按第一个站点 item_id 拼可点击链接
+    permalink: data.permalink || (firstSite?.item_id ? `https://www.mercadolibre.com/p/${firstSite.item_id}` : undefined),
+    siteItems,
+  };
 }
 
 // ============ 批量上架发布器（参考文档 listingPublisher 设计）============

@@ -1,0 +1,506 @@
+import {
+  searchProductsByCategory,
+  fetchProductDetails,
+  fetchProductItems,
+  getExchangeRate,
+  fetchHighlightsByCategory,
+  isProxyEnabled,
+  predictCategory
+} from "./mercadolibre.js";
+import { getAllStores, ensureStoreToken } from "./stores.js";
+import { getTrends } from "./trends.js";
+async function resolveScanToken() {
+  const stores = getAllStores().filter((s) => s.enabled && s.accessToken);
+  if (stores.length === 0) {
+    console.warn("[SourcingScanner] \u672A\u627E\u5230\u5DF2\u6388\u6743\u7684\u5E97\u94FA\uFF0C\u626B\u63CF\u5C06\u4F7F\u7528\u5168\u5C40 ML_ACCESS_TOKEN\uFF08\u53EF\u80FD\u4E3A\u7A7A/\u8FC7\u671F\uFF09");
+    return null;
+  }
+  const chosen = stores.find((s) => s.site === "CBT") || stores[0];
+  try {
+    const token = await ensureStoreToken(chosen);
+    console.log(`[SourcingScanner] \u4F7F\u7528\u5E97\u94FA\u300C${chosen.nickname || chosen.site}\u300D\u7684 token \u626B\u63CF\uFF08\u81EA\u52A8\u5237\u65B0\uFF09`);
+    return { token, storeNick: chosen.nickname || chosen.site };
+  } catch (e) {
+    console.warn(`[SourcingScanner] \u5E97\u94FA token \u5237\u65B0\u5931\u8D25(${chosen.nickname}): ${e?.message?.slice(0, 120)}\uFF0C\u56DE\u9000\u5168\u5C40 token`);
+    return null;
+  }
+}
+const DEFAULT_SITES = ["MLM", "MLB", "MLC", "MCO"];
+const DEFAULT_CATEGORIES = {
+  MLM: [
+    { id: "MLM1574", name: "Hogar, Muebles y Jard\xEDn", zh: "\u5BB6\u5C45\u3001\u5BB6\u5177\u548C\u56ED\u827A" },
+    { id: "MLM1132", name: "Juegos y Juguetes", zh: "\u73A9\u5177\u548C\u6E38\u620F" },
+    { id: "MLM1430", name: "Ropa, Bolsas y Calzado", zh: "\u670D\u88C5\u3001\u7BB1\u5305\u548C\u978B\u7C7B" },
+    { id: "MLM1648", name: "Computaci\xF3n", zh: "\u7535\u8111\u53CA\u8BA1\u7B97\u8BBE\u5907" },
+    { id: "MLM1000", name: "Electr\xF3nica, Audio y Video", zh: "\u7535\u5B50\u3001\u97F3\u9891\u548C\u89C6\u9891" },
+    { id: "MLM1246", name: "Belleza y Cuidado Personal", zh: "\u7F8E\u5986\u548C\u4E2A\u4EBA\u62A4\u7406" },
+    { id: "MLM1144", name: "Consolas y Videojuegos", zh: "\u6E38\u620F\u4E3B\u673A\u548C\u89C6\u9891\u6E38\u620F" },
+    { id: "MLM180800", name: "Accesorios para Veh\xEDculos", zh: "\u6C7D\u8F66\u914D\u4EF6" }
+  ],
+  MLB: [
+    { id: "MLB1574", name: "Casa, M\xF3veis e Decora\xE7\xE3o", zh: "\u5BB6\u5C45\u3001\u5BB6\u5177\u548C\u88C5\u9970" },
+    { id: "MLB1132", name: "Brinquedos e Hobbies", zh: "\u73A9\u5177\u548C\u7231\u597D" },
+    { id: "MLB1430", name: "Roupas, Bolsas e Cal\xE7ados", zh: "\u670D\u88C5\u3001\u7BB1\u5305\u548C\u978B\u7C7B" },
+    { id: "MLB1648", name: "Inform\xE1tica", zh: "\u7535\u8111\u53CA\u4FE1\u606F\u6280\u672F" },
+    { id: "MLB1000", name: "Eletr\xF4nicos, \xC1udio e V\xEDdeo", zh: "\u7535\u5B50\u3001\u97F3\u9891\u548C\u89C6\u9891" },
+    { id: "MLB1246", name: "Beleza e Cuidado Pessoal", zh: "\u7F8E\u5986\u548C\u4E2A\u4EBA\u62A4\u7406" },
+    { id: "MLB1144", name: "Games", zh: "\u6E38\u620F" },
+    { id: "MLB180800", name: "Acess\xF3rios para Ve\xEDculos", zh: "\u6C7D\u8F66\u914D\u4EF6" }
+  ],
+  MLC: [
+    { id: "MLC1574", name: "Hogar y Muebles", zh: "\u5BB6\u5C45\u548C\u5BB6\u5177" },
+    { id: "MLC1132", name: "Juegos y Juguetes", zh: "\u73A9\u5177\u548C\u6E38\u620F" },
+    { id: "MLC1430", name: "Ropa, Zapatos y Accesorios", zh: "\u670D\u88C5\u3001\u978B\u7C7B\u548C\u914D\u9970" },
+    { id: "MLC1648", name: "Computaci\xF3n", zh: "\u7535\u8111\u53CA\u8BA1\u7B97\u8BBE\u5907" },
+    { id: "MLC1000", name: "Electr\xF3nica, Audio y Video", zh: "\u7535\u5B50\u3001\u97F3\u9891\u548C\u89C6\u9891" },
+    { id: "MLC1246", name: "Belleza y Cuidado Personal", zh: "\u7F8E\u5986\u548C\u4E2A\u4EBA\u62A4\u7406" },
+    { id: "MLC1144", name: "Consolas y Videojuegos", zh: "\u6E38\u620F\u4E3B\u673A\u548C\u89C6\u9891\u6E38\u620F" }
+  ],
+  MCO: [
+    { id: "MCO1574", name: "Hogar y Muebles", zh: "\u5BB6\u5C45\u548C\u5BB6\u5177" },
+    { id: "MCO1132", name: "Juegos y Juguetes", zh: "\u73A9\u5177\u548C\u6E38\u620F" },
+    { id: "MCO1430", name: "Ropa, Zapatos y Accesorios", zh: "\u670D\u88C5\u3001\u978B\u7C7B\u548C\u914D\u9970" },
+    { id: "MCO1648", name: "Computaci\xF3n", zh: "\u7535\u8111\u53CA\u8BA1\u7B97\u8BBE\u5907" },
+    { id: "MCO1000", name: "Electr\xF3nica, Audio y Video", zh: "\u7535\u5B50\u3001\u97F3\u9891\u548C\u89C6\u9891" },
+    { id: "MCO1246", name: "Belleza y Cuidado Personal", zh: "\u7F8E\u5986\u548C\u4E2A\u4EBA\u62A4\u7406" },
+    { id: "MCO1144", name: "Consolas y Videojuegos", zh: "\u6E38\u620F\u4E3B\u673A\u548C\u89C6\u9891\u6E38\u620F" }
+  ]
+};
+const CATEGORY_ZH_BY_ID = (() => {
+  const map = {};
+  for (const cats of Object.values(DEFAULT_CATEGORIES)) {
+    for (const c of cats) map[c.id] = c.zh;
+  }
+  return map;
+})();
+function toUsd(price, currency, rates) {
+  if (currency === "USD") return price;
+  const rate = rates[currency];
+  if (!rate) return 0;
+  return price * rate;
+}
+function parseDate(d) {
+  if (!d) return null;
+  const dt = new Date(d);
+  return isNaN(dt.getTime()) ? null : dt;
+}
+function extractPriceLocal(item) {
+  const candidates = [
+    [item.price, item.currency_id || item.currency],
+    [item.sale_price?.amount, item.sale_price?.currency_id || item.currency_id || item.currency],
+    [item.buy_box_winner?.price?.amount, item.buy_box_winner?.price?.currency_id || item.currency_id || item.currency],
+    [item.buy_box_winner?.sale_price?.amount, item.buy_box_winner?.sale_price?.currency_id || item.currency_id || item.currency],
+    [item.prices?.prices?.[0]?.amount, item.prices?.prices?.[0]?.currency_id || item.currency_id || item.currency],
+    [item.prices?.purchase_price?.amount, item.prices?.purchase_price?.currency_id || item.currency_id || item.currency],
+    [item.official_store_price?.amount, item.official_store_price?.currency_id || item.currency_id || item.currency],
+    [item.variations?.[0]?.price, item.variations?.[0]?.currency_id || item.currency_id || item.currency],
+    [item.variations?.[0]?.sale_price?.amount, item.variations?.[0]?.sale_price?.currency_id || item.currency_id || item.currency],
+    [item.price_range?.min?.amount ?? item.price_range?.min, item.price_range?.min?.currency_id || item.currency_id || item.currency],
+    [item.price_range?.max?.amount ?? item.price_range?.max, item.price_range?.max?.currency_id || item.currency_id || item.currency],
+    [item.base_price, item.currency_id || item.currency],
+    [item.original_price, item.currency_id || item.currency]
+  ];
+  for (const [p, c] of candidates) {
+    const parsed = typeof p === "number" ? p : parseFloat(String(p || "").replace(/[^0-9.]/g, ""));
+    if (parsed && parsed > 0) {
+      return { price: parsed, currency: String(c || "") };
+    }
+  }
+  return { price: 0, currency: "" };
+}
+function logPriceDebug(item, site, categoryName) {
+  const fields = Object.keys(item).filter((k) => /price|currency|amount|sale|winner|variation/i.test(k));
+  const snippet = JSON.stringify(item, (k, v) => {
+    if (typeof v === "object" && v !== null && !Array.isArray(v)) return v;
+    if (Array.isArray(v)) return `[array:${v.length}]`;
+    return v;
+  }, 0).slice(0, 500);
+  console.warn(`[SourcingScanner] [${site}/${categoryName}] \u4EF7\u683C\u89E3\u6790\u5931\u8D25 itemId=${item.id} title=${String(item.title || "").slice(0, 40)} \u5B57\u6BB5=[${fields.join(",")}] snippet=${snippet}`);
+}
+function normalizeItem(site, item, categoryName, rates) {
+  const { price: priceLocal, currency: extractedCurrency } = extractPriceLocal(item);
+  const currency = extractedCurrency || item.currency_id || item.currency || (site === "MLM" ? "MXN" : site === "MLB" ? "BRL" : site === "MLC" ? "CLP" : "COP");
+  const priceUsd = toUsd(priceLocal, currency, rates);
+  const listingDate = parseDate(item.start_time || item.date_created);
+  if (!listingDate) return null;
+  const daysListed = Math.max(1, Math.floor((Date.now() - listingDate.getTime()) / (24 * 60 * 60 * 1e3)));
+  const sold = typeof item.sold_quantity === "number" ? item.sold_quantity : parseInt(String(item.sold_quantity || "0"), 10) || 0;
+  const rawTitle = String(item.title || item.name || item.family_name || "").trim();
+  const title = rawTitle || categoryName || String(item.category_id || "");
+  if (!rawTitle) {
+    console.warn(`[SourcingScanner] [${site}/${categoryName}] \u5546\u54C1\u7F3A\u5C11\u6807\u9898\uFF0C\u4F7F\u7528\u7C7B\u76EE\u540D\u515C\u5E95 itemId=${item.id || item.item_id}`);
+  }
+  return {
+    site,
+    itemId: String(item.id || item.item_id || ""),
+    title,
+    priceUsd,
+    currency,
+    soldQuantity: sold,
+    availableQuantity: typeof item.available_quantity === "number" ? item.available_quantity : parseInt(String(item.available_quantity || "0"), 10) || 0,
+    categoryId: item.category_id || "",
+    categoryName,
+    permalink: item.permalink || "",
+    thumbnail: item.thumbnail || "",
+    sellerId: item.seller?.id,
+    sellerName: item.seller?.nickname,
+    sellerCountry: item.seller?.country_id || "",
+    listingDate: listingDate.toISOString(),
+    condition: item.condition || "",
+    logisticsType: item.shipping?.logistic_type,
+    daysListed,
+    dailySales: sold / daysListed,
+    rawItem: item
+  };
+}
+async function scanByTrends(opts, ctx) {
+  const sites = opts.sites || DEFAULT_SITES;
+  const trendLimit = opts.trendLimit ?? 20;
+  const maxCategories = Math.min(opts.limitPerCategory ?? 12, 12);
+  const perCategoryItems = 8;
+  const all = [];
+  const errors = [];
+  let totalScanned = 0;
+  for (const site of sites) {
+    ctx.report(`[${site}] \u83B7\u53D6\u5B98\u65B9\u70ED\u641C\u8D8B\u52BF\u8BCD\uFF08\u4E0A\u5347\u54C1\u7C7B\uFF09...`);
+    let trends = [];
+    try {
+      trends = await getTrends(site, trendLimit);
+    } catch (e) {
+      const msg = `[${site}] \u83B7\u53D6\u8D8B\u52BF\u8BCD\u5931\u8D25: ${e?.message || String(e)}`.slice(0, 200);
+      console.warn("[SourcingScanner]", msg);
+      errors.push(msg);
+    }
+    if (!trends.length) {
+      ctx.report(`[${site}] \u65E0\u8D8B\u52BF\u8BCD\uFF08\u53EF\u80FD token \u672A\u6388\u6743 / \u8BE5\u7AD9\u70B9\u4E0D\u652F\u6301\uFF09\uFF0C\u8DF3\u8FC7`);
+      continue;
+    }
+    ctx.report(`[${site}] \u5171 ${trends.length} \u4E2A\u8D8B\u52BF\u8BCD\uFF0C\u6620\u5C04\u5230\u7C7B\u76EE\uFF08\u4E0D\u8C03\u7528 /search\uFF09...`);
+    const catKeywordMap = /* @__PURE__ */ new Map();
+    for (const t of trends) {
+      try {
+        const cats = await predictCategory(site, t.keyword);
+        if (cats.length) {
+          const top = cats[0];
+          const entry = catKeywordMap.get(top.id) || { cat: top, keywords: [] };
+          entry.keywords.push({ kw: t.keyword, rank: t.index });
+          catKeywordMap.set(top.id, entry);
+        }
+      } catch (err) {
+        console.warn(`[SourcingScanner] [${site}] \u8D8B\u52BF\u8BCD\u300C${t.keyword}\u300D\u7C7B\u76EE\u9884\u6D4B\u5931\u8D25: ${err?.message?.slice(0, 100)}`);
+      }
+      await sleep(120);
+    }
+    const chosen = [...catKeywordMap.values()].slice(0, maxCategories);
+    ctx.report(`[${site}] \u8D8B\u52BF\u8BCD\u6620\u5C04\u5230 ${catKeywordMap.size} \u4E2A\u7C7B\u76EE\uFF0C\u53D6\u524D ${chosen.length} \u4E2A\u626B\u63CF\u70ED\u9500\u54C1...`);
+    for (const { cat, keywords } of chosen) {
+      ctx.report(`[${site}] \u8D8B\u52BF\u7C7B\u76EE ${cat.name}\uFF08\u547D\u4E2D\u70ED\u641C\uFF1A${keywords.map((k) => k.kw).slice(0, 3).join("\u3001")}\uFF09`, { totalScanned });
+      try {
+        const highlights = await fetchHighlightsByCategory(site, cat.id);
+        const productIds = highlights.filter((h) => h.type === "PRODUCT" || h.type === "ITEM").slice(0, perCategoryItems).map((h) => h.id);
+        totalScanned += productIds.length;
+        for (const pid of productIds) {
+          try {
+            const productDetail = await fetchProductDetails(pid, ctx.scanToken);
+            const productItems = await fetchProductItems(pid, 5, ctx.scanToken);
+            for (const it of productItems) {
+              if (!it.id && it.item_id) it.id = it.item_id;
+              if (!it.title && it.name) it.title = it.name;
+              if (!it.title && it.family_name) it.title = it.family_name;
+              if (!it.title && productDetail?.name) it.title = productDetail.name;
+              if (!it.thumbnail && productDetail?.pictures?.[0]) {
+                it.thumbnail = productDetail.pictures[0].url || productDetail.pictures[0].secure_url;
+              }
+              if (!it.pictures && productDetail?.pictures) it.pictures = productDetail.pictures;
+              if (!it.start_time && !it.date_created) {
+                it.start_time = new Date(Date.now() - 7 * 24 * 60 * 60 * 1e3).toISOString();
+              }
+              if (!it.category_id) it.category_id = cat.id;
+              const c = normalizeItem(site, it, cat.name, ctx.rates);
+              if (!c || c.priceUsd <= 0) continue;
+              const effSold = c.soldQuantity > 0 ? c.soldQuantity : 1;
+              all.push({
+                ...c,
+                soldQuantity: effSold,
+                condition: c.condition || "new",
+                sourceTag: "trend",
+                trendRank: keywords[0].rank,
+                trendKeyword: keywords.map((k) => k.kw).join(" / ")
+              });
+            }
+          } catch {
+          }
+          await sleep(300);
+        }
+      } catch (err) {
+        const msg = `[${site}/trend-cat:${cat.id}] ${err?.message || String(err)}`.slice(0, 200);
+        console.warn("[SourcingScanner]", msg);
+        errors.push(msg);
+      }
+      await sleep(400);
+    }
+  }
+  return { candidates: all, totalScanned, errors };
+}
+async function scanByBestSellers(opts, ctx) {
+  const sites = opts.sites || DEFAULT_SITES;
+  const limitPerCategory = Math.min(opts.limitPerCategory ?? 20, 20);
+  const all = [];
+  const errors = [];
+  let totalScanned = 0;
+  for (const site of sites) {
+    const categories = opts.categories?.length ? opts.categories : DEFAULT_CATEGORIES[site] || [];
+    ctx.report(`[${site}] \u5F00\u59CB\u626B\u63CF\u7C7B\u76EE Best Sellers\uFF08\u70ED\u9500\u699C\uFF09\uFF0C\u5171 ${categories.length} \u4E2A\u5206\u7C7B...`, { totalScanned });
+    for (let idx = 0; idx < categories.length; idx++) {
+      const cat = categories[idx];
+      ctx.report(`[${site}] \u70ED\u9500\u699C ${idx + 1}/${categories.length}: ${cat.name}`, { totalScanned });
+      try {
+        const highlights = await fetchHighlightsByCategory(site, cat.id);
+        const productIds = highlights.filter((h) => h.type === "PRODUCT" || h.type === "ITEM").slice(0, limitPerCategory).map((h) => h.id);
+        totalScanned += productIds.length;
+        for (const pid of productIds) {
+          try {
+            const productDetail = await fetchProductDetails(pid, ctx.scanToken);
+            const productItems = await fetchProductItems(pid, 5, ctx.scanToken);
+            for (const it of productItems) {
+              if (!it.id && it.item_id) it.id = it.item_id;
+              if (!it.title && it.name) it.title = it.name;
+              if (!it.title && it.family_name) it.title = it.family_name;
+              if (!it.title && productDetail?.name) it.title = productDetail.name;
+              if (!it.thumbnail && productDetail?.pictures?.[0]) {
+                it.thumbnail = productDetail.pictures[0].url || productDetail.pictures[0].secure_url;
+              }
+              if (!it.pictures && productDetail?.pictures) it.pictures = productDetail.pictures;
+              if (!it.start_time && !it.date_created) {
+                it.start_time = new Date(Date.now() - 7 * 24 * 60 * 60 * 1e3).toISOString();
+              }
+              if (!it.category_id) it.category_id = cat.id;
+              const enriched = it;
+              const c = normalizeItem(site, { ...enriched, _fromHighlights: true }, cat.name, ctx.rates);
+              if (!c) continue;
+              if (c.priceUsd <= 0) continue;
+              const effSold = c.soldQuantity > 0 ? c.soldQuantity : 1;
+              all.push({
+                ...c,
+                soldQuantity: effSold,
+                condition: c.condition || "new",
+                sourceTag: "bestseller",
+                dailySales: effSold / Math.max(1, c.daysListed)
+              });
+            }
+          } catch {
+          }
+          await sleep(300);
+        }
+      } catch (err) {
+        const msg = `[${site}/${cat.id}] ${err?.message || String(err)}`.slice(0, 200);
+        console.warn("[SourcingScanner]", msg);
+        errors.push(msg);
+      }
+      await sleep(500);
+    }
+  }
+  return { candidates: all, totalScanned, errors };
+}
+async function scanNewRisingProducts(opts = {}) {
+  const sites = opts.sites || DEFAULT_SITES;
+  const maxAgeDays = opts.maxAgeDays ?? 30;
+  const minSold = opts.minSold ?? 1;
+  const minPriceUsd = process.env.SCAN_MIN_PRICE_USD ? Number(process.env.SCAN_MIN_PRICE_USD) : opts.minPriceUsd ?? 2;
+  const maxPriceUsd = process.env.SCAN_MAX_PRICE_USD ? Number(process.env.SCAN_MAX_PRICE_USD) : opts.maxPriceUsd ?? 200;
+  const limitPerCategory = opts.limitPerCategory ?? 50;
+  const minDailySales = opts.minDailySales ?? 0.5;
+  const onProgress = opts.onProgress;
+  const scanTimeoutMs = opts.scanTimeoutMs ?? 30 * 60 * 1e3;
+  const report = (msg, extra) => {
+    console.log(`[SourcingScanner] ${msg}`);
+    onProgress?.({ message: msg, ...extra });
+  };
+  const doScan = async () => {
+    report("\u6B63\u5728\u83B7\u53D6\u6C47\u7387...");
+    const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1e3);
+    const rates = {};
+    const currencies = ["MXN", "BRL", "CLP", "COP", "USD"];
+    await Promise.all(currencies.map(async (c) => {
+      rates[c] = await getExchangeRate(c);
+    }));
+    report("\u6B63\u5728\u6821\u9A8C/\u5237\u65B0\u5E97\u94FA Token...");
+    const scanAuth = await resolveScanToken();
+    const scanToken = scanAuth?.token;
+    report(scanToken ? `Token \u5C31\u7EEA\uFF08\u5E97\u94FA\uFF1A${scanAuth?.storeNick}\uFF09` : "Token \u5C31\u7EEA\uFF08\u56DE\u9000\u5168\u5C40 token\uFF09");
+    const all = [];
+    const errors = [];
+    let totalScanned = 0;
+    const mode = opts.mode || "recent";
+    const ctx = { rates, scanToken, onProgress, report };
+    async function scanRecent() {
+      const proxyOn = isProxyEnabled();
+      for (const site of sites) {
+        const categories = opts.categories?.length ? opts.categories : DEFAULT_CATEGORIES[site] || [];
+        report(`\u5F00\u59CB\u626B\u63CF\u7AD9\u70B9 ${site}\uFF0C\u5171 ${categories.length} \u4E2A\u5206\u7C7B...`, { totalScanned });
+        for (let idx = 0; idx < categories.length; idx++) {
+          const cat = categories[idx];
+          report(`[${site}] \u626B\u63CF\u5206\u7C7B ${idx + 1}/${categories.length}: ${cat.name}`, { totalScanned });
+          try {
+            let results = [];
+            let fromHighlights = false;
+            if (proxyOn) {
+              results = await searchProductsByCategory(site, cat.id, limitPerCategory, 0, scanToken);
+            }
+            if (!results.length) {
+              const highlights = await fetchHighlightsByCategory(site, cat.id);
+              const productIds = highlights.filter((h) => h.type === "PRODUCT" || h.type === "ITEM").slice(0, Math.min(limitPerCategory, 15)).map((h) => h.id);
+              for (const pid of productIds) {
+                try {
+                  const detail = await fetchProductDetails(pid, scanToken);
+                  const items = await fetchProductItems(pid, 5, scanToken);
+                  for (const it of items) {
+                    if (!it.id && it.item_id) it.id = it.item_id;
+                    if (!it.title && it.name) it.title = it.name;
+                    if (!it.title && detail?.name) it.title = detail.name;
+                    if (!it.thumbnail && detail?.pictures?.[0]) {
+                      it.thumbnail = detail.pictures[0].url || detail.pictures[0].secure_url;
+                    }
+                    if (!it.category_id) it.category_id = cat.id;
+                    if (!it.start_time && !it.date_created && detail?.date_created) {
+                      it.start_time = detail.date_created;
+                    }
+                    results.push({ ...it, _fromHighlights: true });
+                  }
+                } catch {
+                }
+                await sleep(150);
+              }
+              fromHighlights = true;
+            }
+            totalScanned += results.length;
+            report(`[${site}/${cat.name}] \u83B7\u53D6 ${results.length} \u4E2A\u7ED3\u679C${fromHighlights ? "\uFF08highlights \u515C\u5E95\uFF0C\u65E0\u4EE3\u7406\uFF09" : ""}`, { totalScanned });
+            const reasons = {};
+            for (const item of results) {
+              const c = normalizeItem(site, item, cat.name, rates);
+              if (!c) {
+                reasons["normalize_null"] = (reasons["normalize_null"] || 0) + 1;
+                continue;
+              }
+              if (c.priceUsd <= 0) {
+                reasons["price_zero"] = (reasons["price_zero"] || 0) + 1;
+                continue;
+              }
+              if (c.priceUsd < minPriceUsd || c.priceUsd > maxPriceUsd) {
+                reasons["price_range"] = (reasons["price_range"] || 0) + 1;
+                continue;
+              }
+              if (c.condition && c.condition !== "new") {
+                reasons["used"] = (reasons["used"] || 0) + 1;
+                continue;
+              }
+              if (!item._fromHighlights) {
+                const effSold = c.soldQuantity;
+                if (new Date(c.listingDate) < cutoff) {
+                  reasons["too_old"] = (reasons["too_old"] || 0) + 1;
+                  continue;
+                }
+                if (effSold < minSold) {
+                  reasons["sold_low"] = (reasons["sold_low"] || 0) + 1;
+                  continue;
+                }
+                if (effSold / Math.max(1, c.daysListed) < minDailySales) {
+                  reasons["daily_low"] = (reasons["daily_low"] || 0) + 1;
+                  continue;
+                }
+                all.push({ ...c, soldQuantity: effSold, dailySales: effSold / Math.max(1, c.daysListed), sourceTag: "recent" });
+              } else {
+                all.push({ ...c, soldQuantity: 1, dailySales: 1 / Math.max(1, c.daysListed), sourceTag: "recent" });
+              }
+            }
+            if (Object.keys(reasons).length) {
+              console.log(`[SourcingScanner] [${site}/${cat.name}] \u8FC7\u6EE4\u539F\u56E0\u7EDF\u8BA1:`, reasons);
+            }
+          } catch (err) {
+            const msg = `[${site}/${cat.id}] ${err?.message || String(err)}`.slice(0, 200);
+            console.warn("[SourcingScanner]", msg);
+            errors.push(msg);
+          }
+          await sleep(350);
+        }
+      }
+    }
+    const runModes = mode === "all" ? ["recent", "trend", "bestseller"] : [mode];
+    for (const m of runModes) {
+      if (m === "recent") await scanRecent();
+      else if (m === "trend") {
+        const r = await scanByTrends(opts, ctx);
+        all.push(...r.candidates);
+        totalScanned += r.totalScanned;
+        errors.push(...r.errors);
+      } else if (m === "bestseller") {
+        const r = await scanByBestSellers(opts, ctx);
+        all.push(...r.candidates);
+        totalScanned += r.totalScanned;
+        errors.push(...r.errors);
+      }
+    }
+    const seen = /* @__PURE__ */ new Set();
+    const priority = { trend: 0, bestseller: 1, recent: 2 };
+    const sorted = [...all].sort((a, b) => priority[a.sourceTag || "recent"] - priority[b.sourceTag || "recent"]);
+    const unique = sorted.filter((c) => {
+      if (seen.has(c.itemId)) return false;
+      seen.add(c.itemId);
+      return true;
+    });
+    unique.sort((a, b) => b.dailySales - a.dailySales);
+    report(`\u626B\u63CF\u5B8C\u6210\uFF1A${totalScanned} \u4E2A\u5546\u54C1\uFF0C${unique.length} \u4E2A\u901A\u8FC7\u8FC7\u6EE4`, {
+      totalScanned,
+      totalMatched: unique.length
+    });
+    return { candidates: unique, totalScanned, errors, scanToken: scanToken || void 0 };
+  };
+  return Promise.race([
+    doScan(),
+    new Promise(
+      (_, reject) => setTimeout(() => reject(new Error(`\u626B\u63CF\u8D85\u65F6\uFF08>${scanTimeoutMs / 1e3}s\uFF09\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u6216 ML \u63A5\u53E3\u53EF\u8FBE\u6027`)), scanTimeoutMs)
+    )
+  ]);
+}
+async function enrichCandidate(item, accessTokenOverride) {
+  let product = null;
+  let items = [];
+  try {
+    const catalogId = item.rawItem?.catalog_product_id || item.rawItem?.catalog_product_id_suspended;
+    if (catalogId) {
+      product = await fetchProductDetails(catalogId, accessTokenOverride);
+      items = await fetchProductItems(catalogId, 5, accessTokenOverride);
+    } else {
+      items = [item.rawItem];
+    }
+  } catch (err) {
+    console.warn(`[SourcingScanner] enrich ${item.itemId} \u5931\u8D25:`, err?.message?.slice(0, 100));
+  }
+  const source = product || items[0] || item.rawItem || {};
+  const attrs = source.attributes || [];
+  const getAttr = (id) => attrs.find((a) => String(a?.id || "").toUpperCase() === id)?.value_name;
+  const parseNum = (v) => {
+    const n = parseFloat(String(v).replace(/[^\d.]/g, ""));
+    return isNaN(n) ? void 0 : n;
+  };
+  const weightG = parseNum(getAttr("WEIGHT") || getAttr("PACKAGE_WEIGHT"));
+  const weightKg = weightG ? weightG / 1e3 : void 0;
+  return {
+    ...item,
+    weightKg,
+    lengthCm: parseNum(getAttr("LENGTH") || getAttr("DEPTH") || getAttr("PACKAGE_LENGTH")),
+    widthCm: parseNum(getAttr("WIDTH") || getAttr("PACKAGE_WIDTH")),
+    heightCm: parseNum(getAttr("HEIGHT") || getAttr("PACKAGE_HEIGHT")),
+    brand: getAttr("BRAND"),
+    model: getAttr("MODEL"),
+    pictures: (source.pictures || item.rawItem?.pictures || []).map((p) => p.url || p.secure_url).filter(Boolean)
+  };
+}
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+export {
+  CATEGORY_ZH_BY_ID,
+  enrichCandidate,
+  scanNewRisingProducts
+};
