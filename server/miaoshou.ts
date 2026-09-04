@@ -128,6 +128,40 @@ export async function searchMercadoCollectBox(opts: {
   );
 }
 
+/**
+ * 拉取所有页（妙手服务端限制 pageSize ≤ 500，自动分页循环）
+ * 返回：detailList 合并 + totalRow（妙手返回的总条数）
+ */
+export async function searchMercadoCollectBoxAll(opts: {
+  status?: BoxStatusFilter;
+  filterCidSite?: string;
+  sourceItemIdKeyword?: string;
+  pageSize?: number;
+  maxPages?: number;
+}): Promise<MiaoshouBoxListResult> {
+  const pageSize = Math.min(opts.pageSize ?? 500, 500);
+  const maxPages = opts.maxPages ?? 50; // 上限 50 页 = 25000 条
+  let all: MiaoshouBoxItem[] = [];
+  let totalRow: number | undefined = undefined;
+
+  for (let page = 1; page <= maxPages; page++) {
+    const r = await searchMercadoCollectBox({
+      pageNo: page,
+      pageSize,
+      status: opts.status,
+      filterCidSite: opts.filterCidSite,
+      sourceItemIdKeyword: opts.sourceItemIdKeyword,
+    });
+    const list = r.detailList || [];
+    if (page === 1) totalRow = r.totalRow ?? r.total;
+    all = all.concat(list);
+    if (list.length < pageSize) break; // 末页
+    if (totalRow !== undefined && all.length >= totalRow) break; // 全部拉完
+  }
+  // 妙手接口不一定返回 totalRow；若未返回则以实际拉取数为准
+  return { detailList: all, totalRow: totalRow ?? all.length, total: all.length };
+}
+
 // ============ 详情接口============
 
 export interface MiaoshouBoxDetail {
@@ -193,7 +227,7 @@ export function getCachedBoxList() {
 }
 
 export async function fetchAndCacheBoxList(): Promise<MiaoshouBoxItem[]> {
-  const result = await searchMercadoCollectBox({ pageSize: 500, status: 'notPublished', filterCidSite: 'CBT' });
+  const result = await searchMercadoCollectBoxAll({ pageSize: 500, status: 'notPublished', filterCidSite: 'CBT' });
   _cachedBoxList = result.detailList || [];
   _cacheTs = Date.now();
   return _cachedBoxList;

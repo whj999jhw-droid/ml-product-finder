@@ -17,6 +17,7 @@ import {
   Input,
   Loading,
   MessagePlugin,
+  Pagination,
   Space,
   Table,
   Tag,
@@ -118,6 +119,10 @@ export function MiaoshouBoxPage() {
   const [total, setTotal] = useState(0);
   const [refreshKey, setRefreshKey] = useState(0);
 
+  // 分页
+  const [current, setCurrent] = useState(1);
+  const PAGE_SIZE = 50;
+
   // 搜索过滤
   const [searchKw, setSearchKw] = useState('');
   const [filteredItems, setFilteredItems] = useState<MiaoshouBoxItem[]>([]);
@@ -151,11 +156,13 @@ export function MiaoshouBoxPage() {
     try {
       const params = new URLSearchParams({ status: 'notPublished', filterCidSite: 'CBT' });
       if (force) params.set('refresh', '1');
+      params.set('pageSize', '2000'); // 一次拉完，后端分页
       const resp = await fetch(`/api/ml/miaoshou/box?${params}`);
       const json = await resp.json();
       if (!json.success) throw new Error(json.message || '加载失败');
       setItems(json.items || []);
-      setTotal(json.total || 0);
+      setTotal(json.total || json.items?.length || 0);
+      setCurrent(1); // 刷新后回第1页
     } catch (e: any) {
       MessagePlugin.error(e.message || '加载采集箱失败');
     } finally {
@@ -179,7 +186,7 @@ export function MiaoshouBoxPage() {
     loadStores();
   }, [loadBox, loadStores]);
 
-  // 搜索过滤
+  // 搜索过滤（分页前过滤全部）
   useEffect(() => {
     if (!searchKw.trim()) {
       setFilteredItems(items);
@@ -194,7 +201,11 @@ export function MiaoshouBoxPage() {
         )
       );
     }
+    setCurrent(1); // 搜索后回第1页
   }, [searchKw, items]);
+
+  // 当前页数据
+  const pagedItems = filteredItems.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE);
 
   // ============ 打开商品详情 ============
 
@@ -377,6 +388,7 @@ export function MiaoshouBoxPage() {
             src={row.thumbnail}
             style={{ width: 60, height: 60, objectFit: 'cover', borderRadius: 4 }}
             fit="cover"
+            referrerPolicy="no-referrer"
           />
         );
       },
@@ -510,7 +522,7 @@ export function MiaoshouBoxPage() {
           clearable
         />
         <span className="text-sm text-gray-500 ml-auto">
-          {filteredItems.length} 件商品
+          共 {total} 件（搜索命中 {filteredItems.length} 件）
           {selected.size > 0 && (
             <span className="ml-2 text-blue-600 font-medium">已选 {selected.size} 件</span>
           )}
@@ -525,9 +537,9 @@ export function MiaoshouBoxPage() {
       </div>
 
       {/* 表格 */}
-      <div className="flex-1 overflow-auto px-5 pb-5">
+      <div className="flex-1 overflow-auto px-5 pb-3">
         <Table
-          data={filteredItems}
+          data={pagedItems}
           columns={columns}
           rowKey="collectBoxDetailId"
           loading={loading}
@@ -537,6 +549,19 @@ export function MiaoshouBoxPage() {
           selectedRowKeys={[...selected]}
           onSelectChange={(value) => setSelected(new Set(value as string[]))}
         />
+        {/* 分页 */}
+        {filteredItems.length > 0 && (
+          <div className="flex justify-end mt-3">
+            <Pagination
+              current={current}
+              pageSize={PAGE_SIZE}
+              total={filteredItems.length}
+              showJumper
+              showPageSize={false}
+              onChange={({ current: c }) => setCurrent(c)}
+            />
+          </div>
+        )}
       </div>
 
       {/* 商品详情抽屉 */}
@@ -558,6 +583,7 @@ export function MiaoshouBoxPage() {
                 src={detailData.sourceImgUrls?.[0] || detailItem?.thumbnail || ''}
                 style={{ width: 120, height: 120, objectFit: 'cover', borderRadius: 8 }}
                 fit="cover"
+                referrerPolicy="no-referrer"
               />
               <div className="flex-1">
                 <div className="font-semibold text-base">{detailData.title}</div>
@@ -580,6 +606,7 @@ export function MiaoshouBoxPage() {
                       src={url}
                       style={{ width: 80, height: 80, objectFit: 'cover', borderRadius: 4 }}
                       fit="cover"
+                      referrerPolicy="no-referrer"
                     />
                   ))}
                 </div>

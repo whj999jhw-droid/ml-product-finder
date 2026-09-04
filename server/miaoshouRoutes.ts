@@ -5,11 +5,10 @@
 
 import { Router } from 'express';
 import {
-  searchMercadoCollectBox,
+  searchMercadoCollectBoxAll,
   getMercadoCollectBoxDetail,
   getCachedBoxList,
   fetchAndCacheBoxList,
-  clearCache,
   MiaoshouBoxItem,
 } from './miaoshou.js';
 import { createListing, ListingDraft } from './listing.js';
@@ -22,23 +21,24 @@ export const miaoshouRouter = Router();
 miaoshouRouter.get('/box', async (req, res) => {
   try {
     const refresh = req.query.refresh === '1';
-    const pageNo = Number(req.query.pageNo || 1);
-    const pageSize = Number(req.query.pageSize || 50);
     const status = (req.query.status as any) || 'notPublished';
 
     // 默认走 5 分钟缓存；传 ?refresh=1 时强制拉取
     let items: MiaoshouBoxItem[] = [];
-    if (!refresh && pageNo === 1 && getCachedBoxList()) {
+    let total = 0;
+    if (!refresh && getCachedBoxList()) {
       items = getCachedBoxList()!;
+      total = items.length;
     } else {
-      const result = await searchMercadoCollectBox({ pageNo, pageSize, status, filterCidSite: 'CBT' });
+      const result = await searchMercadoCollectBoxAll({ status, filterCidSite: 'CBT', pageSize: 500 });
       items = result.detailList || [];
-      if (pageNo === 1) fetchAndCacheBoxList().catch(() => {});
+      total = result.totalRow ?? result.total ?? items.length;
+      if (fetchAndCacheBoxList) fetchAndCacheBoxList().catch(() => {});
     }
 
     res.json({
       success: true,
-      total: items.length,
+      total,
       items,
     });
   } catch (e: any) {
