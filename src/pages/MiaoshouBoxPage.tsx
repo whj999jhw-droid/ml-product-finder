@@ -615,6 +615,51 @@ export function MiaoshouBoxPage() {
               </div>
             )}
 
+            {/* SKU 明细：尺寸/重量/库存（妙手编辑过的数据，发布时原样传美客多 PACKAGE_* 属性） */}
+            {(() => {
+              const skuEntries = Object.entries(detailData.skuMap || {}).filter(
+                ([, v]: any) => !v.isDelete
+              );
+              if (skuEntries.length === 0) return null;
+              return (
+                <div>
+                  <div className="text-sm font-medium mb-2">
+                    SKU 明细（{skuEntries.length} 个，发布时尺寸/重量写入包裹属性）
+                  </div>
+                  <div className="space-y-2">
+                    {skuEntries.map(([k, v]: any, i: number) => (
+                      <div key={k} className="p-2 bg-gray-50 rounded text-xs space-y-1">
+                        <div className="flex items-center gap-2">
+                          {v.imgUrls?.[0] && (
+                            <Image
+                              src={v.imgUrls[0]}
+                              style={{ width: 36, height: 36, objectFit: 'cover', borderRadius: 3 }}
+                              fit="cover"
+                              referrerPolicy="no-referrer"
+                            />
+                          )}
+                          <span className="font-medium">{v.itemNum || `SKU ${i + 1}`}</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-gray-600">
+                          <span>库存：{v.stock ?? '-'}</span>
+                          <span>货源价：{v.originPrice != null ? `¥${v.originPrice}` : '-'}</span>
+                          <span>
+                            尺寸：{[v.length, v.width, v.height].filter(Boolean).join('×') || '-'}
+                            {v.lengthWidthHeightUnit ? ` ${v.lengthWidthHeightUnit}` : ''}
+                          </span>
+                          <span>
+                            重量：{v.weight || '-'}
+                            {v.weightUnit ? ` ${v.weightUnit}` : ''}
+                          </span>
+                          {v.upc && <span>UPC：{v.upc}</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+
             {detailData.sourceItemUrl && (
               <div>
                 <div className="text-sm font-medium mb-1">货源链接</div>

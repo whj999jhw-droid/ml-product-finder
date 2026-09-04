@@ -181,10 +181,32 @@ export interface MiaoshouBoxDetail {
   source: string;            // "1688" 等
   sourceItemId: string;
   sourceItemUrl: string;
-  skuMap?: Record<string, any>; // 规格映射
+  skuMap?: Record<
+    string,
+    {
+      stock: number | string;
+      itemNum?: string;
+      upc?: string;
+      length?: string;
+      width?: string;
+      height?: string;
+      lengthWidthHeightUnit?: string;
+      weight?: string;
+      weightUnit?: string;
+      isDelete?: boolean;
+      imgUrls?: string[];
+      originPrice?: number;
+      siteAndListingTypeInfoMap?: Record<
+        string,
+        { site: string; listingType: string; siteDisplayName?: string }
+      >;
+      [k: string]: any;
+    }
+  >; // 规格映射（含尺寸/重量/UPC/站点listing类型）
   attributes?: Array<{ name: string; valueType: string; values: string[] }>;
-  siteAndListingTypeList?: string[];
-  siteAndTitleList?: string[];
+  siteAndListingTypeList?: Array<{ site: string; listingType: string }>;
+  siteAndTitleList?: Array<{ site: string; title: string }>;
+  saleAttributes?: Array<{ name: string; values: Array<{ skuKey: string; name: string }> }>;
   pricingMode: string;
   siteAndPriceMap?: Record<string, string>;
   collectBoxDetailShop: {
