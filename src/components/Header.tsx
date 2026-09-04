@@ -23,6 +23,7 @@ interface HeaderProps {
   isProductAdminPage?: boolean;
   isCandidatesPage?: boolean;
   isConfigPage?: boolean;
+  isMiaoshouBoxPage?: boolean;
   sidebarOpen: boolean;
   theme: Theme;
   currentSession: Session | undefined;
@@ -45,6 +46,7 @@ export function Header({
   isProductAdminPage,
   isCandidatesPage,
   isConfigPage,
+  isMiaoshouBoxPage,
   sidebarOpen,
   theme,
   currentSession,

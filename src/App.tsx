@@ -22,6 +22,7 @@ import { TrendsPage } from './pages/TrendsPage';
 import { NotificationSettingsPage } from './pages/NotificationSettingsPage';
 import { ProductManagerPage } from './pages/ProductManagerPage';
 import { CandidatesPage } from './pages/CandidatesPage';
+import { MiaoshouBoxPage } from './pages/MiaoshouBoxPage';
 import { ConfigPage } from './pages/ConfigPage';
 
 function App() {
@@ -40,6 +41,7 @@ function App() {
       <Route path="/product-admin" element={<AppContent />} />
       <Route path="/candidates" element={<AppContent />} />
       <Route path="/config" element={<AppContent />} />
+      <Route path="/miaoshou-box" element={<AppContent />} />
     </Routes>
   );
 }
@@ -59,6 +61,7 @@ function AppContent() {
   const isProductAdminPage = location.pathname === '/product-admin';
   const isCandidatesPage = location.pathname === '/candidates';
   const isConfigPage = location.pathname === '/config';
+  const isMiaoshouBoxPage = location.pathname === '/miaoshou-box';
 
   // Hooks
   const { theme, toggleTheme } = useTheme();
@@ -191,6 +194,10 @@ function AppContent() {
     navigate('/config');
   }, [navigate]);
 
+  const handleOpenMiaoshouBox = useCallback(() => {
+    navigate('/miaoshou-box');
+  }, [navigate]);
+
   // 移动端检测：≤767px 视为手机，侧边栏切换为抽屉模式
   const [isMobile, setIsMobile] = useState<boolean>(
     typeof window !== 'undefined' &&
@@ -242,6 +249,7 @@ function AppContent() {
         isProductAdminPage={isProductAdminPage}
         isCandidatesPage={isCandidatesPage}
         isConfigPage={isConfigPage}
+        isMiaoshouBoxPage={isMiaoshouBoxPage}
         sidebarOpen={sidebarOpen}
         agents={agents}
         getAgent={getAgent}
@@ -256,6 +264,7 @@ function AppContent() {
         onOpenProductAdmin={handleOpenProductAdmin}
         onOpenCandidates={handleOpenCandidates}
         onOpenConfig={handleOpenConfig}
+        onOpenMiaoshouBox={handleOpenMiaoshouBox}
       />
 
       {/* 主内容区 */}
@@ -276,6 +285,7 @@ function AppContent() {
           isProductAdminPage={isProductAdminPage}
           isCandidatesPage={isCandidatesPage}
           isConfigPage={isConfigPage}
+          isMiaoshouBoxPage={isMiaoshouBoxPage}
           sidebarOpen={sidebarOpen}
           theme={theme}
           currentSession={currentSession}
@@ -312,6 +322,8 @@ function AppContent() {
           <ProductManagerPage />
         ) : isCandidatesPage ? (
           <CandidatesPage />
+        ) : isMiaoshouBoxPage ? (
+          <MiaoshouBoxPage />
         ) : isConfigPage ? (
           <ConfigPage />
         ) : (

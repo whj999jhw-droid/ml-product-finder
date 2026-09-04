@@ -33,6 +33,7 @@ import { get1688ProductDetail } from './ali1688Skill.js';
 import { configure1688AK, check1688Config } from './ali1688Skill.js';
 import profitLicenseRouter from './profitLicense.js';
 import shippingRouter from './shippingRules.js';
+import { miaoshouRouter } from './miaoshouRoutes.js';
 import {
   isYouTubeConfigured,
   saveYouTubeClient,
@@ -3703,6 +3704,9 @@ app.get('/api/ml/debug/test', async (req, res) => {
 // 必须挂在下方静态文件服务的 app.get('*') 兜底之前，否则 GET 类接口（/extract /daily /news）会被 SPA 页面截走
 app.use('/api/profit/license-server', profitLicenseRouter);
 app.use('/api/profit/shipping', shippingRouter);
+
+// 妙手美客多采集箱（读取/预览/一键发布）
+app.use('/api/ml/miaoshou', miaoshouRouter);
 
 // ============= 静态文件服务 (Electron 模式) =============
 

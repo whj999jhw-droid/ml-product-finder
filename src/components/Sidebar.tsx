@@ -1,5 +1,5 @@
 import { Button, Tooltip } from 'tdesign-react';
-import { AddIcon, DeleteIcon, NotificationIcon, ToolsIcon } from 'tdesign-icons-react';
+import { AddIcon, DeleteIcon, InboxIcon, NotificationIcon, ToolsIcon } from 'tdesign-icons-react';
 import { confirmDialog } from '../utils/dialog';
 import { Bot, ShoppingBag, Flame } from 'lucide-react';
 import { APP_CONFIG } from '../config';
@@ -20,6 +20,7 @@ interface SidebarProps {
   isProductAdminPage?: boolean;
   isCandidatesPage?: boolean;
   isConfigPage?: boolean;
+  isMiaoshouBoxPage?: boolean;
   isMobile?: boolean;
   sidebarOpen: boolean;
   agents: Agent[];
@@ -35,6 +36,7 @@ interface SidebarProps {
   onOpenProductAdmin?: () => void;
   onOpenCandidates?: () => void;
   onOpenConfig?: () => void;
+  onOpenMiaoshouBox?: () => void;
 }
 
 export function Sidebar({
@@ -51,6 +53,7 @@ export function Sidebar({
   isProductAdminPage,
   isCandidatesPage,
   isConfigPage,
+  isMiaoshouBoxPage,
   isMobile,
   sidebarOpen,
   agents,
@@ -66,6 +69,7 @@ export function Sidebar({
   onOpenProductAdmin,
   onOpenCandidates,
   onOpenConfig,
+  onOpenMiaoshouBox,
 }: SidebarProps) {
   return (
     <aside 
@@ -149,7 +153,16 @@ export function Sidebar({
         >
           订单管理
         </Button>
-        <Button 
+        <Button
+          icon={<InboxIcon size={16} />}
+          onClick={onOpenMiaoshouBox}
+          block
+          variant={isMiaoshouBoxPage ? 'outline' : 'text'}
+          theme={isMiaoshouBoxPage ? 'primary' : 'default'}
+        >
+          妙手采集箱
+        </Button>
+        <Button
           icon={<ToolsIcon size={16} />}
           onClick={onOpenConfig}
           block
