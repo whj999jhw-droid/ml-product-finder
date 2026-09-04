@@ -266,11 +266,9 @@ export function MiaoshouBoxPage() {
       .filter((s) => ['MLM', 'MLB', 'MLC', 'MCO'].includes(s));
 
     stores.forEach((store) => {
-      const storeSite = store.site; // MLM/MLB/MLC/MCO
+      // CBT 店铺可发任意站点：默认勾商品妙手配置的站点；未配置则全选 4 站
       const initSites =
-        availableSites.length > 0
-          ? availableSites.filter((s) => s === storeSite)
-          : [storeSite];
+        availableSites.length > 0 ? [...availableSites] : SITE_OPTIONS.map((o) => o.value);
       newTargets[store.id] = { storeId: store.id, sites: initSites };
     });
     return newTargets;
@@ -305,18 +303,10 @@ export function MiaoshouBoxPage() {
 
   // 全选 / 取消某店铺所有站点
   const toggleAllSitesForStore = (storeId: string) => {
-    const store = stores.find((s) => s.id === storeId);
-    if (!store) return;
+    const allSites = SITE_OPTIONS.map((o) => o.value);
     const current = targets[storeId]?.sites || [];
-    const all = ['MLM', 'MLB', 'MLC', 'MCO'].filter(
-      (s) => s === store.site || !['MLM', 'MLB', 'MLC', 'MCO'].includes(store.site)
-    );
-    const storeSites = ['MLM', 'MLB', 'MLC', 'MCO'];
-    if (current.length === storeSites.length) {
-      setTargets((prev) => ({ ...prev, [storeId]: { storeId, sites: [] } }));
-    } else {
-      setTargets((prev) => ({ ...prev, [storeId]: { storeId, sites: storeSites } }));
-    }
+    const next = current.length === allSites.length ? [] : allSites;
+    setTargets((prev) => ({ ...prev, [storeId]: { storeId, sites: next } }));
   };
 
   // ============ 执行发布 ============
@@ -700,9 +690,9 @@ export function MiaoshouBoxPage() {
             ) : (
               <div className="space-y-3">
                 {stores.map((store) => {
-                  const storeSites = ['MLM', 'MLB', 'MLC', 'MCO'];
-                  const checked = targets[store.id]?.sites?.length === storeSites.length;
-                  const someChecked = (targets[store.id]?.sites?.length || 0) > 0;
+                  const currentSites = targets[store.id]?.sites || [];
+                  const checked = currentSites.length === SITE_OPTIONS.length;
+                  const someChecked = currentSites.length > 0;
                   return (
                     <Card key={store.id} size="small" className="border">
                       <div className="flex items-center gap-3 mb-2">
@@ -714,23 +704,17 @@ export function MiaoshouBoxPage() {
                         <span className="font-medium text-sm">
                           {store.nickname}
                         </span>
-                        <Tag size="small">{SITE_LABEL[store.site] || store.site}</Tag>
+                        <Tag size="small">CBT</Tag>
                       </div>
-                      <div className="flex gap-2 flex-wrap ml-7">
-                        {storeSites.map((site) => {
-                          const active = targets[store.id]?.sites?.includes(site);
-                          return (
-                            <Tag
-                              key={site}
-                              theme={active ? 'primary' : 'default'}
-                              variant={active ? 'dark' : 'outline'}
-                              className="cursor-pointer"
-                              onClick={() => toggleSite(store.id, site)}
-                            >
-                              {SITE_LABEL[site] || site}
-                            </Tag>
-                          );
-                        })}
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 ml-7">
+                        {SITE_OPTIONS.map((opt) => (
+                          <Checkbox
+                            key={opt.value}
+                            checked={currentSites.includes(opt.value)}
+                            onChange={() => toggleSite(store.id, opt.value)}
+                            label={opt.label}
+                          />
+                        ))}
                       </div>
                     </Card>
                   );
