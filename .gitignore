@@ -37,3 +37,13 @@ vite.config.ts.timestamp-*.mjs
 # --- 本地自签证书（每台机器自己生成，不共享）---
 certs/
 
+# --- macOS 系统垃圾文件 ---
+.DS_Store
+**/.DS_Store
+
+# --- 历史备份碎片（服务器人工改代码时留下的 .bak，不入库）---
+*.bak
+*.bak.*
+*.bak-20*
+*.bak.*
+

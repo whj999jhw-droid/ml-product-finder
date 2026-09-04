@@ -448,6 +448,16 @@ CREATE TABLE IF NOT EXISTS app_config (
           val TEXT
         );
       `);
+      // 兼容旧数据库：licenses 表缺少 permissions 列则补加（功能权限白名单依赖此列）
+      try {
+        const licCols = db.prepare("PRAGMA table_info(licenses)").all() as { name: string }[];
+        if (!licCols.find((c) => c.name === 'permissions')) {
+          db.exec("ALTER TABLE licenses ADD COLUMN permissions TEXT");
+          console.log('[DB] licenses.permissions 列已添加');
+        }
+      } catch (e: any) {
+        console.warn('[DB] 检查/补加 licenses.permissions 列失败:', e?.message || String(e));
+      }
       console.log('[DB] profit 表（licenses/daily_content/news_cache/profit_meta）已就绪');
       console.log(`[DB] SQLite initialized at ${DB_PATH}`);
   } catch (e: any) {

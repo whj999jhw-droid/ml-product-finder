@@ -18,6 +18,9 @@
  *   GET  /admin         网页版授权码管理后台（server/license-admin.html）
  *   POST /list          管理员查看全部
  *   POST /my            用户查看本机授权码
+ *   POST /set-permissions       管理员设置单码功能可见性（permissions 白名单）
+ *   POST /set-all-permissions   管理员一键设置全部普通用户码功能可见性
+ *   POST /edit          管理员修改授权码（换码，保留绑定/权限；newCode 缺省自动生成）
  *   POST|GET /news      资讯（服务端抓取公开热搜/每日资讯）
  *   GET /daily          每日精选（即时返回云端生成内容）
  *   POST /cron-daily    定时生成（cronKey 保护）
@@ -58,6 +61,46 @@ function fail(statusCode: number, msg: string) { return { statusCode, data: { ok
 function dbReady() { return !!db; }
 function jparse(s: any) { try { return typeof s === 'string' ? JSON.parse(s) : s; } catch { return null; } }
 
+/* ---------- 功能可见性白名单 ----------
+ * licenses.permissions 存 JSON 字符串数组，记录「该码可见的功能 id」。
+ * - null/未配置 = 全部可见（存量码回填后不再出现 null）
+ * - 数组 = 白名单：不在数组里的功能（含未来新增功能）对普通用户自动隐藏，
+ *   管理员在后台勾选授权后才可见 —— 契合「新增功能自动隐藏」的需求。
+ * - kind='admin' 或 env ADMIN_CODES 的管理员码不受此限制，恒全部可见。
+ * FEATURES 顺序即后台勾选/前端渲染顺序。新增功能时在此追加即可，
+ * 老码 permissions 不含新 id -> 自动对新功能隐藏。 */
+const FEATURES: { id: string; name: string; group: string }[] = [
+  { id: 'calc',      name: '利润计算', group: 'tab' },
+  { id: 'rules',     name: '运费规则', group: 'tab' },
+  { id: 'accounting', name: '记账',    group: 'tab' },
+  { id: 'orders',    name: '订单',     group: 'tab' },
+  { id: 'system',    name: '系统',     group: 'tab' },
+  { id: 'news',      name: '资讯',     group: 'sys' },
+  { id: 'aiRadar',   name: 'AI活动雷达', group: 'sys' },
+  { id: 'store',     name: '店铺管理', group: 'sys' },
+  { id: 'pdkyc',     name: '跑得快',   group: 'sys' },
+  { id: 'video',     name: '视频管理', group: 'sys' },
+  { id: 'codes',     name: '授权码',   group: 'sys' },
+  { id: 'look',      name: '外观',     group: 'sys' }
+];
+const ALL_FEATURE_IDS = FEATURES.map((f) => f.id);
+function isFeatureId(id: any) { return ALL_FEATURE_IDS.indexOf(id) >= 0; }
+function parsePermissions(s: any): string[] | null {
+  const a = jparse(s);
+  if (!Array.isArray(a)) return null;
+  const clean = a.filter((x) => typeof x === 'string');
+  return clean.length ? clean : [];
+}
+function normalizePermInput(p: any): string[] | null {
+  if (p === null || p === undefined) return null;
+  if (p === 'all' || p === '*') return ALL_FEATURE_IDS.slice();
+  if (!Array.isArray(p)) return null;
+  const uniq: string[] = [];
+  p.forEach((x) => { if (isFeatureId(x) && uniq.indexOf(x) < 0) uniq.push(x); });
+  return uniq; // 可能为 []（全部隐藏）
+}
+function permJson(p: string[] | null) { return p === null ? null : JSON.stringify(p); }
+
 // 管理员鉴权：adminKey 或 管理员 token 二选一（网页后台只凭管理员码即可操作）
 function adminAuthorized(body: any) {
   if (body && body.adminKey && body.adminKey === ADMIN_KEY) return true;
@@ -92,11 +135,14 @@ async function ensureUniqueCode(): Promise<string> {
   }
   throw new Error('生成激活码冲突，请重试');
 }
-function insertLicense(code: string, status: string, kind: string, deviceId: string | null, deviceInfo: any, activatedAt: number | null, note: string) {
-  db.prepare('INSERT INTO licenses (code,status,kind,device_id,device_info,activated_at,created_at,note) VALUES (?,?,?,?,?,?,?,?)')
-    .run(code, status, kind, deviceId || null, deviceInfo ? JSON.stringify(deviceInfo) : null, activatedAt, Date.now(), note || '');
+function insertLicense(code: string, status: string, kind: string, deviceId: string | null, deviceInfo: any, activatedAt: number | null, note: string, permissions?: string[] | null) {
+  // 权限缺省：管理员码不受限(null)；普通码默认全部可见（按当前功能快照，此后新增功能不在白名单 -> 自动隐藏）
+  const perm = (permissions !== undefined) ? permissions : (kind === 'admin' ? null : ALL_FEATURE_IDS.slice());
+  db.prepare('INSERT INTO licenses (code,status,kind,device_id,device_info,activated_at,created_at,note,permissions) VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(code, status, kind, deviceId || null, deviceInfo ? JSON.stringify(deviceInfo) : null, activatedAt, Date.now(), note || '', permJson(perm));
 }
 function rowToLicense(d: any) {
+  const isAdminRow = (d.kind || 'user') === 'admin';
   return {
     code: d.code,
     status: d.status,
@@ -105,7 +151,8 @@ function rowToLicense(d: any) {
     deviceInfo: d.device_info ? jparse(d.device_info) : null,
     activatedAt: d.activated_at || null,
     createdAt: d.created_at || null,
-    note: d.note || ''
+    note: d.note || '',
+    permissions: isAdminRow ? null : parsePermissions(d.permissions) // null=全部可见
   };
 }
 
@@ -118,11 +165,19 @@ async function handleGenerate(body: any) {
   }
   const count = Math.min(Math.max(parseInt(body.count, 10) || 1, 1), 500);
   const note = String(body.note || '');
-  const kind = (isAdminByToken && body.kind === 'admin') ? 'admin' : 'user';
+  // 通过管理员鉴权（admin token 或 adminKey）后，kind 尊重调用方选择；否则一律只能生成普通用户码
+  const kind = (body.kind === 'admin') ? 'admin' : 'user';
+  // 可选：生成时即指定这批码的可见功能（仅普通码有意义；缺省=当前全量快照）
+  let perm: string[] | null | undefined;
+  if (kind === 'user' && body.permissions !== undefined) {
+    const np = normalizePermInput(body.permissions);
+    if (np === null) return fail(400, 'permissions 必须是功能 id 数组或 "all"');
+    perm = np;
+  }
   const codes: string[] = [];
   for (let i = 0; i < count; i++) {
     const code = await ensureUniqueCode();
-    insertLicense(code, 'unused', kind, null, null, null, note);
+    insertLicense(code, 'unused', kind, null, null, null, note, perm);
     codes.push(code);
   }
   return ok({ count: codes.length, kind, codes });
@@ -151,19 +206,35 @@ async function handleActivate(body: any) {
   const row = db.prepare('SELECT * FROM licenses WHERE code=?').get(code);
   if (!row) return fail(404, '无效激活码');
   const devInfo = body.deviceInfo || null;
+  // 管理员身份以 db 中的 kind 为准（生成的管理员码 kind='admin'，激活即为管理员；env 管理员码走上面的分支）
+  const isAdmin = row.kind === 'admin';
+  // 存量普通码 permissions 为空（旧库迁移）时回填当前全量快照，保证升级后老用户可见既有功能、此后新功能自动隐藏
+  if (!isAdmin && row.permissions === null) {
+    db.prepare('UPDATE licenses SET permissions=? WHERE code=? AND permissions IS NULL')
+      .run(JSON.stringify(ALL_FEATURE_IDS), code);
+    row.permissions = JSON.stringify(ALL_FEATURE_IDS);
+  }
+  const permissions = rowToLicense(row).permissions;
   if (row.status === 'revoked') return fail(403, '该激活码已被吊销');
   if (row.status === 'active') {
     if (row.device_id === deviceId) {
       db.prepare('UPDATE licenses SET device_info=? WHERE code=?').run(devInfo ? JSON.stringify(devInfo) : null, code);
-      const token = signToken({ code, deviceId, isAdmin: false, iat: Date.now(), exp: Date.now() + TOKEN_TTL_MS });
-      return ok({ token, sameDevice: true });
+      const token = signToken({ code, deviceId, isAdmin, iat: Date.now(), exp: Date.now() + TOKEN_TTL_MS });
+      return ok({ token, isAdmin, permissions, sameDevice: true });
+    }
+    if (isAdmin) {
+      // 管理员码不受一码一设备限制：换设备直接覆盖绑定（与 env 管理员码语义一致）
+      db.prepare('UPDATE licenses SET device_id=?, device_info=?, activated_at=? WHERE code=?')
+        .run(deviceId, devInfo ? JSON.stringify(devInfo) : null, Date.now(), code);
+      const token = signToken({ code, deviceId, isAdmin, iat: Date.now(), exp: Date.now() + TOKEN_TTL_MS });
+      return ok({ token, isAdmin, permissions, rebound: true });
     }
     return fail(403, '该激活码已绑定其他设备，无法在新设备上激活');
   }
   db.prepare('UPDATE licenses SET status=?, device_id=?, device_info=?, activated_at=? WHERE code=?')
     .run('active', deviceId, devInfo ? JSON.stringify(devInfo) : null, Date.now(), code);
-  const token = signToken({ code, deviceId, isAdmin: false, iat: Date.now(), exp: Date.now() + TOKEN_TTL_MS });
-  return ok({ token });
+  const token = signToken({ code, deviceId, isAdmin, iat: Date.now(), exp: Date.now() + TOKEN_TTL_MS });
+  return ok({ token, isAdmin, permissions });
 }
 
 async function handleVerify(body: any) {
@@ -174,8 +245,16 @@ async function handleVerify(body: any) {
   const row = db.prepare('SELECT * FROM licenses WHERE code=?').get(payload.code);
   if (!row) return fail(403, '激活码不存在');
   if (row.status !== 'active') return fail(403, '激活码状态异常');
-  if (!payload.isAdmin && row.device_id && row.device_id !== payload.deviceId) return fail(403, '设备不匹配');
-  return ok({ code: payload.code, isAdmin: !!payload.isAdmin });
+  // 管理员身份以 db kind / env 管理员码为准（兼容修复前签发的 isAdmin=false 旧 token）
+  const isAdmin = ADMIN_CODES.includes(row.code) || row.kind === 'admin';
+  if (!isAdmin && row.device_id && row.device_id !== payload.deviceId) return fail(403, '设备不匹配');
+  // 存量普通码回填当前全量快照（同 activate）
+  if (!isAdmin && row.permissions === null) {
+    db.prepare('UPDATE licenses SET permissions=? WHERE code=? AND permissions IS NULL')
+      .run(JSON.stringify(ALL_FEATURE_IDS), payload.code);
+    row.permissions = JSON.stringify(ALL_FEATURE_IDS);
+  }
+  return ok({ code: payload.code, isAdmin, permissions: rowToLicense(row).permissions });
 }
 
 async function handleRevoke(body: any) {
@@ -203,8 +282,12 @@ async function handleUnbind(body: any) {
 
 async function handleList(body: any) {
   if (!dbReady()) return fail(500, '数据库不可用');
-  const payload = unsignToken(body.token);
-  if (!payload || !payload.isAdmin) return fail(401, '仅管理员可查看授权码列表');
+  // 管理员鉴权二选一：管理员 token（App / 网页后台）或 adminKey（服务端直调）
+  const tokenPayload = body.token ? unsignToken(body.token) : null;
+  const isAdminByToken = !!(tokenPayload && tokenPayload.isAdmin === true);
+  if (!isAdminByToken) {
+    if (!body.adminKey || body.adminKey !== ADMIN_KEY) return fail(401, '仅管理员可查看授权码列表');
+  }
   const rows = db.prepare('SELECT * FROM licenses').all();
   const codes = rows.map(rowToLicense);
   return ok({ count: codes.length, codes });
@@ -220,7 +303,7 @@ async function handleReactivate(body: any) {
   const devInfo = body.deviceInfo || null;
   db.prepare('UPDATE licenses SET device_info=? WHERE code=?').run(devInfo ? JSON.stringify(devInfo) : null, row.code);
   const token = signToken({ code: row.code, deviceId, isAdmin, iat: Date.now(), exp: Date.now() + TOKEN_TTL_MS });
-  return ok({ token, code: row.code, admin: isAdmin, reactivated: true });
+  return ok({ token, code: row.code, admin: isAdmin, permissions: rowToLicense(row).permissions, reactivated: true });
 }
 
 async function handleMy(body: any) {
@@ -230,7 +313,119 @@ async function handleMy(body: any) {
   const row = db.prepare('SELECT * FROM licenses WHERE code=?').get(payload.code);
   if (!row) return fail(404, '未找到授权码');
   const d = rowToLicense(row);
-  return ok({ code: d.code, status: d.status, kind: d.kind, deviceId: d.deviceId, deviceInfo: d.deviceInfo, activatedAt: d.activatedAt });
+  return ok({ code: d.code, status: d.status, kind: d.kind, deviceId: d.deviceId, deviceInfo: d.deviceInfo, activatedAt: d.activatedAt, permissions: d.permissions });
+}
+
+// ---------- 功能权限管理（仅管理员） ----------
+// 设置单个授权码可见功能（permissions: 功能 id 数组 / 'all'；仅对普通用户码有意义）
+async function handleSetPermissions(body: any) {
+  if (!dbReady()) return fail(500, '数据库不可用');
+  if (!adminAuthorized(body)) return fail(401, '仅管理员可设置功能权限');
+  const code = String(body.code || '').trim().toUpperCase();
+  if (!code) return fail(400, '缺少授权码');
+  const row = db.prepare('SELECT * FROM licenses WHERE code=?').get(code);
+  if (!row) return fail(404, '激活码不存在');
+  if ((row.kind || 'user') === 'admin') return fail(400, '管理员码不受功能权限限制（恒全部可见）');
+  const np = normalizePermInput(body.permissions);
+  if (np === null) return fail(400, 'permissions 必须是功能 id 数组或 "all"');
+  db.prepare('UPDATE licenses SET permissions=? WHERE code=?').run(permJson(np), code);
+  return ok({ code, permissions: np });
+}
+
+// 一键设置「所有普通用户码」的可见功能（管理员码不受影响）
+async function handleSetAllPermissions(body: any) {
+  if (!dbReady()) return fail(500, '数据库不可用');
+  if (!adminAuthorized(body)) return fail(401, '仅管理员可设置功能权限');
+  const np = normalizePermInput(body.permissions);
+  if (np === null) return fail(400, 'permissions 必须是功能 id 数组或 "all"');
+  const r = db.prepare("UPDATE licenses SET permissions=? WHERE kind='user'").run(permJson(np));
+  return ok({ updated: r.changes || 0, permissions: np });
+}
+
+// 用户自助换码（释放本设备已激活的旧码、用新码重新激活本设备）
+//
+// 【授权体系核心规则 —— 改动前请先读】
+// 授权码的唯一来源是管理员：管理员用「生成授权码」产出 unused 状态的码，再发给用户。
+// 因此用户换码必须满足：
+//   1. 必须填写新码，不允许留空自动生成（留空自动生成 = 授权体系形同虚设）
+//   2. 新码必须是库里已存在的码（不存在的码一律拒绝，不是管理员发的）
+//   3. 新码状态必须是「未使用 unused」：
+//      - 已使用(active)  → 拒绝（一码一设备，已被别人/别的设备占用）
+//      - 已吊销(revoked) → 拒绝（管理员已作废，不能复活）
+//   4. 例外：kind='admin' / env 管理员码本身支持多设备且由管理员掌握，不受 3 限制
+//   5. 旧码必须确实绑在本设备上，防止任何人拿别人的码来作废它
+async function handleRelease(body: any) {
+  if (!dbReady()) return fail(500, '数据库不可用');
+  const oldCode = String(body.oldCode || '').trim().toUpperCase();
+  const newCode = String(body.newCode || '').trim().toUpperCase();
+  const deviceId = String(body.deviceId || '').trim();
+  const deviceInfo = body.deviceInfo || null;
+  if (!oldCode) return fail(400, '缺少当前授权码');
+  if (!newCode) return fail(400, '请输入新的授权码（授权码由管理员发放，不支持留空自动生成）');
+  if (!deviceId) return fail(400, '缺少设备标识');
+  if (newCode === oldCode) return fail(400, '新码与原码相同');
+  if (!/^[A-Z0-9][A-Z0-9-]{3,39}$/.test(newCode)) return fail(400, '新码格式不正确（4-40 位大写字母/数字，可含 -）');
+
+  // —— 校验旧码属于本设备 ——
+  const oldRow: any = db.prepare('SELECT id, code, status, kind, device_id FROM licenses WHERE code=?').get(oldCode);
+  if (!oldRow) return fail(404, '当前授权码不存在');
+  const oldIsAdmin = (oldRow.kind || 'user') === 'admin' || ADMIN_CODES.indexOf(oldCode) >= 0;
+  if (oldRow.device_id && oldRow.device_id !== deviceId && !oldIsAdmin) {
+    return fail(403, '该授权码未在本设备激活，无法更换');
+  }
+
+  // —— 校验新码：必须是管理员发放的「未使用」码 ——
+  const existing: any = db.prepare('SELECT * FROM licenses WHERE code=?').get(newCode);
+  if (!existing) return fail(404, '授权码不存在，请联系管理员获取有效的授权码');
+  const newIsAdmin = (existing.kind || 'user') === 'admin' || ADMIN_CODES.indexOf(newCode) >= 0;
+  if (!newIsAdmin) {
+    if (existing.status === 'active') return fail(400, '该授权码已被使用，无法换到此码');
+    if (existing.status === 'revoked') return fail(400, '该授权码已被吊销，无法使用');
+    if (existing.status !== 'unused') return fail(400, '该授权码状态异常，无法使用');
+  }
+
+  // 旧码作废并解绑
+  db.prepare("UPDATE licenses SET status='revoked', device_id=NULL, device_info=NULL WHERE code=?").run(oldCode);
+  // 新码激活到本设备（保留原有 kind / permissions）
+  const now = Date.now();
+  db.prepare("UPDATE licenses SET status='active', device_id=?, device_info=?, activated_at=? WHERE code=?")
+    .run(deviceId, deviceInfo ? JSON.stringify(deviceInfo) : null, now, newCode);
+
+  const newRow: any = db.prepare('SELECT * FROM licenses WHERE code=?').get(newCode);
+  const d = rowToLicense(newRow);
+  const perms = d.permissions === null ? ALL_FEATURE_IDS.slice() : d.permissions;
+  const token = signToken({ code: newCode, deviceId, isAdmin: newIsAdmin, iat: now, exp: now + TOKEN_TTL_MS });
+  return ok({ token, code: newCode, isAdmin: newIsAdmin, permissions: perms, releasedOldCode: oldCode });
+}
+
+// 修改授权码：把旧码 code 换成新码（保留状态/绑定/权限/备注），newCode 缺省时自动生成
+async function handleEditCode(body: any) {
+  if (!dbReady()) return fail(500, '数据库不可用');
+  if (!adminAuthorized(body)) return fail(401, '仅管理员可修改授权码');
+  const code = String(body.code || '').trim().toUpperCase();
+  if (!code) return fail(400, '缺少原授权码');
+  const row = db.prepare('SELECT * FROM licenses WHERE code=?').get(code);
+  if (!row) return fail(404, '激活码不存在');
+  // 管理员码也允许改（需求：管理员可修改自己的授权码）。
+  // 注意：改的只是数据库行，env PROFIT_ADMIN_CODES 里的旧码在服务重启/重新激活时仍会恢复为管理员码。
+  const wasAdmin = row.kind === 'admin' || ADMIN_CODES.includes(code);
+  // 新码：显式指定（自动大写/去空格）或自动生成
+  let newCode = String(body.newCode || '').trim().toUpperCase();
+  if (newCode && newCode === code) return fail(400, '新码与原码相同');
+  if (newCode) {
+    if (!/^[A-Z0-9][A-Z0-9-]{3,39}$/.test(newCode)) return fail(400, '新码格式不正确（4-40 位大写字母/数字，可含 -）');
+    const dup = db.prepare('SELECT id FROM licenses WHERE code=?').get(newCode);
+    if (dup) return fail(409, '该授权码已存在，请换一个');
+  } else {
+    newCode = await ensureUniqueCode();
+  }
+  db.prepare('UPDATE licenses SET code=? WHERE code=?').run(newCode, code);
+  const d = rowToLicense({ ...row, code: newCode });
+  return ok({
+    oldCode: code, code: newCode, status: d.status, permissions: d.permissions,
+    wasAdmin, kind: row.kind,
+    hint: wasAdmin ? '管理员码已改名。服务器 .env 的 PROFIT_ADMIN_CODES 仍含旧码，服务重启或旧码被激活时会恢复出一个管理员码；如需彻底停用旧码请同步更新 .env。' : undefined
+  });
 }
 
 // ---------- 资讯：服务端抓取 ----------
@@ -914,6 +1109,10 @@ router.post('/revoke', wrap(handleRevoke));
 router.post('/unbind', wrap(handleUnbind));
 router.post('/list', wrap(handleList));
 router.post('/my', wrap(handleMy));
+router.post('/set-permissions', wrap(handleSetPermissions));
+router.post('/set-all-permissions', wrap(handleSetAllPermissions));
+router.post('/release', wrap(handleRelease));
+router.post('/edit', wrap(handleEditCode));
 router.post('/news', wrap(handleGetNews));
 router.get('/news', wrap(handleGetNews));
 router.get('/daily', wrap(handleGetDaily));
@@ -938,6 +1137,8 @@ router.get('/admin', (_req: any, res: any) => {
       res.status(404).type('text/plain; charset=utf-8').send('未找到 license-admin.html（已部署？）');
       return;
     }
+    // no-store：后台页面迭代频繁，禁止浏览器缓存旧版（否则会出现旧弹窗/旧按钮残留）
+    res.setHeader('Cache-Control', 'no-store, must-revalidate');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(fs.readFileSync(file, 'utf8'));
   } catch (e: any) {
@@ -953,6 +1154,11 @@ async function initProfit() {
     const row = db.prepare('SELECT id FROM licenses WHERE code=?').get(code);
     if (!row) insertLicense(code, 'unused', 'admin', null, null, null, '管理员码');
   }
+  // 存量普通码权限回填：旧库升级后 permissions 为 NULL -> 写入当前全量快照
+  // （此后新增功能 id 不在老码白名单 -> 对老用户自动隐藏，管理员授权后才可见）
+  const backfill = db.prepare("UPDATE licenses SET permissions=? WHERE kind='user' AND permissions IS NULL")
+    .run(JSON.stringify(ALL_FEATURE_IDS));
+  if (backfill.changes) console.log(`[profitLicense] 已为 ${backfill.changes} 个存量普通码回填默认功能权限`);
   if (!ADMIN_CODES.length) {
     // 未配置管理员码：生成一个随机管理员激活码，并写入库 + 日志，方便首次使用
     const seg = () => Array.from({ length: 4 }, () => CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)]).join('');
