@@ -112,7 +112,26 @@ async function resolvePictureId(url: string, token: string): Promise<string | un
 }
 
 // ===== 类目预测与必填属性补齐（2026-09-04）=====
-// 妙手返回的 cid 是妙手内部类目 ID（如 1015338），不是 ML 类目；发布前需用标题预测真实 ML 类目。
+// 妙手返回的 cid 是妙手内部类目 ID（如 10110626），不是 ML 类目；发布前需用标题预测真实 ML 类目。
+// 注意：domain_discovery 只对**英文标题**命中率高，中文标题基本查不到 → 先翻译再预测，再按 cid 兜底。
+
+/** 是否包含中日韩汉字（判断标题需不需要翻译） */
+export function hasCJK(text: string): boolean {
+  return /[一-鿿぀-ゟ゠-ヿ가-힯]/.test(text || '');
+}
+
+/** 类目是否存在（HTTP 200 才算存在；404/403 一律 false） */
+async function categoryExists(token: string, categoryId: string): Promise<boolean> {
+  try {
+    const resp = await fetch(`https://api.mercadolibre.com/categories/${categoryId}/attributes`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return resp.ok;
+  } catch {
+    return false;
+  }
+}
+
 const categoryPredictionCache = new Map<string, string>();
 async function predictCategoryId(token: string, site: string, title: string): Promise<string | undefined> {
   const key = `${site}|${title}`;
@@ -212,13 +231,37 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
   const attributes = mergeAttributes(draft.attributes);
 
   // 类目：CBT 全球售必须用 CBT 命名空间的类目（如 CBT10626）。
-  // 妙手 cid（如 10110626）是妙手内部类目 ID，直接用会被判 category_id invalid，需按标题走 domain_discovery(CBT) 预测。
+  // 妙手 cid（如 10110626）是妙手内部类目 ID（规则 = 101 + ML 类目 ID），直接用会被判 category_id invalid。
+  // 顺序很重要：① 优先用妙手 cid 映射 —— 那是卖家在妙手实际选定的类目，最贴近真实意图；
+  // ② 只有 cid 映射不出来时才按标题走 domain_discovery(CBT) 预测。
+  // 原因：预测会把「苹果转接头」猜成 CBT38594 这类墨西哥站不可售的类目（item.not_allowed），
+  // 而 cid 映射出的 CBT10626 是确认可售的。
   let categoryId = draft.category_id;
   if (!categoryId || !/^(CBT\d+|ML[A-Z]{3}\d+)$/.test(categoryId)) {
-    const predicted = await predictCategoryId(token, 'CBT', draft.title);
-    if (predicted) {
-      console.log(`[Listing] 类目自动预测: ${draft.category_id || '(空)'} -> ${predicted}（标题: ${draft.title.slice(0, 40)}）`);
-      categoryId = predicted;
+    const rawCid = categoryId;
+    if (/^\d+$/.test(rawCid || '')) {
+      const mlCat = rawCid.replace(/^101/, '');
+      const candidates = [mlCat && mlCat !== rawCid ? `CBT${mlCat}` : undefined, `CBT${rawCid}`]
+        .filter(Boolean) as string[];
+      for (const cand of candidates) {
+        if (await categoryExists(token, cand)) {
+          console.log(`[Listing] 类目按妙手 cid 映射: ${rawCid} -> ${cand}`);
+          categoryId = cand;
+          break;
+        }
+      }
+    }
+    // cid 映射不出来才做标题预测；中文标题预测命中率极低，先跳过（由 miaoshouRoutes 先翻译标题）
+    if (!categoryId) {
+      const predicted = hasCJK(draft.title)
+        ? undefined
+        : await predictCategoryId(token, 'CBT', draft.title);
+      if (predicted) {
+        console.log(
+          `[Listing] 类目自动预测: ${rawCid || '(空)'} -> ${predicted}（标题: ${draft.title.slice(0, 40)}）`
+        );
+        categoryId = predicted;
+      }
     }
   }
 
@@ -314,12 +357,16 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
   if (!resp.ok) {
     // 完整打印 ML 错误响应，便于定位 required_fields / invalid value 等细节
     console.error(`[Listing] ML 创建失败 HTTP ${resp.status}: ${JSON.stringify(data).slice(0, 2000)}`);
-    const cause = data?.cause?.[0]
-      ? `${data.cause[0].type || ''}: ${data.cause[0].message || data.cause[0].code || ''}`.trim()
-      : '';
-    const msg = data?.message || data?.error || cause || '上架失败';
-    const err: any = new Error(`上架失败 [${resp.status}]: ${msg}${cause ? ` (${cause})` : ''}`);
+    const c0 = data?.cause?.[0] || {};
+    const code = c0.code || '';
+    // 关键：优先用 cause.message（ML 给出的具体原因）——顶层 message 经常是笼统的 "Validation error"
+    const causeMsg = c0.message || '';
+    const msg = causeMsg || data?.message || data?.error || '上架失败';
+    const err: any = new Error(
+      `上架失败 [${resp.status}]: ${code ? `${code}: ` : ''}${msg}`
+    );
     err.status = resp.status;
+    err.code = code;
     err.mlError = data;
     throw err;
   }
@@ -328,6 +375,36 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
   // CBT /global/items 返回顶层 item_id（不是 id）+ site_items[]（每站点独立 item_id）
   const siteItems: any[] = Array.isArray(data.site_items) ? data.site_items : [];
   const firstSite = siteItems[0];
+
+  // 关键校验：ML 可能返回 HTTP 200 却没有 item_id —— 此时 site_items 里带的是 error
+  // （最常见的是 item.net_proceeds「净收益为负」，即定价低于费率底线）。
+  // 不校验会被上层误判为上架成功，导致商品实际没上架。
+  if (!data.item_id && !data.id) {
+    const siteErrs = siteItems.filter((si: any) => si?.error);
+    const detail = siteErrs[0]?.error || {};
+    const code = detail?.cause?.[0]?.code || data?.cause?.[0]?.code;
+    // 同样优先取 cause.message（如 item.dimensions 的真实校验原因，而非笼统的 "Validation error"）
+    const msg =
+      detail?.cause?.[0]?.message ||
+      detail?.message ||
+      data?.message ||
+      '未返回 item_id，上架未成功';
+    const err: any = new Error(`上架失败: ${code ? `${code}: ` : ''}${msg}`);
+    err.status = 200;
+    err.code = code;
+    err.mlError = data;
+    throw err;
+  }
+
+  // 部分成功：整体有 item_id，但个别站点报错 → 记录告警，不阻断（可在后台补站点）
+  for (const si of siteItems) {
+    if (si?.error) {
+      console.warn(
+        `[Listing] 站点 ${si.site_id} 上架失败: ${JSON.stringify(si.error).slice(0, 300)}`
+      );
+    }
+  }
+
   return {
     itemId: data.item_id ?? data.id,
     // ML 不返回 permalink 时按第一个站点 item_id 拼可点击链接

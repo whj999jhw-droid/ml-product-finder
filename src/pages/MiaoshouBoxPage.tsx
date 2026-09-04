@@ -146,6 +146,9 @@ export function MiaoshouBoxPage() {
   const [publishResults, setPublishResults] = useState<any[]>([]);
   const [publishDone, setPublishDone] = useState(false);
 
+  // 已发布记录（storeId|detailId → 记录），用于「已发布」标记与防重复发布
+  const [publishedRecords, setPublishedRecords] = useState<Record<string, any>>({});
+
   // 每行的发布目标（storeId → sites[]）
   const [targets, setTargets] = useState<Record<string, PublishTarget>>({});
 
@@ -181,10 +184,23 @@ export function MiaoshouBoxPage() {
     } catch {}
   }, []);
 
+  // 加载已发布记录
+  const loadPublished = useCallback(async () => {
+    try {
+      const resp = await fetch('/api/ml/miaoshou/published');
+      const json = await resp.json();
+      if (json.success) setPublishedRecords(json.records || {});
+    } catch {}
+  }, []);
+
   useEffect(() => {
     loadBox();
     loadStores();
-  }, [loadBox, loadStores]);
+    loadPublished();
+  }, [loadBox, loadStores, loadPublished]);
+
+  // 某店铺是否已发布过某个采集箱商品（CBT 一店一品，重复发必然失败）
+  const isPublished = (storeId: string, detailId: string) => !!publishedRecords[`${storeId}|${detailId}`];
 
   // 搜索过滤（分页前过滤全部）
   useEffect(() => {
@@ -327,6 +343,9 @@ export function MiaoshouBoxPage() {
         detailId: it.collectBoxDetailId,
         shopId: it.collectBoxDetailShop.shopId,
         cid: it.cid,
+        // 详情接口的 price/globalPrice 字段经常缺失或异常，把列表值一并传给后端兜底
+        price: it.price,
+        globalPrice: it.globalPrice,
       })),
       targets: validTargets,
     };
@@ -339,18 +358,55 @@ export function MiaoshouBoxPage() {
         body: JSON.stringify(payload),
       });
       const json = await resp.json();
-      if (!json.success && json.successCount === 0) {
+      if (!json.success && !json.results?.length) {
         throw new Error(json.message || '发布失败');
       }
       setPublishResults(json.results || []);
       setPublishDone(true);
       const ok = json.successCount || 0;
+      const skip = json.alreadyPublishedCount || 0;
       const fail = json.failCount || 0;
-      MessagePlugin.success(`发布完成：成功 ${ok}，失败 ${fail}`);
+      if (fail > 0 && ok === 0 && skip === 0) {
+        // 全部失败：把后端返回的真实错误带出来，避免只看到笼统的「发布失败」
+        const firstErr =
+          json.results.find((r: any) => r.error)?.error || json.message || '未知错误';
+        MessagePlugin.error('发布失败：' + firstErr);
+      } else {
+        const parts = [`成功 ${ok}`];
+        if (skip) parts.push(`已存在 ${skip}`);
+        if (fail) parts.push(`失败 ${fail}`);
+        MessagePlugin.success('发布完成：' + parts.join('，'));
+      }
+      loadPublished();
     } catch (e: any) {
       MessagePlugin.error('发布失败: ' + (e.message || ''));
     } finally {
       setPublishLoading(false);
+    }
+  };
+
+  // 清除选中商品的「已发布」标记（用于已在美客多删除、需要重新发布时）
+  const handleClearPublished = async () => {
+    const detailIds = [...selected];
+    const keys = stores
+      .flatMap((s) => detailIds.map((d) => `${s.id}|${d}`))
+      .filter((k) => publishedRecords[k]);
+    if (keys.length === 0) {
+      MessagePlugin.info('选中的商品没有已发布标记');
+      return;
+    }
+    try {
+      const resp = await fetch('/api/ml/miaoshou/published/clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keys }),
+      });
+      const json = await resp.json();
+      if (!json.success) throw new Error(json.message || '清除失败');
+      MessagePlugin.success(`已清除 ${json.removed} 条已发布标记`);
+      loadPublished();
+    } catch (e: any) {
+      MessagePlugin.error('清除失败: ' + (e.message || ''));
     }
   };
 
@@ -388,9 +444,17 @@ export function MiaoshouBoxPage() {
       title: '商品标题',
       ellipsis: { showTooltip: true },
       cell({ row }) {
+        const pubStores = stores.filter((s) => isPublished(s.id, row.collectBoxDetailId));
         return (
           <div>
-            <div className="font-medium text-sm">{row.title}</div>
+            <div className="flex items-center gap-1.5">
+              <div className="font-medium text-sm">{row.title}</div>
+              {pubStores.length > 0 && (
+                <Tag size="small" theme="success" variant="outline">
+                  已发布：{pubStores.map((s) => s.nickname).join('/')}
+                </Tag>
+              )}
+            </div>
             <div className="text-xs text-gray-500 mt-0.5">{row.breadcrumb}</div>
           </div>
         );
@@ -752,29 +816,48 @@ export function MiaoshouBoxPage() {
                   const currentSites = targets[store.id]?.sites || [];
                   const checked = currentSites.length === SITE_OPTIONS.length;
                   const someChecked = currentSites.length > 0;
+                  const selIds = [...selected];
+                  const already = selIds.filter((d) => isPublished(store.id, d));
+                  const allAlready = selIds.length > 0 && already.length === selIds.length;
                   return (
                     <Card key={store.id} size="small" className="border">
-                      <div className="flex items-center gap-3 mb-2">
+                      <div className="flex items-center gap-3 mb-2 flex-wrap">
                         <Checkbox
                           checked={checked}
                           indeterminate={someChecked && !checked}
+                          disabled={allAlready}
                           onChange={() => toggleAllSitesForStore(store.id)}
                         />
                         <span className="font-medium text-sm">
                           {store.nickname}
                         </span>
                         <Tag size="small">CBT</Tag>
+                        {already.length > 0 && (
+                          <Tag size="small" theme="warning">
+                            {allAlready
+                              ? '所选商品均已发布'
+                              : `已有 ${already.length}/${selIds.length} 件已发布`}
+                          </Tag>
+                        )}
                       </div>
-                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 ml-7">
-                        {SITE_OPTIONS.map((opt) => (
-                          <Checkbox
-                            key={opt.value}
-                            checked={currentSites.includes(opt.value)}
-                            onChange={() => toggleSite(store.id, opt.value)}
-                            label={opt.label}
-                          />
-                        ))}
-                      </div>
+                      {allAlready ? (
+                        <div className="text-xs text-gray-500 ml-7">
+                          所选商品在本店均已上架。美客多 CBT 一店一品，重复发布会报
+                          listing.conflict；如需重新上架，请先点左下角「清除已发布标记」，
+                          并确认商品已在美客多后台删除。
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 ml-7">
+                          {SITE_OPTIONS.map((opt) => (
+                            <Checkbox
+                              key={opt.value}
+                              checked={currentSites.includes(opt.value)}
+                              onChange={() => toggleSite(store.id, opt.value)}
+                              label={opt.label}
+                            />
+                          ))}
+                        </div>
+                      )}
                     </Card>
                   );
                 })}
@@ -783,18 +866,23 @@ export function MiaoshouBoxPage() {
 
             <Divider />
 
-            <div className="flex justify-end gap-3">
-              <Button onClick={() => setPublishOpen(false)} disabled={publishLoading}>
-                取消
+            <div className="flex justify-between gap-3 items-center">
+              <Button size="small" variant="text" theme="danger" onClick={handleClearPublished}>
+                清除已发布标记
               </Button>
-              <Button
-                theme="primary"
-                loading={publishLoading}
-                onClick={handlePublish}
-                disabled={stores.length === 0}
-              >
-                确认发布
-              </Button>
+              <div className="flex gap-3">
+                <Button onClick={() => setPublishOpen(false)} disabled={publishLoading}>
+                  取消
+                </Button>
+                <Button
+                  theme="primary"
+                  loading={publishLoading}
+                  onClick={handlePublish}
+                  disabled={stores.length === 0}
+                >
+                  确认发布
+                </Button>
+              </div>
             </div>
           </div>
         ) : (
@@ -804,43 +892,73 @@ export function MiaoshouBoxPage() {
               <Tag theme="success">
                 成功 {publishResults.filter((r) => r.success).length}
               </Tag>
+              {publishResults.some((r) => r.alreadyPublished) && (
+                <Tag theme="warning">
+                  已存在（未重复上架）
+                  {publishResults.filter((r) => r.alreadyPublished).length}
+                </Tag>
+              )}
               <Tag theme="danger">
-                失败 {publishResults.filter((r) => !r.success).length}
+                失败 {publishResults.filter((r) => !r.success && !r.alreadyPublished).length}
               </Tag>
             </div>
             <div className="max-h-80 overflow-y-auto space-y-2">
-              {publishResults.map((r, i) => (
-                <div
-                  key={i}
-                  className={`p-2 rounded text-sm flex justify-between items-center ${
-                    r.success ? 'bg-green-50' : 'bg-red-50'
-                  }`}
-                >
-                  <div>
-                    <span className="mr-2">{r.storeNick}</span>
-                    <Tag size="small">{r.site}</Tag>
-                    {!r.success && r.error && (
-                      <span className="text-red-500 ml-2">{r.error}</span>
+              {publishResults.map((r, i) => {
+                const isAlready = !!r.alreadyPublished;
+                const rowCls = r.success
+                  ? 'bg-green-50'
+                  : isAlready
+                  ? 'bg-amber-50'
+                  : 'bg-red-50';
+                return (
+                  <div key={i} className={`p-2 rounded text-sm ${rowCls}`}>
+                    <div className="flex justify-between items-center gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-medium shrink-0">{r.storeNick}</span>
+                        <Tag size="small">{r.site}</Tag>
+                      </div>
+                      {r.success ? (
+                        r.permalink ? (
+                          <a
+                            href={r.permalink}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-600 underline text-xs shrink-0"
+                          >
+                            查看
+                          </a>
+                        ) : (
+                          <Tag theme="success" size="small">已上架</Tag>
+                        )
+                      ) : isAlready ? (
+                        r.permalink ? (
+                          <a
+                            href={r.permalink}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-600 underline text-xs shrink-0"
+                          >
+                            查看
+                          </a>
+                        ) : (
+                          <Tag theme="warning" size="small">已存在</Tag>
+                        )
+                      ) : (
+                        <Tag theme="danger" size="small">失败</Tag>
+                      )}
+                    </div>
+                    {r.error && (
+                      <div
+                        className={`mt-1 text-xs break-all ${
+                          isAlready ? 'text-amber-700' : 'text-red-600'
+                        }`}
+                      >
+                        {r.error}
+                      </div>
                     )}
                   </div>
-                  {r.success ? (
-                    r.permalink ? (
-                      <a
-                        href={r.permalink}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-blue-600 underline text-xs"
-                      >
-                        查看
-                      </a>
-                    ) : (
-                      <Tag theme="success" size="small">已上架</Tag>
-                    )
-                  ) : (
-                    <Tag theme="danger" size="small">失败</Tag>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
             <Divider />
             <div className="flex justify-end gap-3">
@@ -849,6 +967,7 @@ export function MiaoshouBoxPage() {
                   setPublishOpen(false);
                   setSelected(new Set());
                   loadBox();
+                  loadPublished();
                 }}
               >
                 完成并刷新

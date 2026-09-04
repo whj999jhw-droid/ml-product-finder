@@ -843,6 +843,57 @@ export async function translateTrendsKeywords(
   return result;
 }
 
+/**
+ * 把中文商品标题翻译成英文（Mercado Libre CBT 上架用）。
+ * ML 的 /sites/CBT/domain_discovery/search 只认英文关键词，中文标题预测不出类目；
+ * 且 CBT 全局标题本身要求英文，所以中文标题必须先翻译。
+ * 已是英文（ASCII 占比 > 60%）时直接原样返回，不消耗 LLM 调用。
+ */
+export async function translateToEnglish(
+  text: string,
+  timeoutMs = 15000,
+): Promise<string | undefined> {
+  const t = (text || '').trim();
+  if (!t) return undefined;
+
+  // 英文占比已足够高，无需翻译
+  const ascii = t.replace(/[^ -~]/g, '').length;
+  if (ascii / t.length > 0.6) return t;
+
+  const cfg = getLlmConfig();
+  if (!cfg) {
+    console.log('[translateToEnglish] LLM 未配置，跳过翻译');
+    return undefined;
+  }
+  try {
+    const raw = await llmGenerate({
+      prompt: `把下面的中文电商商品标题翻译成英文，要求：
+1. 符合 Mercado Libre（拉美）电商搜索习惯，自然、简洁，控制在 80 个字符内；
+2. 保留品牌名、型号、规格、接口类型等关键信息，不要臆造参数；
+3. 只返回翻译后的英文标题本身——不要引号、不要解释、不要任何额外文字。
+
+中文标题：${t}`,
+      systemPrompt:
+        '你是跨境电商翻译助手，擅长把中文商品标题翻译成符合拉美市场的英文电商标题。只输出翻译结果。',
+      timeoutMs,
+      temperature: 0.2,
+    });
+    const out = raw
+      .replace(/```[\s\S]*?```/g, '')
+      .trim()
+      .replace(/^["'“”]+|["'“”]+$/g, '')
+      .trim();
+    if (out && out.split('\n').length === 1 && out.length > 2 && out.length <= 200) {
+      console.log(`[translateToEnglish] "${t.slice(0, 30)}..." -> "${out.slice(0, 60)}"`);
+      return out;
+    }
+    console.warn(`[translateToEnglish] 输出格式异常，已丢弃: ${raw.slice(0, 120)}`);
+  } catch (e: any) {
+    console.error('[translateToEnglish] 翻译失败：', e?.message || e);
+  }
+  return undefined;
+}
+
 // 1x1 透明 PNG，用于 OCR/layout_parsing 等需要图片输入的接口探测（只看接口是否 200）
 const TEST_IMAGE_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
