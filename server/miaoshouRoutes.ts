@@ -217,7 +217,8 @@ const ML_ERROR_HINTS: Record<string, string> = {
   'item.net_proceeds':
     '定价过低：美客多按站点费率计算后净收益为负。请提高售价（建议 ≥ 3.5 USD）后重试',
   'item.dimensions':
-    '包裹尺寸/重量未通过美客多校验（与真实包装不符）。请在妙手修正该商品的尺寸与重量后重试',
+    '包装毛重过低：美客多要求填「含外箱/填充物的实际发货包装重量」，实测 < 62g 会被拒（cause_id 5125）。' +
+    '请在妙手把该商品的重量改成实际包装毛重（建议 ≥ 65g）后重试',
   'item.not_allowed':
     '该类目在所选站点不可售（美客多限制该类目）。请换一个站点，或在美客多后台手动改类目',
   'listing.conflict': '该店已有此商品，已跳过重复上架',
@@ -272,6 +273,10 @@ miaoshouRouter.post('/publish', async (req, res) => {
     // 定价：妙手 globalPrice 是 USD 估算价，但经常异常偏低（如 0.70 USD），会被美客多按
     // 站点费率计算成「净收益为负」（item.net_proceeds），直接拒绝上架。
     const MIN_PRICE_USD = parseFloat(process.env.MIAOSHOU_MIN_PRICE_USD || '3.5');
+    // 包装毛重底价：美客多 CBT 要求填「含外箱/填充物的实际发货包装重量」（见 help/22213），
+    // 实测 < 62g 一律报 item.dimensions（cause_id 5125）。妙手 skuMap.weight 常是 1688 产品净重
+    // （如 Type-C 转接头 30g），不含包装必然被拒。这里按实际毛重下限兜底，可用环境变量覆盖。
+    const MIN_PACKAGE_WEIGHT_G = parseFloat(process.env.MIAOSHOU_MIN_PACKAGE_WEIGHT_G || '65');
     const priceFromGlobal = parseFloat(detailInfo.globalPrice) || 0;
     const priceRaw = parseFloat(detailInfo.price) || 0;
     // 规则：优先详情 globalPrice → 列表 globalPrice → 详情 price → 列表 price → 底价
@@ -400,7 +405,15 @@ miaoshouRouter.post('/publish', async (req, res) => {
         description: description,
         pictureUrls: pictureUrls,
         brand: 'Generic',
-        weight: isNaN(pkgWeight) ? undefined : pkgWeight,
+        // 包装毛重兜底：低于美客多实测下限（约 62g）会被 item.dimensions 拒绝，按下限值上架
+        weight: pkgWeight > 0 && pkgWeight < MIN_PACKAGE_WEIGHT_G
+          ? (console.log(
+              `[Miaoshou Publish] ${itemRef.detailId} 包装毛重 ${pkgWeight}g 低于美客多实测下限，` +
+                `按 ${MIN_PACKAGE_WEIGHT_G}g 上架（建议在妙手改成真实包装毛重）`,
+            ), MIN_PACKAGE_WEIGHT_G)
+          : isNaN(pkgWeight)
+            ? undefined
+            : pkgWeight,
         length: isNaN(pkgLength) ? undefined : pkgLength,
         width: isNaN(pkgWidth) ? undefined : pkgWidth,
         height: isNaN(pkgHeight) ? undefined : pkgHeight,
