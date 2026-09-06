@@ -405,10 +405,24 @@ export async function createListing(draft: ListingDraft, tokenOverride?: string)
     }
   }
 
+  // 站点 → articulo 子域名映射（CBT 商品必须按各站点域名访问；www.mercadolibre.com/p/{id} 是死链）
+  const SITE_TLD: Record<string, string> = {
+    MLM: 'com.mx',
+    MLB: 'com.br',
+    MLC: 'cl',
+    MCO: 'co',
+    MLA: 'com.ar',
+    MPE: 'com.pe',
+    MPT: 'com.uy',
+  };
+  const tld = firstSite?.site_id ? SITE_TLD[firstSite.site_id] : undefined;
+
   return {
     itemId: data.item_id ?? data.id,
-    // ML 不返回 permalink 时按第一个站点 item_id 拼可点击链接
-    permalink: data.permalink || (firstSite?.item_id ? `https://www.mercadolibre.com/p/${firstSite.item_id}` : undefined),
+    // ML 不返回 permalink 时按第一个站点 item_id 拼可点击链接（必须按站点域名，www.mercadolibre.com/p/{id} 是死链）
+    permalink: data.permalink || (firstSite?.item_id && tld
+      ? `https://articulo.mercadolibre.${tld}/p/${firstSite.item_id}`
+      : undefined),
     siteItems,
   };
 }

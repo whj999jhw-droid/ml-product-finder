@@ -20,6 +20,17 @@ import { getStoreRaw, getAllStores } from './stores.js';
 
 export const miaoshouRouter = Router();
 
+// item_id → articulo 子域名（CBT 商品必须按各站点域名访问；www.mercadolibre.com/p/{id} 是死链）
+// MLM→com.mx / MLB→com.br / MLC→cl / MCO→co / MLA→com.ar / MPE→com.pe / MPT→com.uy
+const ITEM_ID_TLD: Record<string, string> = {
+  MLM: 'com.mx', MLB: 'com.br', MLC: 'cl', MCO: 'co',
+  MLA: 'com.ar', MPE: 'com.pe', MPT: 'com.uy',
+};
+const itemSiteTld = (itemId?: string): string => {
+  const prefix = (itemId || '').slice(0, 3);
+  return ITEM_ID_TLD[prefix] || 'com.mx';
+};
+
 // ============ 0. 发布记录持久化（防重复发布 / 已发布标记） ============
 // CBT global items 一家店只能有一条同商品 listing，重复 POST 会报 listing.conflict。
 // 这里把「店铺 × 妙手 detailId」的成功/冲突结果落盘，下次发布直接识别为「已发布」。
@@ -462,7 +473,7 @@ miaoshouRouter.post('/publish', async (req, res) => {
             itemId: si?.item_id || published.itemId,
             permalink:
               si?.item_id
-                ? `https://www.mercadolibre.com/p/${si.item_id}`
+                ? `https://articulo.mercadolibre.${itemSiteTld(si?.item_id)}/p/${si.item_id}`
                 : published.permalink,
           });
         }
