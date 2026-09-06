@@ -664,7 +664,7 @@ export function MiaoshouBoxPage() {
         onChange={(v) => setActiveTab(v as 'unpublished' | 'published')}
         className="px-5"
       >
-        <Tabs.Panel
+        <Tabs.TabPanel
           value="unpublished"
           label={`未发布 (${unpublishedItems.length})`}
         >
@@ -704,8 +704,8 @@ export function MiaoshouBoxPage() {
               </div>
             )}
           </div>
-        </Tabs.Panel>
-        <Tabs.Panel
+        </Tabs.TabPanel>
+        <Tabs.TabPanel
           value="published"
           label={`已发布 (${publishedItems.length})`}
         >
@@ -770,7 +770,7 @@ export function MiaoshouBoxPage() {
               </div>
             )}
           </div>
-        </Tabs.Panel>
+        </Tabs.TabPanel>
       </Tabs>
 
       {/* 商品详情抽屉 */}
