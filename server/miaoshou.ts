@@ -259,3 +259,9 @@ export function clearCache() {
   _cachedBoxList = null;
   _cacheTs = 0;
 }
+
+// 手动写入缓存（用于路由层直接刷新时避免再次调 API）
+export function setCachedBoxList(list: MiaoshouBoxItem[]) {
+  _cachedBoxList = list;
+  _cacheTs = Date.now();
+}

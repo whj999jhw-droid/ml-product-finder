@@ -20,6 +20,7 @@ import {
   Pagination,
   Space,
   Table,
+  Tabs,
   Tag,
 } from 'tdesign-react';
 import type { PrimaryTableCol } from 'tdesign-react';
@@ -148,6 +149,8 @@ export function MiaoshouBoxPage() {
 
   // 已发布记录（storeId|detailId → 记录），用于「已发布」标记与防重复发布
   const [publishedRecords, setPublishedRecords] = useState<Record<string, any>>({});
+  // 当前 tab：未发布 / 已发布
+  const [activeTab, setActiveTab] = useState<'unpublished' | 'published'>('unpublished');
 
   // 每行的发布目标（storeId → sites[]）
   const [targets, setTargets] = useState<Record<string, PublishTarget>>({});
@@ -160,11 +163,19 @@ export function MiaoshouBoxPage() {
       const params = new URLSearchParams({ status: 'notPublished', filterCidSite: 'CBT' });
       if (force) params.set('refresh', '1');
       params.set('pageSize', '2000'); // 一次拉完，后端分页
-      const resp = await fetch(`/api/ml/miaoshou/box?${params}`);
+      const resp = await fetch(`/api/ml/miaoshou/box?${params}`, {
+        headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' },
+      });
       const json = await resp.json();
       if (!json.success) throw new Error(json.message || '加载失败');
       setItems(json.items || []);
       setTotal(json.total || json.items?.length || 0);
+      // 刷新后清掉「已不在妙手列表里」的勾选（妙手侧已删的 item 不再显示也不再可操作）
+      setSelected((prev) => {
+        const ids = new Set((json.items || []).map((it: any) => it.collectBoxDetailId));
+        const next = new Set([...prev].filter((id) => ids.has(id)));
+        return next.size === prev.size ? prev : next;
+      });
       if (!keepPage) setCurrent(1); // 刷新本页时保持当前页码，其余回第1页
     } catch (e: any) {
       MessagePlugin.error(e.message || '加载采集箱失败');
@@ -187,7 +198,9 @@ export function MiaoshouBoxPage() {
   // 加载已发布记录
   const loadPublished = useCallback(async () => {
     try {
-      const resp = await fetch('/api/ml/miaoshou/published');
+      const resp = await fetch('/api/ml/miaoshou/published', {
+        headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' },
+      });
       const json = await resp.json();
       if (json.success) setPublishedRecords(json.records || {});
     } catch {}
@@ -200,16 +213,45 @@ export function MiaoshouBoxPage() {
   }, [loadBox, loadStores, loadPublished]);
 
   // 某店铺是否已发布过某个采集箱商品（CBT 一店一品，重复发必然失败）
-  const isPublished = (storeId: string, detailId: string) => !!publishedRecords[`${storeId}|${detailId}`];
+  const isPublished = (storeId: string, detailId: string) => {
+    const rec = publishedRecords[`${storeId}|${detailId}`];
+    return !!rec && rec.status !== 'failed';
+  };
 
-  // 搜索过滤（分页前过滤全部）
+  // 该 detailId 在任一店铺成功发布过？（用于把「未发布」/「已发布」两个 tab 分开）
+  const hasAnySuccess = (detailId: string) =>
+    Object.values(publishedRecords).some(
+      (r: any) => r.detailId === detailId && r.status === 'success'
+    );
+
+  // 该 detailId 的失败记录（用于「未发布」tab 标注「发布失败」红色标签）
+  const getFailedRecords = (detailId: string) =>
+    Object.values(publishedRecords).filter(
+      (r: any) => r.detailId === detailId && r.status === 'failed'
+    );
+
+  // 该 detailId 的成功记录（用于「已发布」tab 展示）
+  const getSuccessRecords = (detailId: string) =>
+    Object.values(publishedRecords).filter(
+      (r: any) => r.detailId === detailId && r.status === 'success'
+    );
+
+  // 「未发布」tab 数据源：妙手列表里「任一店铺都还没成功发布过」的商品
+  const unpublishedItems = items.filter((it) => !hasAnySuccess(it.collectBoxDetailId));
+  // 「已发布」tab 数据源：从 publishedRecords 里抽取「至少一次成功」的商品，join 妙手列表补全缩略图
+  const publishedItems = items
+    .filter((it) => hasAnySuccess(it.collectBoxDetailId))
+    .map((it) => ({ item: it, records: getSuccessRecords(it.collectBoxDetailId) }));
+
+  // 搜索过滤（分页前过滤全部）—— 只过滤「未发布」tab 当前显示的数据源
   useEffect(() => {
+    const source = unpublishedItems;
     if (!searchKw.trim()) {
-      setFilteredItems(items);
+      setFilteredItems(source);
     } else {
       const kw = searchKw.toLowerCase();
       setFilteredItems(
-        items.filter(
+        source.filter(
           (it) =>
             it.title.toLowerCase().includes(kw) ||
             it.breadcrumb.toLowerCase().includes(kw) ||
@@ -218,7 +260,7 @@ export function MiaoshouBoxPage() {
       );
     }
     setCurrent(1); // 搜索后回第1页
-  }, [searchKw, items]);
+  }, [searchKw, unpublishedItems]);
 
   // 当前页数据
   const pagedItems = filteredItems.slice((current - 1) * pageSize, current * pageSize);
@@ -445,13 +487,27 @@ export function MiaoshouBoxPage() {
       ellipsis: { showTooltip: true },
       cell({ row }) {
         const pubStores = stores.filter((s) => isPublished(s.id, row.collectBoxDetailId));
+        const failedRecs = getFailedRecords(row.collectBoxDetailId);
+        const failedStores = failedRecs
+          .map((r: any) => stores.find((s) => s.id === r.storeId)?.nickname || r.storeId)
+          .filter(Boolean);
         return (
           <div>
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <div className="font-medium text-sm">{row.title}</div>
               {pubStores.length > 0 && (
                 <Tag size="small" theme="success" variant="outline">
                   已发布：{pubStores.map((s) => s.nickname).join('/')}
+                </Tag>
+              )}
+              {failedRecs.length > 0 && (
+                <Tag
+                  size="small"
+                  theme="danger"
+                  variant="light"
+                  title={failedRecs.map((r: any) => `${stores.find((s) => s.id === r.storeId)?.nickname || r.storeId}: ${r.error}`).join('\n')}
+                >
+                  发布失败
                 </Tag>
               )}
             </div>
@@ -584,53 +640,138 @@ export function MiaoshouBoxPage() {
           clearable
         />
         <span className="text-sm text-gray-500 ml-auto">
-          共 {total} 件（搜索命中 {filteredItems.length} 件）
-          {selected.size > 0 && (
+          {activeTab === 'unpublished'
+            ? <>妙手未发布 {unpublishedItems.length} 件 · 搜索命中 {filteredItems.length} 件</>
+            : <>已发布 {publishedItems.length} 件</>}
+          {activeTab === 'unpublished' && selected.size > 0 && (
             <span className="ml-2 text-blue-600 font-medium">已选 {selected.size} 件</span>
           )}
         </span>
-        <Button
-          theme="primary"
-          disabled={selected.size === 0}
-          onClick={handleOpenPublish}
-        >
-          一键发布({selected.size})
-        </Button>
-      </div>
-
-      {/* 表格 */}
-      <div className="flex-1 overflow-auto px-5 pb-3">
-        <Table
-          data={pagedItems}
-          columns={columns}
-          rowKey="collectBoxDetailId"
-          loading={loading}
-          hover
-          stripe
-          bordered
-          selectedRowKeys={[...selected]}
-          onSelectChange={(value) => setSelected(new Set(value as string[]))}
-        />
-        {/* 分页 */}
-        {filteredItems.length > 0 && (
-          <div className="flex justify-end mt-3">
-            <Pagination
-              current={current}
-              pageSize={pageSize}
-              total={filteredItems.length}
-              showJumper
-              pageSizeOptions={[20, 50, 100, 200]}
-              onChange={({ current: c }) => setCurrent(c)}
-              onPageSizeChange={(size) => {
-                // 换每页数量后，尽量停留在原数据位置附近
-                const firstItem = (current - 1) * pageSize;
-                setPageSize(size);
-                setCurrent(Math.floor(firstItem / size) + 1);
-              }}
-            />
-          </div>
+        {activeTab === 'unpublished' && (
+          <Button
+            theme="primary"
+            disabled={selected.size === 0}
+            onClick={handleOpenPublish}
+          >
+            一键发布({selected.size})
+          </Button>
         )}
       </div>
+
+      {/* Tab 切换：未发布 / 已发布 */}
+      <Tabs
+        value={activeTab}
+        onChange={(v) => setActiveTab(v as 'unpublished' | 'published')}
+        className="px-5"
+      >
+        <Tabs.Panel
+          value="unpublished"
+          label={`未发布 (${unpublishedItems.length})`}
+        >
+          <div className="flex-1 overflow-auto px-5 pb-3 pt-2">
+            <Table
+              data={pagedItems}
+              columns={columns}
+              rowKey="collectBoxDetailId"
+              loading={loading}
+              hover
+              stripe
+              bordered
+              selectedRowKeys={[...selected]}
+              onSelectChange={(value) => setSelected(new Set(value as string[]))}
+            />
+            {/* 分页 */}
+            {filteredItems.length > 0 && (
+              <div className="flex justify-end mt-3">
+                <Pagination
+                  current={current}
+                  pageSize={pageSize}
+                  total={filteredItems.length}
+                  showJumper
+                  pageSizeOptions={[20, 50, 100, 200]}
+                  onChange={({ current: c }) => setCurrent(c)}
+                  onPageSizeChange={(size) => {
+                    const firstItem = (current - 1) * pageSize;
+                    setPageSize(size);
+                    setCurrent(Math.floor(firstItem / size) + 1);
+                  }}
+                />
+              </div>
+            )}
+            {unpublishedItems.length === 0 && !loading && (
+              <div className="text-center py-10 text-gray-400 text-sm">
+                妙手采集箱暂无未发布商品（妙手侧已删的会自动从列表移除）
+              </div>
+            )}
+          </div>
+        </Tabs.Panel>
+        <Tabs.Panel
+          value="published"
+          label={`已发布 (${publishedItems.length})`}
+        >
+          <div className="px-5 pb-3 pt-2">
+            {publishedItems.length === 0 ? (
+              <div className="text-center py-10 text-gray-400 text-sm">
+                暂无已发布记录。从「未发布」tab 勾选商品后点击「一键发布」即可上架。
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {publishedItems.map(({ item, records }) => (
+                  <div
+                    key={item.collectBoxDetailId}
+                    className="flex items-center gap-3 p-3 bg-gray-50 rounded border"
+                  >
+                    <Image
+                      src={item.thumbnail}
+                      style={{ width: 56, height: 56, objectFit: 'cover', borderRadius: 4 }}
+                      fit="cover"
+                      referrerPolicy="no-referrer"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-medium text-sm truncate">{item.title}</span>
+                        <Tag size="small" theme="success" variant="light">已上架</Tag>
+                      </div>
+                      <div className="text-xs text-gray-500 mt-0.5">{item.breadcrumb}</div>
+                      <div className="flex gap-1.5 mt-1 flex-wrap">
+                        {records.map((r: any) => {
+                          const store = stores.find((s) => s.id === r.storeId);
+                          return (
+                            <Tag key={r.storeId} size="small" variant="outline">
+                              {store?.nickname || r.storeId}
+                              {r.sites?.length ? `·${r.sites.join('/')}` : ''}
+                            </Tag>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-xs text-gray-500">
+                        {new Date(records[0]?.publishedAt).toLocaleString('zh-CN')}
+                      </div>
+                      {records[0]?.permalink && (
+                        <a
+                          href={records[0].permalink}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-600 underline text-xs block mt-1"
+                        >
+                          查看 ML 链接
+                        </a>
+                      )}
+                      {records[0]?.itemId && (
+                        <div className="text-xs text-gray-400 mt-0.5 break-all">
+                          {records[0].itemId}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </Tabs.Panel>
+      </Tabs>
 
       {/* 商品详情抽屉 */}
       <Drawer

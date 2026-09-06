@@ -12,6 +12,8 @@ import {
   getMercadoCollectBoxDetail,
   getCachedBoxList,
   fetchAndCacheBoxList,
+  clearCache,
+  setCachedBoxList,
   MiaoshouBoxItem,
 } from './miaoshou.js';
 import { createListing, hasCJK, ListingDraft } from './listing.js';
@@ -49,6 +51,12 @@ interface PublishRecord {
   title: string;
   publishedAt: number;
   conflict?: boolean; // true = ML 报 listing.conflict（商品已存在，未取到新 itemId）
+  /** success=已上架（含 conflict 兜底）；failed=发布失败（用户可在「未发布」tab 看到红色标记） */
+  status: 'success' | 'failed';
+  /** 失败原因（friendlyMlError 输出），便于用户诊断后修正重试 */
+  error?: string;
+  /** 失败时 ML 返回的原始错误码（如 item.dimensions / item.net_proceeds / listing.conflict） */
+  errorCode?: string;
 }
 interface PublishRecordsFile {
   version: number;
@@ -96,17 +104,22 @@ miaoshouRouter.get('/box', async (req, res) => {
     const refresh = req.query.refresh === '1';
     const status = (req.query.status as any) || 'notPublished';
 
-    // 默认走 5 分钟缓存；传 ?refresh=1 时强制拉取
+    // 默认走 5 分钟缓存；传 ?refresh=1 时强制拉取并清空旧缓存
+    // 加 Cache-Control 头避免浏览器/中间代理缓存导致「已删商品还显示」
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     let items: MiaoshouBoxItem[] = [];
     let total = 0;
     if (!refresh && getCachedBoxList()) {
       items = getCachedBoxList()!;
       total = items.length;
     } else {
+      // 刷新时先清缓存，避免 fetchAndCacheBoxList 失败后旧数据残留
+      clearCache();
       const result = await searchMercadoCollectBoxAll({ status, filterCidSite: 'CBT', pageSize: 500 });
       items = result.detailList || [];
       total = result.totalRow ?? result.total ?? items.length;
-      if (fetchAndCacheBoxList) fetchAndCacheBoxList().catch(() => {});
+      // 同步更新缓存（不并行）：确保 refresh 后缓存立即反映最新列表
+      setCachedBoxList(items);
     }
 
     res.json({
@@ -146,6 +159,7 @@ miaoshouRouter.get('/box/:detailId/detail', async (req, res) => {
 // ============ 2.5 已发布记录（前端标记「已发布」+ 防重复提交） ============
 
 miaoshouRouter.get('/published', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.json({ success: true, records: getPublishRecords() });
 });
 
@@ -438,9 +452,9 @@ miaoshouRouter.post('/publish', async (req, res) => {
         sites_to_sell: sitesToSell,
       };
 
-      // 0) 本地发布记录命中 → 直接标记「已发布」，不再重复调 ML（CBT 一店一品，重复必报 conflict）
+      // 0) 本地发布记录命中 → 仅在 status=success 时跳过（已上架）；failed 记录允许重试
       const existing = recordsCache.records[recKey(target.storeId, itemRef.detailId)];
-      if (existing && existing.sites.length > 0) {
+      if (existing && existing.sites.length > 0 && existing.status !== 'failed') {
         for (const s of target.sites) {
           results.push({
             detailId: itemRef.detailId,
@@ -488,6 +502,7 @@ miaoshouRouter.post('/publish', async (req, res) => {
             permalink: published.permalink,
             title,
             publishedAt: Date.now(),
+            status: 'success',
           });
           console.log(
             `[Miaoshou Publish] 店铺 ${storeNick} 已发布商品 ${itemRef.detailId} -> ${published.itemId}`
@@ -505,6 +520,7 @@ miaoshouRouter.post('/publish', async (req, res) => {
             title,
             publishedAt: Date.now(),
             conflict: true,
+            status: 'success',
           });
           console.warn(
             `[Miaoshou Publish] 店铺 ${storeNick} 商品 ${itemRef.detailId} 已存在(listing.conflict)，标记为已发布`
@@ -521,19 +537,34 @@ miaoshouRouter.post('/publish', async (req, res) => {
             });
           }
         } else {
+          const errorCode = e?.mlError?.cause?.[0]?.code || e?.code || '';
+          const errorMsg = friendlyMlError(e);
           console.error(
-            `[Miaoshou Publish] 店铺 ${storeNick} 发布商品 ${itemRef.detailId} 失败:`,
+            `[Miaoshou Publish] 店铺 ${storeNick} 发布商品 ${itemRef.detailId} 失败 [${errorCode}]:`,
             e.message
           );
+          // 保存失败记录：前端「未发布」tab 据此标注「发布失败」红色标签，便于用户诊断修正
+          // 覆盖语义：若同一 storeId|detailId 之前是 failed，本次重试成功会覆盖为 success；反之亦然
+          saveRecord({
+            detailId: itemRef.detailId,
+            shopId: itemRef.shopId,
+            storeId: target.storeId,
+            sites: target.sites,
+            title,
+            publishedAt: Date.now(),
+            status: 'failed',
+            error: errorMsg,
+            errorCode,
+          });
           for (const s of target.sites) {
             results.push({
               detailId: itemRef.detailId,
               storeId: target.storeId,
               storeNick,
               site: s,
-            success: false,
-            error: friendlyMlError(e),
-          });
+              success: false,
+              error: errorMsg,
+            });
           }
         }
       }
