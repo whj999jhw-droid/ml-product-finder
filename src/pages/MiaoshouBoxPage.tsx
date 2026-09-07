@@ -676,6 +676,8 @@ export function MiaoshouBoxPage() {
       </div>
 
       {/* Tab 切换：未发布 / 已发布 */}
+      {/* flex-1 + overflow-auto：在 flex-col 父容器内撑满剩余高度并可滚动 */}
+      <div className="flex-1 min-h-0 overflow-auto">
       <Tabs
         value={activeTab}
         onChange={(v) => setActiveTab(v as 'unpublished' | 'published')}
@@ -685,7 +687,7 @@ export function MiaoshouBoxPage() {
           value="unpublished"
           label={`未发布 (${unpublishedItems.length})`}
         >
-          <div className="flex-1 overflow-auto px-5 pb-3 pt-2">
+          <div className="px-5 pb-3 pt-2">
             <Table
               data={pagedItems}
               columns={columns}
@@ -789,6 +791,7 @@ export function MiaoshouBoxPage() {
           </div>
         </Tabs.TabPanel>
       </Tabs>
+      </div>
 
       {/* 商品详情抽屉 */}
       <Drawer
