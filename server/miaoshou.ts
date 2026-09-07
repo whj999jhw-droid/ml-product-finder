@@ -233,9 +233,12 @@ export interface MiaoshouBoxDetailResult {
 }
 
 export async function getMercadoCollectBoxDetail(detailId: string, shopId: string, cid: string): Promise<MiaoshouBoxDetailResult> {
+  // _t 防缓存：妙手详情接口对相同请求体可能做服务端缓存/快照，
+  // 加时间戳让每次请求体不同，强制妙手侧返回最新数据（图片/SKU/属性/标题等编辑立即生效）
+  const antiCache = Date.now();
   return msRequest<MiaoshouBoxDetailResult>(
     '/open/v1/product/collect_box/mercadolibre/collect_box/get_site_collect_item_info',
-    { detailId: Number(detailId), shopId: Number(shopId), cid: Number(cid) }
+    { detailId: Number(detailId), shopId: Number(shopId), cid: Number(cid), _t: antiCache }
   );
 }
 
@@ -243,10 +246,10 @@ export async function getMercadoCollectBoxDetail(detailId: string, shopId: strin
 
 let _cachedBoxList: MiaoshouBoxItem[] | null = null;
 let _cacheTs = 0;
-// 30 秒短缓存：平衡妙手 API 调用频率与数据新鲜度。
-// 用户改完商品后最多等 30 秒，前端自动轮询即可拿到新数据，无需手动点刷新。
+// 10 秒短缓存：平衡妙手 API 调用频率与数据新鲜度。
+// 妙手侧编辑后最多 10 秒内可见（前端 30 秒轮询 + force refresh 立即生效）。
 // 传 ?refresh=1 仍会绕过缓存强制实时拉取。
-const CACHE_TTL_MS = 30 * 1000; // 30 秒缓存
+const CACHE_TTL_MS = 10 * 1000; // 10 秒缓存
 
 export function getCachedBoxList() {
   if (_cachedBoxList && Date.now() - _cacheTs < CACHE_TTL_MS) {

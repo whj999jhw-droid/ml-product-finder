@@ -214,15 +214,15 @@ export function MiaoshouBoxPage() {
     loadPublished();
   }, [loadBox, loadStores, loadPublished]);
 
-  // 自动轮询：每 60 秒静默刷新一次列表，同步妙手侧最新的图片/SKU/属性修改
-  // 后端缓存 TTL 30 秒，所以 60 秒轮询最多看到 30-60 秒前的数据，无需用户手动点刷新
+  // 自动轮询：每 30 秒静默刷新一次列表，同步妙手侧最新的图片/SKU/属性修改
+  // 后端缓存 TTL 10 秒，所以 30 秒轮询最多看到 10-30 秒前的数据，无需用户手动点刷新
   // 跳过条件：正在加载 / 正在发布 / 浏览器标签页不可见（省流量）
   useEffect(() => {
     const timer = setInterval(() => {
       if (document.hidden) return;
       if (loading || publishLoading) return;
-      loadBox(); // 不传 force，走后端 30 秒缓存；过期则实时拉妙手
-    }, 60 * 1000);
+      loadBox(); // 不传 force，走后端 10 秒缓存；过期则实时拉妙手
+    }, 30 * 1000);
     return () => clearInterval(timer);
   }, [loadBox, loading, publishLoading]);
 
@@ -287,8 +287,12 @@ export function MiaoshouBoxPage() {
     setDetailLoading(true);
     setDetailData(null);
     try {
+      // 加时间戳参数 + no-cache 头，双重防浏览器缓存
+      // 妙手侧改了图片/SKU/属性后，每次点「预览」都拿到最新数据
+      const _t = Date.now();
       const resp = await fetch(
-        `/api/ml/miaoshou/box/${item.collectBoxDetailId}/detail?shopId=${item.collectBoxDetailShop.shopId}&cid=${item.cid}`
+        `/api/ml/miaoshou/box/${item.collectBoxDetailId}/detail?shopId=${item.collectBoxDetailShop.shopId}&cid=${item.cid}&_t=${_t}`,
+        { headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' } }
       );
       const json = await resp.json();
       if (!json.success) throw new Error(json.message);
@@ -660,7 +664,7 @@ export function MiaoshouBoxPage() {
           {activeTab === 'unpublished' && selected.size > 0 && (
             <span className="ml-2 text-blue-600 font-medium">已选 {selected.size} 件</span>
           )}
-          <span className="ml-3 text-xs text-gray-400" title="每 60 秒自动同步妙手最新数据">
+          <span className="ml-3 text-xs text-gray-400" title="每 30 秒自动同步妙手最新数据">
             同步于 {new Date(lastSyncTs).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
           </span>
         </span>

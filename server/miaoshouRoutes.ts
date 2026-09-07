@@ -136,6 +136,9 @@ miaoshouRouter.get('/box', async (req, res) => {
 // ============ 2. 获取商品完整详情（预览用） ============
 
 miaoshouRouter.get('/box/:detailId/detail', async (req, res) => {
+  // 详情接口必须禁止浏览器缓存：妙手侧改图片/SKU/属性后，
+  // 如果浏览器用了旧的磁盘缓存，用户点「预览」看到的还是旧数据
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   try {
     const { detailId } = req.params;
     const { shopId, cid } = req.query as { shopId: string; cid: string };
