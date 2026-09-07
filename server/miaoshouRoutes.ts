@@ -337,8 +337,20 @@ miaoshouRouter.post('/publish', async (req, res) => {
         );
       }
     }
-    const description = detailInfo.notesFull || detailInfo.notes || title;
-    const pictureUrls = (detailInfo.sourceImgUrls || []).slice(0, 9); // 最多 9 张主图
+    // 描述优先用 notes（用户在妙手编辑后的英文描述），notesFull 是 1688 货源原始中文快照
+    const description = detailInfo.notes || detailInfo.notesFull || title;
+
+    // 图片优先用 SKU 编辑后的 imgUrls（用户在妙手选的图），回退到 sourceImgUrls（1688 货源全部图）
+    // sourceImgUrls 是货源快照，用户在妙手删图不影响这个字段；SKU imgUrls 才是用户选择后的
+    const skuImgUrls: string[] = [];
+    for (const v of Object.values(detailInfo.skuMap || {})) {
+      const sv = v as any;
+      if (sv.isDelete) continue;
+      for (const u of sv.imgUrls || []) {
+        if (!skuImgUrls.includes(u)) skuImgUrls.push(u);
+      }
+    }
+    const pictureUrls = (skuImgUrls.length > 0 ? skuImgUrls : detailInfo.sourceImgUrls || []).slice(0, 9);
 
     // ---- 从 skuMap 提取重量/尺寸/SKU 信息（妙手编辑过的数据都在这里）----
     const skuMap: Record<string, any> = detailInfo.skuMap || {};

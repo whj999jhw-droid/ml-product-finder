@@ -812,12 +812,26 @@ export function MiaoshouBoxPage() {
         ) : detailData ? (
           <div className="space-y-4">
             <div className="flex items-start gap-4">
-              <Image
-                src={detailData.sourceImgUrls?.[0] || detailItem?.thumbnail || ''}
-                style={{ width: 120, height: 120, objectFit: 'cover', borderRadius: 8 }}
-                fit="cover"
-                referrerPolicy="no-referrer"
-              />
+              {/* 主图优先用 SKU 编辑后的第一张图，回退到 sourceImgUrls */}
+              {(() => {
+                const skuImgs: string[] = [];
+                for (const v of Object.values(detailData.skuMap || {})) {
+                  const sv = v as any;
+                  if (sv.isDelete) continue;
+                  for (const u of sv.imgUrls || []) {
+                    if (!skuImgs.includes(u)) skuImgs.push(u);
+                  }
+                }
+                const mainImg = skuImgs[0] || detailData.sourceImgUrls?.[0] || detailItem?.thumbnail || '';
+                return (
+                  <Image
+                    src={mainImg}
+                    style={{ width: 120, height: 120, objectFit: 'cover', borderRadius: 8 }}
+                    fit="cover"
+                    referrerPolicy="no-referrer"
+                  />
+                );
+              })()}
               <div className="flex-1">
                 <div className="font-semibold text-base">{detailData.title}</div>
                 <div className="text-sm text-gray-500 mt-1">{detailData.breadcrumb}</div>
@@ -829,33 +843,62 @@ export function MiaoshouBoxPage() {
               </div>
             </div>
 
-            {detailData.sourceImgUrls && detailData.sourceImgUrls.length > 1 && (
-              <div>
-                <div className="text-sm font-medium mb-2">货源图片（共 {detailData.sourceImgUrls.length} 张）</div>
-                <div className="flex gap-2 flex-wrap">
-                  {detailData.sourceImgUrls.slice(0, 9).map((url, i) => (
-                    <Image
-                      key={i}
-                      src={url}
-                      style={{ width: 80, height: 80, objectFit: 'cover', borderRadius: 4 }}
-                      fit="cover"
-                      referrerPolicy="no-referrer"
-                    />
-                  ))}
+            {/* 商品图片：优先显示 SKU 编辑后的图，再显示货源全部图 */}
+            {(() => {
+              const skuImgs: string[] = [];
+              for (const v of Object.values(detailData.skuMap || {})) {
+                const sv = v as any;
+                if (sv.isDelete) continue;
+                for (const u of sv.imgUrls || []) {
+                  if (!skuImgs.includes(u)) skuImgs.push(u);
+                }
+              }
+              const allImgs = skuImgs.length > 0 ? skuImgs : (detailData.sourceImgUrls || []);
+              if (!allImgs.length) return null;
+              return (
+                <div>
+                  <div className="text-sm font-medium mb-2">
+                    商品图片（{skuImgs.length > 0 ? `妙手编辑 ${skuImgs.length} 张` : `货源原始 ${allImgs.length} 张`}）
+                  </div>
+                  <div className="flex gap-2 flex-wrap">
+                    {allImgs.slice(0, 9).map((url, i) => (
+                      <Image
+                        key={i}
+                        src={url}
+                        style={{ width: 80, height: 80, objectFit: 'cover', borderRadius: 4 }}
+                        fit="cover"
+                        referrerPolicy="no-referrer"
+                      />
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
-            {detailData.notesFull && (
+            {/* 描述：优先显示 notes（妙手编辑后的英文），notesFull 作为「货源原始描述」折叠 */}
+            {detailData.notes && (
               <div>
-                <div className="text-sm font-medium mb-1">完整描述</div>
+                <div className="text-sm font-medium mb-1">商品描述</div>
                 <div
                   className="text-sm text-gray-600 p-3 rounded bg-gray-50"
                   style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6 }}
                 >
-                  {detailData.notesFull}
+                  {detailData.notes}
                 </div>
               </div>
+            )}
+            {detailData.notesFull && detailData.notesFull !== detailData.notes && (
+              <details>
+                <summary className="text-sm text-gray-400 cursor-pointer hover:text-gray-600">
+                  货源原始描述（1688 快照，未编辑）
+                </summary>
+                <div
+                  className="text-sm text-gray-500 p-3 rounded bg-gray-50 mt-1"
+                  style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6 }}
+                >
+                  {detailData.notesFull}
+                </div>
+              </details>
             )}
 
             {/* SKU 明细：尺寸/重量/库存（妙手编辑过的数据，发布时原样传美客多 PACKAGE_* 属性） */}
