@@ -148,9 +148,18 @@ miaoshouRouter.get('/box/:detailId/detail', async (req, res) => {
     }
 
     const detail = await getMercadoCollectBoxDetail(detailId, shopId, cid);
+    // 详情接口不返回 globalPrice（全球净收益），从列表缓存补上
+    // 列表接口有 globalPrice 字段（5.83），详情没有——前端需要它来显示净收益
+    const cached = getCachedBoxList();
+    const listItem = cached?.find((it) => it.collectBoxDetailId === detailId);
+    const merged = {
+      ...detail.siteCollectItemInfo,
+      // 如果详情接口没返回 globalPrice，从列表补
+      globalPrice: detail.siteCollectItemInfo.globalPrice || listItem?.globalPrice || '',
+    };
     res.json({
       success: true,
-      detail: detail.siteCollectItemInfo,
+      detail: merged,
       raw: detail,
     });
   } catch (e: any) {
@@ -417,6 +426,26 @@ miaoshouRouter.post('/publish', async (req, res) => {
       }
     }
 
+    // 各站点独立定价：妙手 siteAndPriceMap 非空时按站点定价，否则用 globalPrice
+    // ML CBT sites_to_sell 每站点有独立 price 字段（USD），定价模式 = netProceeds（净收益）
+    // 妙手 siteAndPriceMap key 格式 "MX(Up)"，值是 USD 字符串（如 "5.83"），空串表示未设置
+    const sitePriceMap: Record<string, number> = {};
+    for (const [msSite, priceStr] of Object.entries(detailInfo.siteAndPriceMap || {})) {
+      const ml = msSiteToMl[msSite];
+      const price = parseFloat(priceStr as string);
+      if (ml && price > 0) sitePriceMap[ml] = price;
+    }
+    // 列表接口的 siteAndPriceMap 在 collectBoxDetailShop 里，也合并进来
+    const cached2 = getCachedBoxList();
+    const listItem2 = cached2?.find((it) => it.collectBoxDetailId === itemRef.detailId);
+    if (listItem2?.collectBoxDetailShop?.siteAndPriceMap) {
+      for (const [msSite, priceStr] of Object.entries(listItem2.collectBoxDetailShop.siteAndPriceMap)) {
+        const ml = msSiteToMl[msSite];
+        const price = parseFloat(priceStr);
+        if (ml && price > 0 && !sitePriceMap[ml]) sitePriceMap[ml] = price;
+      }
+    }
+
     // 3. 逐店铺执行（每个店铺按 CBT 模型发布一个 Listing，挂勾选的站点）
     for (const target of targets) {
       const store = getStoreRaw(target.storeId);
@@ -424,10 +453,11 @@ miaoshouRouter.post('/publish', async (req, res) => {
 
       if (!target.sites || !target.sites.length) continue;
 
-      // 组装 CBT sites_to_sell：逐站点独立 listing_type 与标题（妙手编辑值优先）
+      // 组装 CBT sites_to_sell：逐站点独立 price / listing_type / title（妙手编辑值优先）
       const sitesToSell = target.sites.map((siteId) => ({
         site_id: siteId,
-        price: basePriceUsd,
+        // 优先妙手 siteAndPriceMap 的各站点价 → 否则用 globalPrice 兜底
+        price: sitePriceMap[siteId] || basePriceUsd,
         listing_type_id:
           siteListingTypeFromSku[siteId] || siteListingTypeTop[siteId] || 'gold_special',
         title: siteTitleMap[siteId] || title,

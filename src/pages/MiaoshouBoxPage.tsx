@@ -836,8 +836,8 @@ export function MiaoshouBoxPage() {
                 <div className="font-semibold text-base">{detailData.title}</div>
                 <div className="text-sm text-gray-500 mt-1">{detailData.breadcrumb}</div>
                 <div className="flex gap-3 mt-2">
-                  <Tag theme="success">净收益 ${parseFloat(detailData.globalPrice || '0').toFixed(2)}</Tag>
-                  <Tag theme="warning">货源价 ¥{detailData.price}</Tag>
+                  <Tag theme="success">全球净收益 ${parseFloat(detailData.globalPrice || '0').toFixed(2)}</Tag>
+                  <Tag theme="warning">货源价 ¥{detailData.originPrice || detailData.price}</Tag>
                   <Tag>库存 {detailData.stock || '-'}</Tag>
                 </div>
               </div>
@@ -964,12 +964,23 @@ export function MiaoshouBoxPage() {
               <div>
                 <div className="text-sm font-medium mb-2">各站点定价</div>
                 <div className="space-y-1">
-                  {Object.entries(detailData.siteAndPriceMap).map(([site, price]) => (
-                    <div key={site} className="flex justify-between text-sm p-2 bg-gray-50 rounded">
-                      <span>{SITE_LABEL[site] || site}</span>
-                      <span className="font-medium">${price}</span>
-                    </div>
-                  ))}
+                  {Object.entries(detailData.siteAndPriceMap).map(([site, price]) => {
+                    const msToMl: Record<string,string> = {'MX(Up)':'MLM','BR(Up)':'MLB','CL(Up)':'MLC','CO(Up)':'MCO'};
+                    const ml = msToMl[site] || site;
+                    const priceNum = parseFloat(price as string);
+                    return (
+                      <div key={site} className="flex justify-between text-sm p-2 bg-gray-50 rounded">
+                        <span>{SITE_LABEL[ml] || site}</span>
+                        <span className="font-medium">
+                          {priceNum > 0 ? `$${priceNum.toFixed(2)} USD` : <span className="text-gray-400">未设置（用全球净收益兜底）</span>}
+                        </span>
+                      </div>
+                    );
+                  })}
+                  <div className="text-xs text-gray-400 mt-1">
+                    定价模式：{detailData.pricingMode === 'netProceeds' ? '净收益定价（netProceeds）' : detailData.pricingMode}
+                    {" · 空值站点将用全球净收益 $'}{parseFloat(detailData.globalPrice || '0').toFixed(2)}{' 兜底'}
+                  </div>
                 </div>
               </div>
             )}
