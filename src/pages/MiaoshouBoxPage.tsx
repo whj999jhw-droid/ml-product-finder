@@ -5,7 +5,7 @@
  * 一键发布到选定店铺的选定站点（CBT 全球售）
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Button,
   Card,
@@ -119,6 +119,7 @@ export function MiaoshouBoxPage() {
   const [loading, setLoading] = useState(false);
   const [total, setTotal] = useState(0);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [lastSyncTs, setLastSyncTs] = useState<number>(Date.now());
 
   // 分页
   const [current, setCurrent] = useState(1);
@@ -170,6 +171,7 @@ export function MiaoshouBoxPage() {
       if (!json.success) throw new Error(json.message || '加载失败');
       setItems(json.items || []);
       setTotal(json.total || json.items?.length || 0);
+      setLastSyncTs(Date.now());
       // 刷新后清掉「已不在妙手列表里」的勾选（妙手侧已删的 item 不再显示也不再可操作）
       setSelected((prev) => {
         const ids = new Set((json.items || []).map((it: any) => it.collectBoxDetailId));
@@ -211,6 +213,18 @@ export function MiaoshouBoxPage() {
     loadStores();
     loadPublished();
   }, [loadBox, loadStores, loadPublished]);
+
+  // 自动轮询：每 60 秒静默刷新一次列表，同步妙手侧最新的图片/SKU/属性修改
+  // 后端缓存 TTL 30 秒，所以 60 秒轮询最多看到 30-60 秒前的数据，无需用户手动点刷新
+  // 跳过条件：正在加载 / 正在发布 / 浏览器标签页不可见（省流量）
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (document.hidden) return;
+      if (loading || publishLoading) return;
+      loadBox(); // 不传 force，走后端 30 秒缓存；过期则实时拉妙手
+    }, 60 * 1000);
+    return () => clearInterval(timer);
+  }, [loadBox, loading, publishLoading]);
 
   // 某店铺是否已发布过某个采集箱商品（CBT 一店一品，重复发必然失败）
   const isPublished = (storeId: string, detailId: string) => {
@@ -646,6 +660,9 @@ export function MiaoshouBoxPage() {
           {activeTab === 'unpublished' && selected.size > 0 && (
             <span className="ml-2 text-blue-600 font-medium">已选 {selected.size} 件</span>
           )}
+          <span className="ml-3 text-xs text-gray-400" title="每 60 秒自动同步妙手最新数据">
+            同步于 {new Date(lastSyncTs).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+          </span>
         </span>
         {activeTab === 'unpublished' && (
           <Button

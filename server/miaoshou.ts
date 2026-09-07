@@ -114,6 +114,9 @@ export async function searchMercadoCollectBox(opts: {
   filterCidSite?: string; // 'CBT' | 'CROSS_BORDER'
   sourceItemIdKeyword?: string;
 }): Promise<MiaoshouBoxListResult> {
+  // _t 防缓存参数：妙手 API 可能对相同请求体做服务端缓存/索引快照，
+  // 加时间戳让每次请求体不同，强制妙手侧返回最新数据
+  const antiCache = Date.now();
   return msRequest<MiaoshouBoxListResult>(
     '/open/v1/product/collect_box/mercadolibre/collect_box/search_collect_box_detailList',
     {
@@ -124,6 +127,7 @@ export async function searchMercadoCollectBox(opts: {
         ...(opts.filterCidSite ? { filterCidSite: opts.filterCidSite } : {}),
         ...(opts.sourceItemIdKeyword ? { sourceItemIdKeyword: opts.sourceItemIdKeyword } : {}),
       },
+      _t: antiCache, // 妙手忽略未知字段，但我们用这个破坏请求体哈希
     }
   );
 }
@@ -239,7 +243,10 @@ export async function getMercadoCollectBoxDetail(detailId: string, shopId: strin
 
 let _cachedBoxList: MiaoshouBoxItem[] | null = null;
 let _cacheTs = 0;
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟缓存
+// 30 秒短缓存：平衡妙手 API 调用频率与数据新鲜度。
+// 用户改完商品后最多等 30 秒，前端自动轮询即可拿到新数据，无需手动点刷新。
+// 传 ?refresh=1 仍会绕过缓存强制实时拉取。
+const CACHE_TTL_MS = 30 * 1000; // 30 秒缓存
 
 export function getCachedBoxList() {
   if (_cachedBoxList && Date.now() - _cacheTs < CACHE_TTL_MS) {
