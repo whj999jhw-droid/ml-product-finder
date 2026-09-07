@@ -442,6 +442,8 @@ export function MiaoshouBoxPage() {
       MessagePlugin.error('发布失败: ' + (e.message || ''));
     } finally {
       setPublishLoading(false);
+      // 发布完成（成功/失败/异常）后自动清空勾选，无需手动点「完成并刷新」
+      setSelected(new Set());
     }
   };
 
