@@ -979,7 +979,7 @@ export function MiaoshouBoxPage() {
                   })}
                   <div className="text-xs text-gray-400 mt-1">
                     定价模式：{detailData.pricingMode === 'netProceeds' ? '净收益定价（netProceeds）' : detailData.pricingMode}
-                    {" · 空值站点将用全球净收益 $'}{parseFloat(detailData.globalPrice || '0').toFixed(2)}{' 兜底'}
+                    {' · 空值站点将用全球净收益 $'}{parseFloat(detailData.globalPrice || '0').toFixed(2)}{' 兜底'}
                   </div>
                 </div>
               </div>
