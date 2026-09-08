@@ -14,6 +14,7 @@ import {
   fetchAndCacheBoxList,
   clearCache,
   setCachedBoxList,
+  saveMoveCollectTask,
   MiaoshouBoxItem,
 } from './miaoshou.js';
 import { createListing, hasCJK, ListingDraft } from './listing.js';
@@ -601,6 +602,18 @@ miaoshouRouter.post('/publish', async (req, res) => {
           console.log(
             `[Miaoshou Publish] 店铺 ${storeNick} 已发布商品 ${itemRef.detailId} -> ${published.itemId}`
           );
+          // 同步妙手状态：发布成功后调用 save_move_collect_task 将商品从采集箱移除
+          // （best effort：失败不影响发布结果，仅打日志）
+          try {
+            const msSync = await saveMoveCollectTask([Number(itemRef.detailId)]);
+            console.log(
+              `[Miaoshou Publish] 妙手状态同步: detailId=${itemRef.detailId} → ${msSync.result} ${msSync.message}`
+            );
+          } catch (syncErr: any) {
+            console.warn(
+              `[Miaoshou Publish] 妙手状态同步失败（不影响发布）: ${syncErr.message}`
+            );
+          }
         }
       } catch (e: any) {
         const code = e?.mlError?.cause?.[0]?.code;
@@ -619,6 +632,17 @@ miaoshouRouter.post('/publish', async (req, res) => {
           console.warn(
             `[Miaoshou Publish] 店铺 ${storeNick} 商品 ${itemRef.detailId} 已存在(listing.conflict)，标记为已发布`
           );
+          // 冲突场景也同步妙手状态
+          try {
+            const msSync = await saveMoveCollectTask([Number(itemRef.detailId)]);
+            console.log(
+              `[Miaoshou Publish] 妙手状态同步(conflict): detailId=${itemRef.detailId} → ${msSync.result}`
+            );
+          } catch (syncErr: any) {
+            console.warn(
+              `[Miaoshou Publish] 妙手状态同步失败(conflict): ${syncErr.message}`
+            );
+          }
           for (const s of target.sites) {
             results.push({
               detailId: itemRef.detailId,

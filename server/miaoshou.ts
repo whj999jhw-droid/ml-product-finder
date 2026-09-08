@@ -275,3 +275,29 @@ export function setCachedBoxList(list: MiaoshouBoxItem[]) {
   _cachedBoxList = list;
   _cacheTs = Date.now();
 }
+
+// ============ 发布到店铺（状态同步） ============
+
+/**
+ * 将采集箱商品「认领/发布」到店铺，使其从采集箱移除（状态变为已发布）。
+ * 注意：此接口会触发妙手自身发布流程到 ML，可能与我们自建的发布产生冲突。
+ * 因此仅在确认我们已成功发布后调用，让妙手侧同步状态。
+ *
+ * @param detailIds 要发布的商品 detailId 列表（最多 200 个）
+ * @returns 妙手返回的结果
+ */
+export async function saveMoveCollectTask(detailIds: number[]): Promise<{ result: string; message: string }> {
+  if (!detailIds.length) return { result: 'skip', message: '无商品需要发布' };
+  // 分批调用，每批最多 200 个
+  const BATCH = 200;
+  let lastResult = { result: 'skip', message: '' };
+  for (let i = 0; i < detailIds.length; i += BATCH) {
+    const batch = detailIds.slice(i, i + BATCH);
+    const data = await msRequest<{ message: string | null }>(
+      '/open/v1/product/collect_box/mercadolibre/move_collect/save_move_collect_task',
+      { detailIds: batch }
+    );
+    lastResult = { result: 'success', message: data?.message || 'ok' };
+  }
+  return lastResult;
+}
