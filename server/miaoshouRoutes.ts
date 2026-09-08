@@ -33,6 +33,24 @@ const itemSiteTld = (itemId?: string): string => {
   return ITEM_ID_TLD[prefix] || 'com.mx';
 };
 
+// ============ ML CBT 各站点费率（用于 netProceeds → listingPrice 反推） ============
+// 妙手 pricingMode=netProceeds 时，globalPrice 是「目标净利润（卖家到手金额）」，
+// 但 ML CBT API 的 price 字段是「listing price（买家支付价）」，ML 会自动扣佣金+支付费。
+// 若不反推，实际净收益 = globalPrice × (1 - feeRate)，低于用户设定值。
+// 正确做法：listingPrice = globalPrice / (1 - feeRate)，使 ML 计算后的 net_proceeds = globalPrice。
+// 费率 = commissionRate + pagoFeeRate（来自 profit.ts 内置默认值）。
+const ML_FEE_RATES: Record<string, number> = {
+  MLM: 0.04 + 0.04,   // 墨西哥：佣金 4% + 支付 4% = 8%
+  MLB: 0.125 + 0.045, // 巴西：佣金 12.5% + 支付 4.5% = 17%
+  MLC: 0.12 + 0.04,   // 智利：佣金 12% + 支付 4% = 16%
+  MCO: 0.12 + 0.04,   // 哥伦比亚：佣金 12% + 支付 4% = 16%
+};
+/** 用环境变量覆盖费率，方便后续调整 */
+for (const site of Object.keys(ML_FEE_RATES)) {
+  const env = process.env[`ML_FEE_RATE_${site}`];
+  if (env) ML_FEE_RATES[site] = parseFloat(env);
+}
+
 // ============ 0. 发布记录持久化（防重复发布 / 已发布标记） ============
 // CBT global items 一家店只能有一条同商品 listing，重复 POST 会报 listing.conflict。
 // 这里把「店铺 × 妙手 detailId」的成功/冲突结果落盘，下次发布直接识别为「已发布」。
@@ -307,17 +325,19 @@ miaoshouRouter.post('/publish', async (req, res) => {
     }
 
     // 2. 转为 ListingDraft 骨架
-    // 定价：妙手 globalPrice 是 USD 估算价，但经常异常偏低（如 0.70 USD），会被美客多按
-    // 站点费率计算成「净收益为负」（item.net_proceeds），直接拒绝上架。
+    // 定价：妙手 pricingMode=netProceeds 时，globalPrice 是「目标净利润」（卖家实际到手 USD），
+    // 不是 listing price。后续会按各站点费率反推 listing price（见下方 netProceeds 转换段）。
+    // 妙手 globalPrice 偶尔异常偏低（如 0.70 USD），低于 MIN_PRICE_USD 时按底价兜底上架。
     const MIN_PRICE_USD = parseFloat(process.env.MIAOSHOU_MIN_PRICE_USD || '3.5');
     // 包装毛重底价：美客多 CBT 要求填「含外箱/填充物的实际发货包装重量」（见 help/22213），
     // 实测 < 62g 一律报 item.dimensions（cause_id 5125）。妙手 skuMap.weight 常是 1688 产品净重
     // （如 Type-C 转接头 30g），不含包装必然被拒。这里按实际毛重下限兜底，可用环境变量覆盖。
     const MIN_PACKAGE_WEIGHT_G = parseFloat(process.env.MIAOSHOU_MIN_PACKAGE_WEIGHT_G || '65');
+    // 妙手详情 API 的 price 字段实际返回的是 globalPrice（目标净利润），globalPrice 字段本身不返回。
+    // 列表 API 的 price 是货源价（1688），globalPrice 才是目标净利润。两者语义不一致，需按优先级取值。
     const priceFromGlobal = parseFloat(detailInfo.globalPrice) || 0;
     const priceRaw = parseFloat(detailInfo.price) || 0;
-    // 规则：优先详情 globalPrice → 列表 globalPrice → 详情 price → 列表 price → 底价
-    // （妙手详情与列表的 price 语义不一致：详情 price 常是 0.7 这类异常值，列表 price 更靠谱）
+    // 规则：优先详情 globalPrice → 列表 globalPrice → 详情 price（= globalPrice）→ 列表 price（= 货源价）→ 底价
     let basePriceUsd =
       priceFromGlobal ||
       parseFloat(itemRef.globalPrice) ||
@@ -427,7 +447,6 @@ miaoshouRouter.post('/publish', async (req, res) => {
     }
 
     // 各站点独立定价：妙手 siteAndPriceMap 非空时按站点定价，否则用 globalPrice
-    // ML CBT sites_to_sell 每站点有独立 price 字段（USD），定价模式 = netProceeds（净收益）
     // 妙手 siteAndPriceMap key 格式 "MX(Up)"，值是 USD 字符串（如 "5.83"），空串表示未设置
     const sitePriceMap: Record<string, number> = {};
     for (const [msSite, priceStr] of Object.entries(detailInfo.siteAndPriceMap || {})) {
@@ -446,6 +465,14 @@ miaoshouRouter.post('/publish', async (req, res) => {
       }
     }
 
+    // ============ netProceeds → listingPrice 反推 ============
+    // 妙手 pricingMode=netProceeds 时，globalPrice / siteAndPriceMap 的值是「目标净利润」，
+    // 但 ML CBT API 的 price 字段是「listing price（买家支付价）」，ML 会自动扣佣金+支付费。
+    // 直接发送 globalPrice 会导致实际净收益 = globalPrice × (1 - feeRate)，低于用户设定值。
+    // 修复：listingPrice = netProfitTarget / (1 - feeRate)，使 ML 计算后的 net_proceeds = 目标净利润。
+    const pricingMode = detailInfo.pricingMode || '';
+    const isNetProceeds = pricingMode === 'netProceeds';
+
     // 3. 逐店铺执行（每个店铺按 CBT 模型发布一个 Listing，挂勾选的站点）
     for (const target of targets) {
       const store = getStoreRaw(target.storeId);
@@ -454,14 +481,36 @@ miaoshouRouter.post('/publish', async (req, res) => {
       if (!target.sites || !target.sites.length) continue;
 
       // 组装 CBT sites_to_sell：逐站点独立 price / listing_type / title（妙手编辑值优先）
-      const sitesToSell = target.sites.map((siteId) => ({
-        site_id: siteId,
-        // 优先妙手 siteAndPriceMap 的各站点价 → 否则用 globalPrice 兜底
-        price: sitePriceMap[siteId] || basePriceUsd,
-        listing_type_id:
-          siteListingTypeFromSku[siteId] || siteListingTypeTop[siteId] || 'gold_special',
-        title: siteTitleMap[siteId] || title,
-      }));
+      // netProceeds 模式下按各站点费率反推 listing price，确保 ML 计算后的净收益 = 目标净利润
+      const sitesToSell = target.sites.map((siteId) => {
+        const feeRate = ML_FEE_RATES[siteId] || 0;
+        const rawPrice = sitePriceMap[siteId] || basePriceUsd;
+        const listingPrice = isNetProceeds
+          ? rawPrice / Math.max(1 - feeRate, 0.01)
+          : rawPrice;
+        const rounded = Math.round(listingPrice * 100) / 100;
+        if (isNetProceeds) {
+          console.log(
+            `[Miaoshou Publish] ${itemRef.detailId} ${siteId}: 目标净利润 ${rawPrice.toFixed(2)} USD` +
+              ` × 费率 ${feeRate} → listing price ${rounded.toFixed(2)} USD`
+          );
+        }
+        return {
+          site_id: siteId,
+          price: rounded,
+          listing_type_id:
+            siteListingTypeFromSku[siteId] || siteListingTypeTop[siteId] || 'gold_special',
+          title: siteTitleMap[siteId] || title,
+        };
+      });
+
+      // 主站点 listing price（draft.price 用于单站点回退）
+      const mainSiteId = target.sites[0];
+      const mainFeeRate = ML_FEE_RATES[mainSiteId] || 0;
+      const draftListingPrice = isNetProceeds
+        ? basePriceUsd / Math.max(1 - mainFeeRate, 0.01)
+        : basePriceUsd;
+      const draftPriceRounded = Math.round(draftListingPrice * 100) / 100;
 
       // 构造 ListingDraft
       const draft: ListingDraft = {
@@ -469,7 +518,7 @@ miaoshouRouter.post('/publish', async (req, res) => {
         storeId: target.storeId,
         title: title,
         category_id: detailInfo.cid || 'MLM1051', // 回退常用分类
-        price: basePriceUsd,
+        price: draftPriceRounded,
         currency_id: 'USD',
         available_quantity: totalStock,
         description: description,
