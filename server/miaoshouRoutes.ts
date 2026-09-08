@@ -20,6 +20,7 @@ import {
 import { createListing, hasCJK, ListingDraft } from './listing.js';
 import { translateToEnglish } from './aiService.js';
 import { getStoreRaw, getAllStores } from './stores.js';
+import { processAndUploadVideo } from './videoClips.js';
 
 export const miaoshouRouter = Router();
 
@@ -613,6 +614,32 @@ miaoshouRouter.post('/publish', async (req, res) => {
             console.warn(
               `[Miaoshou Publish] 妙手状态同步失败（不影响发布）: ${syncErr.message}`
             );
+          }
+
+          // 视频处理：如果商品有 1688 视频，自动下载→转换为 ML Clips 格式→上传
+          const videoUrl = detailInfo.mainImgVideoUrl || detailInfo.videoUrl;
+          if (videoUrl && published.itemId) {
+            const clipSites = target.sites.filter((s) => ['MLM', 'MLB', 'MLC', 'MCO'].includes(s));
+            if (clipSites.length > 0) {
+              try {
+                const vidResult = await processAndUploadVideo({
+                  detailId: itemRef.detailId,
+                  mainImgVideoUrl: videoUrl,
+                  cbtItemId: published.itemId,
+                  siteIds: clipSites,
+                  storeId: target.storeId,
+                });
+                if (vidResult.success) {
+                  console.log(`[Miaoshou Publish] ${itemRef.detailId} 视频已上传至 ML Clips`);
+                } else {
+                  console.warn(
+                    `[Miaoshou Publish] ${itemRef.detailId} 视频处理失败(${vidResult.stage}): ${vidResult.error}`
+                  );
+                }
+              } catch (vidErr: any) {
+                console.warn(`[Miaoshou Publish] ${itemRef.detailId} 视频处理异常: ${vidErr.message}`);
+              }
+            }
           }
         }
       } catch (e: any) {
