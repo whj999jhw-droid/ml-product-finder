@@ -181,8 +181,7 @@ export async function getVideoInfo(filePath: string): Promise<VideoInfo | null> 
  */
 export async function convertToClipsFormat(
   inputPath: string,
-  outputPath: string,
-  variant = 0
+  outputPath: string
 ): Promise<{ success: boolean; info: VideoInfo | null; error?: string }> {
   const info = await getVideoInfo(inputPath);
   if (!info) return { success: false, info: null, error: 'ffprobe 失败' };
@@ -205,14 +204,6 @@ export async function convertToClipsFormat(
   // 确保裁剪区域在画面内
   cropW = Math.max(1, Math.min(cropW, srcW));
   cropX = Math.max(0, Math.min(cropX, srcW - cropW));
-
-  // 变体（variant>0）：平移裁切窗口，让输出文件内容不同。
-  // 原因：ML Clips 按内容哈希去重，同一文件重复上传只会返回上一次失败的 clip 状态，
-  // 必须换一片画面区域才能生成新 clip 重新送审。
-  if (variant > 0) {
-    const shift = ((variant * 7) % 9) * 2 - 8; // -8 .. +8 px
-    cropX = Math.max(0, Math.min(cropX + shift, srcW - cropW));
-  }
 
   // 移除底部 12%（文字/水印区域）
   const bottomCrop = Math.round(srcH * 0.12);
@@ -346,8 +337,6 @@ export interface VideoRecord {
   lastUploadedClipUuid?: string;
   /** 上传响应返回的站点列表 */
   lastUploadedSiteIds?: string[];
-  /** 转换变体编号：>0 表示为绕过 ML 内容去重而平移了裁切窗口 */
-  variant?: number;
   /** 各站点审核状态：MLM → UNDER_REVIEW / AVAILABLE / REJECTED ... */
   siteStatuses: Record<string, string>;
   stage?: 'auth' | 'check' | 'download' | 'convert' | 'backup' | 'upload' | 'done';
@@ -528,7 +517,6 @@ export async function processAndUploadVideo(opts: {
   rec.updatedAt = now();
 
   // 0. 先查 ML 是否已有 clip
-  let retryVariant = 0;
   const pre = await fetchClipStatus(cbtItemId, storeId);
   // 鉴权失败：token 过期且续期失败 → 不浪费带宽下载/转换，直接给出可操作提示
   if (!pre.ok && pre.authError) {
@@ -542,17 +530,18 @@ export async function processAndUploadVideo(opts: {
   if (!force && pre.ok && pre.clipCount > 0) {
     const review = overallReview(pre.siteStatuses);
     if (review.kind === 'bad') {
-      // 全部站点上传失败/被拒（如 UPLOADING_ERROR）→ 不算「已上传」，按原因重传
-      // 换裁切变体重传：ML Clips 按内容哈希去重，同一文件重传只会返回旧 clip 的失败状态
-      retryVariant = (rec.refreshAttempts || 0) + 1;
+      // 全部站点上传失败/被拒（UPLOADING_ERROR / REJECTED）→ 不算「已上传」，按原因重传。
+      // 注意：实测 ML 不为同文件去重（同一商品连续 4 次上传拿到 4 个不同 clip_uuid），
+      // 因此重传可以直接复用服务器备份，无需重新下载转换。
+      // 另外 DELETE /clips/{uuid} 对 UPLOADING_ERROR 状态的 clip 也返回 ERROR，删不掉，
+      // 失败 clip 会在 ML 侧堆积，需要去卖家后台人工清理。
       console.log(
         `[VideoClips] ${detailId}@${storeId.slice(0, 8)} clip 状态异常（${review.label} ` +
-          `${JSON.stringify(pre.siteStatuses)}），用变体 ${retryVariant} 重新转换上传`
+          `${JSON.stringify(pre.siteStatuses)}），重新上传`
       );
       rec.siteStatuses = { ...rec.siteStatuses, ...pre.siteStatuses };
       rec.error = `上次上传状态异常：${JSON.stringify(pre.siteStatuses)}`;
       rec.stage = 'check';
-      rec.variant = retryVariant;
       saveVideoRecord(rec);
     } else {
       rec.status = 'uploaded';
@@ -579,7 +568,7 @@ export async function processAndUploadVideo(opts: {
     fs.existsSync(backupPath) && fs.statSync(backupPath).size > 1000;
   let outPath = backupPath;
 
-  if (reuseBackup && hasBackup && retryVariant === 0) {
+  if (reuseBackup && hasBackup) {
     rec.stage = 'backup';
     rec.status = 'uploading';
     rec.backupFile = backupName;
@@ -600,7 +589,7 @@ export async function processAndUploadVideo(opts: {
       // 1b. 转换为 ML 合规格式（9:16、10-61s、含音频、1080x1920）
       rec.stage = 'convert';
       saveVideoRecord(rec);
-      const convResult = await convertToClipsFormat(rawPath, tmpOut, retryVariant);
+      const convResult = await convertToClipsFormat(rawPath, tmpOut);
       if (convResult.success) {
         // 1c. 写入服务器备份（永久保留）
         fs.mkdirSync(BACKUP_DIR, { recursive: true });
@@ -695,7 +684,7 @@ export async function processAndUploadVideo(opts: {
   saveVideoRecord(rec);
 
   console.log(
-    `[VideoClips] ${detailId}@${storeId.slice(0, 8)} 视频上传完成 variant=${rec.variant || 0} ` +
+    `[VideoClips] ${detailId}@${storeId.slice(0, 8)} 视频上传完成 ` +
       `uploaded=${uploadResult.clipUuid} status=${JSON.stringify(rec.siteStatuses)}`
   );
   return { success: true, stage: 'done', record: rec };
