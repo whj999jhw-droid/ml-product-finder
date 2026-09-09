@@ -27,7 +27,46 @@ import { getStoreRaw } from './stores.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const TMP_DIR = path.join(__dirname, '..', 'data', 'tmp', 'video');
+// 持久化备份目录：转换后的合规视频保留一份，供「查看视频」播放与失败重传复用
+export const BACKUP_DIR = path.join(__dirname, '..', 'data', 'video-backups');
+// 视频处理记录：每个「店铺 × 妙手商品」一条，含备份路径、clip_uuid、各站点审核状态
+const VIDEO_RECORDS_FILE = path.join(__dirname, '..', 'data', 'video-records.json');
 const execFileAsync = promisify(execFile);
+
+// ============ ML Clips 审核状态 ============
+// ML 实际返回的 status 见 /marketplace/items/{id}/clips → clips[].metadata[].status
+// 未在映射表内的状态原样展示（避免臆造结论）
+export const CLIP_STATUS_LABEL: Record<string, string> = {
+  UNDER_REVIEW: '待审核',
+  PROCESSING: '处理中',
+  AVAILABLE: '已通过',
+  PUBLISHED: '已通过',
+  APPROVED: '已通过',
+  LIVE: '已通过',
+  REJECTED: '已拒绝',
+  BLOCKED: '已拒绝',
+  REMOVED: '已移除',
+  FAILED: '失败',
+  UNKNOWN: '未知',
+};
+const CLIP_OK = ['AVAILABLE', 'PUBLISHED', 'APPROVED', 'LIVE'];
+const CLIP_WAIT = ['UNDER_REVIEW', 'PROCESSING'];
+const CLIP_BAD = ['REJECTED', 'BLOCKED', 'FAILED'];
+
+export const clipStatusLabel = (s?: string) => (s && CLIP_STATUS_LABEL[s]) || s || '未知';
+
+/** 把一个商品各站点的审核状态汇成一句综合结论 */
+export function overallReview(siteStatuses: Record<string, string> = {}): {
+  label: string;
+  kind: 'none' | 'wait' | 'ok' | 'bad';
+} {
+  const vals = Object.values(siteStatuses).filter(Boolean) as string[];
+  if (vals.length === 0) return { label: '未上传', kind: 'none' };
+  if (vals.every((v) => CLIP_OK.includes(v))) return { label: '全部通过', kind: 'ok' };
+  if (vals.some((v) => CLIP_BAD.includes(v))) return { label: '存在被拒', kind: 'bad' };
+  if (vals.every((v) => CLIP_WAIT.includes(v) || CLIP_OK.includes(v))) return { label: '待审核', kind: 'wait' };
+  return { label: clipStatusLabel(vals[0]), kind: 'wait' };
+}
 
 // ============ 下载视频 ============
 
@@ -239,16 +278,154 @@ export async function uploadClip(
   }
 }
 
-// ============ 完整流水线 ============
+// ============ 视频处理记录（持久化） ============
+
+export interface VideoRecord {
+  detailId: string;
+  storeId: string;
+  cbtItemId: string;
+  sourceUrl?: string;
+  title?: string;
+  /** 备份文件名（位于 data/video-backups/） */
+  backupFile?: string;
+  backupSize?: number;
+  duration?: number;
+  width?: number;
+  height?: number;
+  sites: string[];
+  /** uploading=正在处理；uploaded=已提交 ML；failed=上传失败（可重试） */
+  status: 'uploading' | 'uploaded' | 'failed';
+  clipUuid?: string;
+  /** 各站点审核状态：MLM → UNDER_REVIEW / AVAILABLE / REJECTED ... */
+  siteStatuses: Record<string, string>;
+  stage?: 'check' | 'download' | 'convert' | 'backup' | 'upload' | 'done';
+  error?: string;
+  createdAt: number;
+  uploadedAt?: number;
+  updatedAt: number;
+  refreshAttempts: number;
+  lastRefreshAt?: number;
+}
+
+interface VideoRecordsFile {
+  version: number;
+  records: Record<string, VideoRecord>;
+}
+
+const vrKey = (storeId: string, detailId: string) => `${storeId}|${detailId}`;
+
+function loadVideoRecords(): VideoRecordsFile {
+  try {
+    if (fs.existsSync(VIDEO_RECORDS_FILE)) {
+      const p = JSON.parse(fs.readFileSync(VIDEO_RECORDS_FILE, 'utf-8'));
+      if (p && typeof p === 'object' && p.records) return p as VideoRecordsFile;
+    }
+  } catch (e: any) {
+    console.error('[Video Records] 读取失败:', e?.message || e);
+  }
+  return { version: 1, records: {} };
+}
+
+let vrCache: VideoRecordsFile = loadVideoRecords();
+
+export function saveVideoRecord(rec: VideoRecord): void {
+  vrCache.records[vrKey(rec.storeId, rec.detailId)] = rec;
+  try {
+    if (!fs.existsSync(path.dirname(VIDEO_RECORDS_FILE))) {
+      fs.mkdirSync(path.dirname(VIDEO_RECORDS_FILE), { recursive: true });
+    }
+    fs.writeFileSync(VIDEO_RECORDS_FILE, JSON.stringify(vrCache, null, 2));
+  } catch (e: any) {
+    console.error('[Video Records] 写入失败:', e?.message || e);
+  }
+}
+
+export function getVideoRecords(): Record<string, VideoRecord> {
+  return vrCache.records;
+}
+
+/** 所有记录按「上传时间」倒序（无上传时间则退回更新时间） */
+export function listVideoRecordsSorted(): VideoRecord[] {
+  return Object.values(vrCache.records).sort(
+    (a, b) => (b.uploadedAt || b.updatedAt || b.createdAt) - (a.uploadedAt || a.updatedAt || a.createdAt)
+  );
+}
+
+/** 备份文件绝对路径 */
+export function backupFilePath(rec: Pick<VideoRecord, 'backupFile'>): string {
+  return rec.backupFile ? path.join(BACKUP_DIR, rec.backupFile) : '';
+}
+
+// ============ ML Clips 状态查询 ============
 
 /**
- * 完整视频处理流水线：下载 → 转换 → 上传
+ * 查询某 CBT 商品在 ML Clips 的审核状态
+ * GET /marketplace/items/{id}/clips
+ * 返回各站点的 status（UNDER_REVIEW / AVAILABLE / REJECTED ...）
+ */
+export async function fetchClipStatus(
+  cbtItemId: string,
+  storeId: string
+): Promise<{
+  ok: boolean;
+  clipCount: number;
+  clipUuids: string[];
+  siteStatuses: Record<string, string>;
+  error?: string;
+}> {
+  const store = getStoreRaw(storeId);
+  if (!store?.accessToken) {
+    return { ok: false, clipCount: 0, clipUuids: [], siteStatuses: {}, error: '店铺无 access_token' };
+  }
+  try {
+    const r = await fetch(
+      `https://api.mercadolibre.com/marketplace/items/${cbtItemId}/clips?access_token=${store.accessToken}`
+    );
+    const data = await r.json();
+    if (!r.ok) {
+      return {
+        ok: false,
+        clipCount: 0,
+        clipUuids: [],
+        siteStatuses: {},
+        error: data?.message || data?.error_status || `HTTP ${r.status}`,
+      };
+    }
+    const clips = data.clips || [];
+    const siteStatuses: Record<string, string> = {};
+    const clipUuids: string[] = [];
+    for (const c of clips) {
+      if (c.clip_uuid) clipUuids.push(c.clip_uuid);
+      for (const m of c.metadata || []) {
+        if (m.site_id) siteStatuses[m.site_id] = m.status || 'UNKNOWN';
+      }
+    }
+    return { ok: true, clipCount: clips.length, clipUuids, siteStatuses };
+  } catch (e: any) {
+    return { ok: false, clipCount: 0, clipUuids: [], siteStatuses: {}, error: e.message };
+  }
+}
+
+// ============ 完整流水线 ============
+
+export interface VideoPipelineResult {
+  success: boolean;
+  stage: string;
+  error?: string;
+  record?: VideoRecord;
+}
+
+/**
+ * 完整视频处理流水线：下载 → 转换为 ML 合规格式 → 备份 → 上传 ML Clips → 记录状态
  *
- * @param detailId 妙手商品 detailId
- * @param mainImgVideoUrl 1688 视频 URL
- * @param cbtItemId ML CBT 商品 ID
- * @param siteIds 目标站点列表
- * @param storeId 店铺 ID
+ * 设计要点：
+ * - 转换后的合规视频**保留**在 data/video-backups/ 作为服务器备份，供「查看视频」与失败重传复用
+ * - 非强制模式下若 ML 已有 clip，直接同步审核状态返回，不重复上传（省流量、避免重复 clip）
+ * - 有备份时跳过下载/转换，直接用备份上传（应对 1688 视频已删除的场景）
+ * - 每一步都把状态落盘，前端轮询即可看到「上传中 / 待审核 / 已通过 / 已拒绝 / 失败」
+ *
+ * @param reuseBackup 有备份就直接复用（默认 true）
+ * @param force 强制重新上传（忽略 ML 已有的 clip，用于「失败后按原因重传」）
  */
 export async function processAndUploadVideo(opts: {
   detailId: string;
@@ -256,36 +433,254 @@ export async function processAndUploadVideo(opts: {
   cbtItemId: string;
   siteIds: string[];
   storeId: string;
-}): Promise<{ success: boolean; stage: string; error?: string }> {
-  const { detailId, mainImgVideoUrl, cbtItemId, siteIds, storeId } = opts;
+  title?: string;
+  reuseBackup?: boolean;
+  force?: boolean;
+}): Promise<VideoPipelineResult> {
+  const {
+    detailId,
+    mainImgVideoUrl,
+    cbtItemId,
+    siteIds,
+    storeId,
+    title,
+    reuseBackup = true,
+    force = false,
+  } = opts;
 
-  const rawPath = path.join(TMP_DIR, `${detailId}_raw.mp4`);
-  const outPath = path.join(TMP_DIR, `${detailId}_clips.mp4`);
+  const now = () => Date.now();
+  const key = vrKey(storeId, detailId);
+  const existing = vrCache.records[key];
 
-  // 1. 下载
-  console.log(`[VideoClips] 开始处理 ${detailId}: ${mainImgVideoUrl.slice(0, 60)}...`);
-  const dlOk = await downloadVideo(mainImgVideoUrl, rawPath);
-  if (!dlOk) {
-    return { success: false, stage: 'download', error: '下载失败（视频可能已删除或需登录）' };
+  const rec: VideoRecord = existing || {
+    detailId,
+    storeId,
+    cbtItemId,
+    sites: siteIds,
+    status: 'uploading',
+    siteStatuses: {},
+    createdAt: now(),
+    updatedAt: now(),
+    refreshAttempts: 0,
+  };
+  // 刷新可变字段（storeId/cbtItemId/sites 可能变了）
+  rec.storeId = storeId;
+  rec.cbtItemId = cbtItemId;
+  rec.detailId = detailId;
+  rec.sites = siteIds;
+  rec.sourceUrl = mainImgVideoUrl;
+  if (title) rec.title = title;
+  rec.updatedAt = now();
+
+  // 0. 非强制：先查 ML 是否已有 clip → 有则同步状态直接返回
+  if (!force) {
+    const st = await fetchClipStatus(cbtItemId, storeId);
+    if (st.ok && st.clipCount > 0) {
+      rec.status = 'uploaded';
+      rec.siteStatuses = { ...rec.siteStatuses, ...st.siteStatuses };
+      if (!rec.clipUuid) rec.clipUuid = st.clipUuids[0];
+      rec.error = undefined;
+      rec.stage = 'done';
+      if (!rec.uploadedAt) rec.uploadedAt = now();
+      rec.updatedAt = now();
+      rec.lastRefreshAt = now();
+      rec.refreshAttempts = (rec.refreshAttempts || 0) + 1;
+      saveVideoRecord(rec);
+      console.log(`[VideoClips] ${detailId}@${storeId.slice(0, 8)} 已有 clip，状态已同步`);
+      return { success: true, stage: 'already_uploaded', record: rec };
+    }
+    if (!st.ok) {
+      console.warn(`[VideoClips] ${detailId} 状态查询失败（继续尝试上传）: ${st.error}`);
+    }
   }
 
-  // 2. 转换
-  const convResult = await convertToClipsFormat(rawPath, outPath);
-  if (!convResult.success) {
-    // 清理临时文件
-    try { fs.unlinkSync(rawPath); } catch {}
-    return { success: false, stage: 'convert', error: convResult.error };
+  // 1. 定位输出文件：优先复用服务器备份
+  const backupName = `${detailId}.mp4`;
+  const backupPath = path.join(BACKUP_DIR, backupName);
+  const hasBackup =
+    fs.existsSync(backupPath) && fs.statSync(backupPath).size > 1000;
+  let outPath = backupPath;
+
+  if (reuseBackup && hasBackup) {
+    rec.stage = 'backup';
+    rec.status = 'uploading';
+    rec.backupFile = backupName;
+    rec.backupSize = fs.statSync(backupPath).size;
+    saveVideoRecord(rec);
+    console.log(`[VideoClips] ${detailId} 复用服务器备份 ${backupName}`);
+  } else {
+    // 1a. 下载 1688 视频
+    const rawPath = path.join(TMP_DIR, `${detailId}_raw.mp4`);
+    const tmpOut = path.join(TMP_DIR, `${detailId}_clips.mp4`);
+    rec.stage = 'download';
+    rec.status = 'uploading';
+    saveVideoRecord(rec);
+    console.log(`[VideoClips] 开始处理 ${detailId}: ${mainImgVideoUrl.slice(0, 60)}...`);
+    const dlOk = await downloadVideo(mainImgVideoUrl, rawPath);
+
+    if (dlOk) {
+      // 1b. 转换为 ML 合规格式（9:16、10-61s、含音频、1080x1920）
+      rec.stage = 'convert';
+      saveVideoRecord(rec);
+      const convResult = await convertToClipsFormat(rawPath, tmpOut);
+      if (convResult.success) {
+        // 1c. 写入服务器备份（永久保留）
+        fs.mkdirSync(BACKUP_DIR, { recursive: true });
+        try {
+          fs.copyFileSync(tmpOut, backupPath);
+          outPath = backupPath;
+        } catch (e: any) {
+          outPath = tmpOut; // 备份写失败则用临时文件继续上传，不阻断
+        }
+        rec.duration = convResult.info?.duration;
+        rec.width = convResult.info?.width;
+        rec.height = convResult.info?.height;
+        if (convResult.info) {
+          console.log(
+            `[VideoClips] ${detailId} 转换完成 ${convResult.info.width}x${convResult.info.height} ` +
+              `${convResult.info.duration.toFixed(1)}s 音频=${convResult.info.hasAudio}`
+          );
+        }
+      } else {
+        // 转换失败：有备份则退回用备份，否则报错
+        try { fs.unlinkSync(rawPath); } catch {}
+        if (hasBackup) {
+          outPath = backupPath;
+        } else {
+          rec.status = 'failed';
+          rec.error = `视频转换失败：${convResult.error}`;
+          rec.updatedAt = now();
+          saveVideoRecord(rec);
+          return { success: false, stage: 'convert', error: rec.error, record: rec };
+        }
+      }
+    } else {
+      // 下载失败：有备份则退回用备份（应对 1688 视频已删除），否则报错
+      if (hasBackup) {
+        outPath = backupPath;
+      } else {
+        rec.status = 'failed';
+        rec.error = '下载失败（1688 视频可能已删除或需登录）';
+        rec.updatedAt = now();
+        saveVideoRecord(rec);
+        return { success: false, stage: 'download', error: rec.error, record: rec };
+      }
+    }
+    try {
+      fs.unlinkSync(rawPath);
+      fs.unlinkSync(tmpOut);
+    } catch {}
+    rec.backupFile = backupName;
+    rec.backupSize = fs.existsSync(backupPath) ? fs.statSync(backupPath).size : 0;
+    rec.stage = 'backup';
+    saveVideoRecord(rec);
   }
 
-  // 3. 上传
+  // 兜底：确保输出文件可用
+  if (!fs.existsSync(outPath)) {
+    rec.status = 'failed';
+    rec.error = '无可用视频文件（无备份且源视频下载失败）';
+    rec.updatedAt = now();
+    saveVideoRecord(rec);
+    return { success: false, stage: 'prepare', error: rec.error, record: rec };
+  }
+
+  // 2. 上传 ML Clips
+  rec.stage = 'upload';
+  saveVideoRecord(rec);
   const uploadResult = await uploadClip(cbtItemId, outPath, siteIds, storeId);
   if (!uploadResult.success) {
-    return { success: false, stage: 'upload', error: uploadResult.error };
+    rec.status = 'failed';
+    rec.error = uploadResult.error || '上传失败';
+    rec.updatedAt = now();
+    saveVideoRecord(rec);
+    return { success: false, stage: 'upload', error: rec.error, record: rec };
   }
 
-  // 4. 清理临时文件
-  try { fs.unlinkSync(rawPath); fs.unlinkSync(outPath); } catch {}
+  // 3. 上传成功 → 立即查一次审核状态（通常 UNDER_REVIEW）
+  const st2 = await fetchClipStatus(cbtItemId, storeId);
+  rec.status = 'uploaded';
+  if (st2.ok) {
+    rec.siteStatuses = { ...rec.siteStatuses, ...st2.siteStatuses };
+    if (!rec.clipUuid) rec.clipUuid = st2.clipUuids[0];
+  }
+  rec.error = undefined;
+  rec.stage = 'done';
+  rec.uploadedAt = rec.uploadedAt || now();
+  rec.updatedAt = now();
+  saveVideoRecord(rec);
 
-  console.log(`[VideoClips] ${detailId} 视频处理完成`);
-  return { success: true, stage: 'done' };
+  console.log(
+    `[VideoClips] ${detailId}@${storeId.slice(0, 8)} 视频上传完成 ` +
+      `${JSON.stringify(rec.siteStatuses)}`
+  );
+  return { success: true, stage: 'done', record: rec };
+}
+
+/**
+ * 刷新单个视频记录：
+ * 1. 先查 ML 审核状态并落盘（刷新「待审核 → 已通过 / 已拒绝」）
+ * 2. 若 ML 侧已无 clip（被拒/被删）→ 按失败原因自动重传（优先用服务器备份）
+ *
+ * @param forceReupload 强制重新上传，即使 ML 已有 clip
+ */
+export async function refreshVideoRecord(
+  rec: VideoRecord,
+  opts: { forceReupload?: boolean } = {}
+): Promise<VideoRecord> {
+  // 先把本次刷新计数写进缓存里的同一条记录（processAndUploadVideo 会读同 key 续接）
+  const cur = vrCache.records[vrKey(rec.storeId, rec.detailId)] || rec;
+  const r: VideoRecord = {
+    ...cur,
+    detailId: rec.detailId,
+    storeId: rec.storeId,
+    cbtItemId: rec.cbtItemId,
+    sites: rec.sites,
+    title: rec.title,
+    sourceUrl: cur.sourceUrl || rec.sourceUrl,
+    refreshAttempts: (cur.refreshAttempts || 0) + 1,
+    lastRefreshAt: Date.now(),
+    updatedAt: Date.now(),
+    siteStatuses: { ...cur.siteStatuses },
+  };
+  if (!r.createdAt) r.createdAt = Date.now();
+  saveVideoRecord(r);
+
+  if (!r.sourceUrl && !(r.backupFile && fs.existsSync(backupFilePath(r)))) {
+    r.status = 'failed';
+    r.error = '无源视频 URL 且无服务器备份，无法重传';
+    r.updatedAt = Date.now();
+    saveVideoRecord(r);
+    return r;
+  }
+
+  return (await processAndUploadVideo({
+    detailId: r.detailId,
+    mainImgVideoUrl: r.sourceUrl || '',
+    cbtItemId: r.cbtItemId,
+    siteIds: r.sites,
+    storeId: r.storeId,
+    title: r.title,
+    reuseBackup: true,
+    force: !!opts.forceReupload,
+  })).record!;
+}
+
+/** 批量刷新：默认只同步审核状态；force=true 时全部强制重传 */
+export async function refreshAllVideoRecords(
+  forceReupload = false
+): Promise<{ total: number; done: number; failed: number }> {
+  let done = 0;
+  let failed = 0;
+  for (const rec of Object.values(vrCache.records)) {
+    try {
+      const r = await refreshVideoRecord(rec, { forceReupload });
+      if (r.status === 'failed') failed++;
+      else done++;
+    } catch (e: any) {
+      console.error(`[VideoClips] 刷新 ${rec.detailId} 异常: ${e.message}`);
+      failed++;
+    }
+  }
+  return { total: Object.keys(vrCache.records).length, done, failed };
 }

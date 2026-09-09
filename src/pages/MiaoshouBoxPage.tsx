@@ -5,7 +5,7 @@
  * 一键发布到选定店铺的选定站点（CBT 全球售）
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Button,
   Card,
@@ -25,7 +25,7 @@ import {
 } from 'tdesign-react';
 import type { PrimaryTableCol } from 'tdesign-react';
 import { FeatureIntro } from '../components/FeatureIntro';
-import { Inbox, RefreshCw } from 'lucide-react';
+import { Inbox, RefreshCw, Video, CloudUpload, Play, RotateCw } from 'lucide-react';
 
 // ============ 类型定义 ============
 
@@ -111,6 +111,38 @@ const SITE_LABEL: Record<string, string> = {
   MCO: '🇨🇴 哥伦比亚',
 };
 
+/** 妙手 ERP 自己上架的商品在本系统里归到「妙手ERP」虚拟店铺，不占用真实店铺额度 */
+const MIAOSHOU_STORE_KEY = 'miaoshou-erp';
+
+// ML Clips 审核状态 → 中文（与后端 CLIP_STATUS_LABEL 保持一致）
+const CLIP_LABEL: Record<string, string> = {
+  UNDER_REVIEW: '待审核',
+  PROCESSING: '处理中',
+  AVAILABLE: '已通过',
+  PUBLISHED: '已通过',
+  APPROVED: '已通过',
+  LIVE: '已通过',
+  REJECTED: '已拒绝',
+  BLOCKED: '已拒绝',
+  REMOVED: '已移除',
+  FAILED: '失败',
+};
+const CLIP_OK = ['AVAILABLE', 'PUBLISHED', 'APPROVED', 'LIVE'];
+const CLIP_BAD = ['REJECTED', 'BLOCKED', 'FAILED'];
+
+/** 视频综合状态标签：用于「已发布」列表逐店铺显示 */
+function videoReviewTag(siteStatuses: Record<string, string> = {}): {
+  label: string;
+  theme: 'success' | 'warning' | 'danger' | 'default' | 'primary';
+} {
+  const vals = Object.values(siteStatuses).filter(Boolean) as string[];
+  if (vals.length === 0) return { label: '待审核', theme: 'warning' };
+  if (vals.every((v) => CLIP_OK.includes(v))) return { label: '视频已通过', theme: 'success' };
+  if (vals.some((v) => CLIP_BAD.includes(v))) return { label: '视频被拒', theme: 'danger' };
+  if (vals.some((v) => CLIP_OK.includes(v))) return { label: '部分通过', theme: 'warning' };
+  return { label: '视频待审核', theme: 'warning' };
+}
+
 // ============ 主组件 ============
 
 export function MiaoshouBoxPage() {
@@ -155,6 +187,21 @@ export function MiaoshouBoxPage() {
 
   // 每行的发布目标（storeId → sites[]）
   const [targets, setTargets] = useState<Record<string, PublishTarget>>({});
+
+  // 视频记录（后端按「上传时间倒序」返回，含服务器备份路径与 ML 审核状态）
+  const [videoList, setVideoList] = useState<any[]>([]);
+  const [videoBusy, setVideoBusy] = useState<Record<string, boolean>>({});
+  const [videoRefreshingAll, setVideoRefreshingAll] = useState(false);
+  const [syncingMs, setSyncingMs] = useState(false);
+  // 视频预览弹窗
+  const [videoView, setVideoView] = useState<{ detailId: string; title: string; size: number } | null>(null);
+
+  // 快速取某「店铺 × 商品」的视频记录
+  const videoMap = useMemo(() => {
+    const m: Record<string, any> = {};
+    for (const r of videoList) m[`${r.storeId}|${r.detailId}`] = r;
+    return m;
+  }, [videoList]);
 
   // ============ 加载采集箱列表 ============
 
@@ -208,11 +255,23 @@ export function MiaoshouBoxPage() {
     } catch {}
   }, []);
 
+  // 加载视频记录（上传状态 / ML 审核状态 / 服务器备份路径）
+  const loadVideoRecords = useCallback(async () => {
+    try {
+      const resp = await fetch('/api/ml/miaoshou/video/records', {
+        headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' },
+      });
+      const json = await resp.json();
+      if (json.success) setVideoList(json.items || []);
+    } catch {}
+  }, []);
+
   useEffect(() => {
     loadBox();
     loadStores();
     loadPublished();
-  }, [loadBox, loadStores, loadPublished]);
+    loadVideoRecords();
+  }, [loadBox, loadStores, loadPublished, loadVideoRecords]);
 
   // 自动轮询：每 30 秒静默刷新一次列表，同步妙手侧最新的图片/SKU/属性修改
   // 后端缓存 TTL 10 秒，所以 30 秒轮询最多看到 10-30 秒前的数据，无需用户手动点刷新
@@ -222,9 +281,13 @@ export function MiaoshouBoxPage() {
       if (document.hidden) return;
       if (loading || publishLoading) return;
       loadBox(); // 不传 force，走后端 10 秒缓存；过期则实时拉妙手
+      // 停留在「已发布」tab 时顺带刷新视频审核状态（ML 审核是异步的，需要自动跟进）
+      if (activeTab === 'published' && videoList.length > 0 && !videoRefreshingAll) {
+        loadVideoRecords();
+      }
     }, 30 * 1000);
     return () => clearInterval(timer);
-  }, [loadBox, loading, publishLoading]);
+  }, [loadBox, loadVideoRecords, loading, publishLoading, activeTab, videoList, videoRefreshingAll]);
 
   // 某店铺是否已发布过某个采集箱商品（CBT 一店一品，重复发必然失败）
   const isPublished = (storeId: string, detailId: string) => {
@@ -244,18 +307,38 @@ export function MiaoshouBoxPage() {
       (r: any) => r.detailId === detailId && r.status === 'failed'
     );
 
-  // 该 detailId 的成功记录（用于「已发布」tab 展示）
-  const getSuccessRecords = (detailId: string) =>
-    Object.values(publishedRecords).filter(
-      (r: any) => r.detailId === detailId && r.status === 'success'
-    );
-
   // 「未发布」tab 数据源：妙手列表里「任一店铺都还没成功发布过」的商品
   const unpublishedItems = items.filter((it) => !hasAnySuccess(it.collectBoxDetailId));
-  // 「已发布」tab 数据源：从 publishedRecords 里抽取「至少一次成功」的商品，join 妙手列表补全缩略图
-  const publishedItems = items
-    .filter((it) => hasAnySuccess(it.collectBoxDetailId))
-    .map((it) => ({ item: it, records: getSuccessRecords(it.collectBoxDetailId) }));
+  // 「已发布」tab 数据源：直接以 publishedRecords 为准（含本系统上架 + 妙手侧已上传），
+  // 按 detailId 聚合后 join 妙手列表补全缩略图/标题，最后按「上传时间倒序」排列。
+  // 注意：不能从 items 里 filter —— 发布成功后 save_move_collect_task 会把商品从妙手
+  // 「未发布」列表移除，那时 items 里就没有它了，会导致「已发布」tab 变空。
+  const publishedItems = useMemo(() => {
+    const groups = new Map<string, any[]>();
+    for (const r of Object.values(publishedRecords)) {
+      if (!r || r.status !== 'success') continue;
+      const arr = groups.get(r.detailId) || [];
+      arr.push(r);
+      groups.set(r.detailId, arr);
+    }
+    const list = [...groups.entries()].map(([detailId, records]) => {
+      const it = items.find((i) => i.collectBoxDetailId === detailId);
+      return {
+        detailId,
+        title: it?.title || records[0]?.title || `商品 ${detailId}`,
+        breadcrumb: it?.breadcrumb || '',
+        thumbnail: it?.thumbnail || '',
+        records,
+        item: it || null,
+      };
+    });
+    // 上传顺序倒序：同一商品取最晚一条上架时间排序
+    return list.sort((a, b) => {
+      const ta = Math.max(...a.records.map((r: any) => r.publishedAt || 0));
+      const tb = Math.max(...b.records.map((r: any) => r.publishedAt || 0));
+      return tb - ta;
+    });
+  }, [publishedRecords, items]);
 
   // 搜索过滤（分页前过滤全部）—— 只过滤「未发布」tab 当前显示的数据源
   useEffect(() => {
@@ -444,6 +527,8 @@ export function MiaoshouBoxPage() {
       setPublishLoading(false);
       // 发布完成（成功/失败/异常）后自动清空勾选，无需手动点「完成并刷新」
       setSelected(new Set());
+      // 发布成功会触发视频自动处理，顺带拉一次视频记录
+      loadVideoRecords();
     }
   };
 
@@ -469,6 +554,141 @@ export function MiaoshouBoxPage() {
       loadPublished();
     } catch (e: any) {
       MessagePlugin.error('清除失败: ' + (e.message || ''));
+    }
+  };
+
+  // ============ 视频操作（上传 / 刷新 / 同步妙手） ============
+
+  // 店铺展示名：真实店铺用昵称，虚拟店铺显示「妙手ERP」
+  const storeNick = (storeId: string) =>
+    storeId === MIAOSHOU_STORE_KEY
+      ? '妙手ERP'
+      : stores.find((s) => s.id === storeId)?.nickname || storeId.slice(0, 8);
+
+  // 上传视频：后端自动下载 1688 视频 → 裁剪 9:16/去底部文字/限制时长 → 备份 → 传 ML Clips
+  const handleUploadVideo = async (rec: any) => {
+    if (!rec.itemId) {
+      MessagePlugin.warning(`「${storeNick(rec.storeId)}」无 ML 商品 ID，无法上传视频`);
+      return;
+    }
+    const key = `${rec.storeId}|${rec.detailId}`;
+    setVideoBusy((p) => ({ ...p, [key]: true }));
+    try {
+      const resp = await fetch('/api/ml/miaoshou/video/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          detailId: rec.detailId,
+          itemId: rec.itemId,
+          storeId: rec.storeId,
+          sites: rec.sites,
+          shopId: rec.shopId,
+          title: rec.title,
+        }),
+      });
+      const json = await resp.json();
+      if (json.success) {
+        MessagePlugin.success(`视频已提交 ${rec.itemId}，进入 ML 审核`);
+      } else {
+        MessagePlugin.error('视频上传失败：' + (json.error || json.message || '未知原因'));
+      }
+      loadVideoRecords();
+      loadPublished();
+    } catch (e: any) {
+      MessagePlugin.error('视频上传异常：' + (e.message || ''));
+    } finally {
+      setVideoBusy((p) => {
+        const n = { ...p };
+        delete n[key];
+        return n;
+      });
+    }
+  };
+
+  // 刷新单条：同步 ML 审核状态；若 ML 侧已无 clip（被拒/被删）会按失败原因自动重传
+  const handleRefreshVideo = async (key: string) => {
+    setVideoBusy((p) => ({ ...p, [key]: true }));
+    try {
+      const resp = await fetch('/api/ml/miaoshou/video/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key }),
+      });
+      const json = await resp.json();
+      const r = json.record;
+      if (json.success) {
+        const tag = videoReviewTag(r?.siteStatuses || {});
+        MessagePlugin.success(
+          `刷新完成：${tag.label}` + (r?.error ? `（${r.error}）` : '')
+        );
+      } else {
+        MessagePlugin.error('刷新失败：' + (json.error || ''));
+      }
+      loadVideoRecords();
+    } catch (e: any) {
+      MessagePlugin.error('刷新异常：' + (e.message || ''));
+    } finally {
+      setVideoBusy((p) => {
+        const n = { ...p };
+        delete n[key];
+        return n;
+      });
+    }
+  };
+
+  // 批量刷新全部视频记录
+  const handleRefreshAllVideo = async () => {
+    if (videoList.length === 0) {
+      MessagePlugin.info('暂无视频记录可刷新');
+      return;
+    }
+    setVideoRefreshingAll(true);
+    try {
+      const resp = await fetch('/api/ml/miaoshou/video/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const json = await resp.json();
+      if (json.success) {
+        MessagePlugin.success(
+          `视频状态已刷新：共 ${json.total} 条（正常 ${json.done} / 失败 ${json.failed}）`
+        );
+      } else {
+        MessagePlugin.error('批量刷新失败：' + (json.error || ''));
+      }
+      loadVideoRecords();
+    } catch (e: any) {
+      MessagePlugin.error('批量刷新异常：' + (e.message || ''));
+    } finally {
+      setVideoRefreshingAll(false);
+    }
+  };
+
+  // 同步妙手侧已上传：妙手 ERP 有自己的上架限流对策，它自己上架的商品会从「未发布」
+  // 列表消失，同步后在本系统「已发布」tab 显示并按上传时间倒序
+  const handleSyncMiaoshou = async () => {
+    setSyncingMs(true);
+    try {
+      const resp = await fetch('/api/ml/miaoshou/published/sync-miaoshou', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const json = await resp.json();
+      if (json.success) {
+        setPublishedRecords(json.records || {});
+        MessagePlugin.success(
+          `妙手侧已上传 ${json.miaoshouPublished} 件：新增 ${json.added} 条 / 已有 ${json.skipped} 条`
+        );
+        loadVideoRecords();
+      } else {
+        MessagePlugin.error('同步妙手状态失败：' + (json.error || ''));
+      }
+    } catch (e: any) {
+      MessagePlugin.error('同步异常：' + (e.message || ''));
+    } finally {
+      setSyncingMs(false);
     }
   };
 
@@ -630,6 +850,15 @@ export function MiaoshouBoxPage() {
               <li>发布通道：美客多 CBT 全球售 <code>POST /global/items</code></li>
               <li>价格单位：USD（全球净收益 globalPrice）</li>
               <li>发布间隔：每商品 1 秒节流，避免触发平台限流</li>
+              <li>
+                视频：1688 视频自动裁剪为 <strong>1080x1920 / 9:16 / 10-61 秒 / 含音频</strong>，
+                上传美客多 Clips 并保留服务器备份；「已发布」tab 可查看视频、上传/重试视频、
+                刷新审核状态（被拒会自动重传）
+              </li>
+              <li>
+                妙手侧限流对策：点「同步妙手已上传」把妙手 ERP 自己上架的商品同步过来，
+                「已发布」列表按上传时间倒序
+              </li>
             </ul>
           </div>
         }
@@ -735,42 +964,179 @@ export function MiaoshouBoxPage() {
           label={`已发布 (${publishedItems.length})`}
         >
           <div className="px-5 pb-3 pt-2">
+            {/* 已发布 tab 工具栏 */}
+            <div className="flex items-center gap-2 mb-3 flex-wrap">
+              <Button
+                icon={<RotateCw size={16} />}
+                onClick={handleSyncMiaoshou}
+                loading={syncingMs}
+                variant="outline"
+              >
+                同步妙手已上传
+              </Button>
+              <Button
+                icon={<RefreshCw size={16} />}
+                onClick={handleRefreshAllVideo}
+                loading={videoRefreshingAll}
+                variant="outline"
+              >
+                刷新视频状态
+              </Button>
+              <span className="text-xs text-gray-400">
+                列表按上传时间倒序 · 视频记录 {videoList.length} 条
+              </span>
+              <span className="text-xs text-gray-400 ml-auto">
+                {(() => {
+                  const ok = videoList.filter((v) =>
+                    videoReviewTag(v.siteStatuses).theme === 'success'
+                  ).length;
+                  const bad = videoList.filter((v) =>
+                    videoReviewTag(v.siteStatuses).theme === 'danger'
+                  ).length;
+                  return `已通过 ${ok} · 待审核 ${videoList.length - ok - bad} · 被拒 ${bad}`;
+                })()}
+              </span>
+            </div>
+
             {publishedItems.length === 0 ? (
               <div className="text-center py-10 text-gray-400 text-sm">
-                暂无已发布记录。从「未发布」tab 勾选商品后点击「一键发布」即可上架。
+                暂无已发布记录。从「未发布」tab 勾选商品点击「一键发布」，
+                或点「同步妙手已上传」导入妙手侧已上架的商品。
               </div>
             ) : (
               <div className="space-y-2">
-                {publishedItems.map(({ item, records }) => (
+                {publishedItems.map(({ detailId, title, breadcrumb, thumbnail, records }) => (
                   <div
-                    key={item.collectBoxDetailId}
-                    className="flex items-center gap-3 p-3 bg-gray-50 rounded border"
+                    key={detailId}
+                    className="flex gap-3 p-3 bg-gray-50 rounded border"
                   >
-                    <Image
-                      src={item.thumbnail}
-                      style={{ width: 56, height: 56, objectFit: 'cover', borderRadius: 4 }}
-                      fit="cover"
-                      referrerPolicy="no-referrer"
-                    />
+                    {thumbnail ? (
+                      <Image
+                        src={thumbnail}
+                        style={{ width: 56, height: 56, objectFit: 'cover', borderRadius: 4 }}
+                        fit="cover"
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      <div className="w-[56px] h-[56px] shrink-0 rounded flex items-center justify-center bg-gray-200">
+                        <Video size={22} className="text-gray-400" />
+                      </div>
+                    )}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-medium text-sm truncate">{item.title}</span>
+                        <span className="font-medium text-sm truncate">{title}</span>
                         <Tag size="small" theme="success" variant="light">已上架</Tag>
                       </div>
-                      <div className="text-xs text-gray-500 mt-0.5">{item.breadcrumb}</div>
-                      <div className="flex gap-1.5 mt-1 flex-wrap">
+                      <div className="text-xs text-gray-500 mt-0.5">{breadcrumb || `商品 ${detailId}`}</div>
+
+                      {/* 每个店铺一行：上架信息 + 视频状态 + 操作 */}
+                      <div className="mt-1.5 space-y-1">
                         {records.map((r: any) => {
-                          const store = stores.find((s) => s.id === r.storeId);
+                          const key = `${r.storeId}|${r.detailId}`;
+                          const vrec = videoMap[key];
+                          const busy = videoBusy[key];
+                          const fromMs = r.source === 'miaoshou';
+                          const tag = vrec ? videoReviewTag(vrec.siteStatuses) : null;
+                          const hasBackup = !!vrec?.hasBackup;
                           return (
-                            <Tag key={r.storeId} size="small" variant="outline">
-                              {store?.nickname || r.storeId}
-                              {r.sites?.length ? `·${r.sites.join('/')}` : ''}
-                            </Tag>
+                            <div
+                              key={key}
+                              className="flex items-center gap-2 flex-wrap text-xs bg-white rounded px-2 py-1 border"
+                            >
+                              <Tag size="small" variant="outline">
+                                {storeNick(r.storeId)}
+                                {r.sites?.length ? `·${r.sites.join('/')}` : ''}
+                              </Tag>
+                              {fromMs ? (
+                                <Tag size="small" theme="primary" variant="light">
+                                  妙手ERP已上传
+                                </Tag>
+                              ) : r.itemId ? (
+                                <a
+                                  href={r.permalink || ''}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-blue-600 underline break-all"
+                                >
+                                  {r.itemId}
+                                </a>
+                              ) : (
+                                <span className="text-gray-400">无商品ID</span>
+                              )}
+
+                              {/* 视频状态 */}
+                              {fromMs ? (
+                                <span className="text-gray-400">视频状态未知</span>
+                              ) : !vrec ? (
+                                <Tag size="small" variant="light">📹 未上传视频</Tag>
+                              ) : vrec.status === 'failed' ? (
+                                <Tag
+                                  size="small"
+                                  theme="danger"
+                                  variant="light"
+                                  title={`${vrec.error || ''}\n阶段: ${vrec.stage || '-'}`}
+                                >
+                                  📹 失败
+                                </Tag>
+                              ) : (
+                                <Tag size="small" theme={tag!.theme} variant="light" title={vrec.clipUuid}>
+                                  📹 {tag!.label}
+                                  {Object.values(vrec.siteStatuses || {})
+                                    .filter(Boolean)
+                                    .length > 0 &&
+                                    `（${Object.entries(vrec.siteStatuses)
+                                      .filter(([, v]) => v)
+                                      .map(([k, v]) => `${k}:${CLIP_LABEL[v] || v}`)
+                                      .join(' ')}）`}
+                                </Tag>
+                              )}
+
+                              <span className="ml-auto flex items-center gap-1">
+                                {hasBackup && (
+                                  <Button
+                                    size="small"
+                                    variant="text"
+                                    onClick={() =>
+                                      setVideoView({
+                                        detailId: String(r.detailId),
+                                        title: title || String(r.detailId),
+                                        size: vrec.backupSize || 0,
+                                      })
+                                    }
+                                  >
+                                    <Play size={12} className="inline mr-0.5" />
+                                    查看视频
+                                  </Button>
+                                )}
+                                {r.itemId && (
+                                  <Button
+                                    size="small"
+                                    variant="text"
+                                    loading={busy}
+                                    onClick={() => handleUploadVideo(r)}
+                                  >
+                                    <CloudUpload size={12} className="inline mr-0.5" />
+                                    {vrec?.status === 'failed' ? '重试视频' : '上传视频'}
+                                  </Button>
+                                )}
+                                {vrec && (
+                                  <Button
+                                    size="small"
+                                    variant="text"
+                                    loading={busy}
+                                    onClick={() => handleRefreshVideo(key)}
+                                  >
+                                    <RefreshCw size={12} className="inline mr-0.5" />
+                                    刷新视频
+                                  </Button>
+                                )}
+                              </span>
+                            </div>
                           );
                         })}
                       </div>
                     </div>
-                    <div className="text-right shrink-0">
+                    <div className="text-right shrink-0 self-start">
                       <div className="text-xs text-gray-500">
                         {new Date(records[0]?.publishedAt).toLocaleString('zh-CN')}
                       </div>
@@ -783,11 +1149,6 @@ export function MiaoshouBoxPage() {
                         >
                           查看 ML 链接
                         </a>
-                      )}
-                      {records[0]?.itemId && (
-                        <div className="text-xs text-gray-400 mt-0.5 break-all">
-                          {records[0].itemId}
-                        </div>
                       )}
                     </div>
                   </div>
@@ -1193,6 +1554,37 @@ export function MiaoshouBoxPage() {
               >
                 完成并刷新
               </Button>
+            </div>
+          </div>
+        )}
+      </Dialog>
+
+      {/* 视频预览弹窗（播放服务器备份的合规视频） */}
+      <Dialog
+        header="视频预览（服务器备份）"
+        visible={!!videoView}
+        onClose={() => setVideoView(null)}
+        footer={null}
+        width={420}
+      >
+        {videoView && (
+          <div className="space-y-2">
+            <div className="text-sm font-medium truncate">{videoView.title}</div>
+            <video
+              src={`/api/ml/miaoshou/video/file/${videoView.detailId}`}
+              controls
+              autoPlay
+              style={{
+                width: '100%',
+                maxHeight: 560,
+                borderRadius: 8,
+                background: '#000',
+              }}
+            />
+            <div className="text-xs text-gray-400">
+              {videoView.size > 0
+                ? `备份大小 ${(videoView.size / 1024 / 1024).toFixed(2)} MB · 1080x1920 9:16 已符合 ML Clips 要求`
+                : '已符合 ML Clips 要求（1080x1920 / 9:16 / 含音频 / 10-61 秒）'}
             </div>
           </div>
         )}

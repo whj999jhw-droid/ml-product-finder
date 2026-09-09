@@ -20,7 +20,17 @@ import {
 import { createListing, hasCJK, ListingDraft } from './listing.js';
 import { translateToEnglish } from './aiService.js';
 import { getStoreRaw, getAllStores } from './stores.js';
-import { processAndUploadVideo } from './videoClips.js';
+import {
+  BACKUP_DIR,
+  processAndUploadVideo,
+  fetchClipStatus,
+  refreshVideoRecord,
+  refreshAllVideoRecords,
+  getVideoRecords,
+  listVideoRecordsSorted,
+  backupFilePath,
+  overallReview,
+} from './videoClips.js';
 
 export const miaoshouRouter = Router();
 
@@ -77,6 +87,14 @@ interface PublishRecord {
   error?: string;
   /** 失败时 ML 返回的原始错误码（如 item.dimensions / item.net_proceeds / listing.conflict） */
   errorCode?: string;
+  /**
+   * 上架来源：
+   *  - us = 本系统发布（有 itemId/permalink）
+   *  - miaoshou = 妙手侧已上传/已发布（仅知 detailId，无 ML itemId）
+   *  - conflict = ML 报 listing.conflict（商品已存在）
+   * 未设 = 历史记录，按 us 处理
+   */
+  source?: 'us' | 'miaoshou' | 'conflict';
 }
 interface PublishRecordsFile {
   version: number;
@@ -732,35 +750,71 @@ miaoshouRouter.post('/publish', async (req, res) => {
   });
 });
 
-// ============ 视频处理 API（手动触发 + 状态查询） ============
+// ============ 视频处理 API（上传 / 刷新 / 记录 / 播放） ============
+
+/** 妙手站点标记 → ML 站点码 */
+const MS_SITE_TO_ML: Record<string, string> = {
+  'MX(Up)': 'MLM', 'BR(Up)': 'MLB', 'CL(Up)': 'MLC', 'CO(Up)': 'MCO',
+};
+const msSitesToMl = (sites: string[]) =>
+  sites.map((s) => MS_SITE_TO_ML[s] || s).filter((s) => ['MLM', 'MLB', 'MLC', 'MCO'].includes(s));
 
 /**
  * POST /video/upload
- * 为已发布的商品手动上传 1688 视频到 ML Clips
- * body: { detailId: string, itemId: string, storeId: string(UUID) }
+ * 为已上架商品自动生成合规视频并上传 ML Clips
+ *
+ * body: {
+ *   detailId: string,           // 妙手采集箱 detailId
+ *   itemId: string,             // ML CBT item_id（如 CBT5169919624）
+ *   storeId: string,            // 店铺 UUID
+ *   sites?: string[],           // 目标站点，默认 ['MLM']
+ *   shopId?: string,            // 妙手 shopId，默认 12637644
+ *   mainImgVideoUrl?: string,   // 直接给视频 URL 可跳过详情查询
+ *   title?: string,
+ *   force?: boolean             // 强制重新上传（忽略 ML 已有 clip）
+ * }
+ *
+ * 上传成功后同步妙手状态（save_move_collect_task），妙手侧也标记为已上传。
  */
 miaoshouRouter.post('/video/upload', async (req, res) => {
-  const { detailId, itemId, storeId } = req.body as {
+  const { detailId, itemId, storeId, sites, shopId, mainImgVideoUrl, title, force } = req.body as {
     detailId: string; itemId: string; storeId: string;
+    sites?: string[]; shopId?: string; mainImgVideoUrl?: string; title?: string; force?: boolean;
   };
   if (!detailId || !itemId || !storeId) {
     return res.status(400).json({ success: false, error: '缺少 detailId/itemId/storeId' });
   }
   try {
-    // 先拉详情获取 videoUrl
-    const detail = await getMercadoCollectBoxDetail(detailId, '12637644', '0');
-    const info = detail?.siteCollectItemInfo || {};
-    const videoUrl = info.mainImgVideoUrl || info.videoUrl;
+    let videoUrl = mainImgVideoUrl;
+    let finalTitle = title;
+    if (!videoUrl) {
+      const detail = await getMercadoCollectBoxDetail(String(detailId), shopId || '12637644', '0');
+      const info = detail?.siteCollectItemInfo || {};
+      videoUrl = info.mainImgVideoUrl || info.videoUrl;
+      finalTitle = finalTitle || info.title;
+    }
     if (!videoUrl) {
       return res.json({ success: false, error: '该商品无 1688 视频', stage: 'check' });
     }
+    const clipSites = msSitesToMl(sites || []).length > 0 ? msSitesToMl(sites!) : ['MLM'];
     const result = await processAndUploadVideo({
-      detailId,
+      detailId: String(detailId),
       mainImgVideoUrl: videoUrl,
-      cbtItemId: itemId,
-      siteIds: ['MLM'],
+      cbtItemId: String(itemId),
+      siteIds: clipSites,
       storeId,
+      title: finalTitle,
+      force: !!force,
     });
+    // 上传成功 → 同步妙手采集箱状态（best effort，失败不影响结果）
+    if (result.success) {
+      try {
+        const msSync = await saveMoveCollectTask([Number(detailId)]);
+        console.log(`[Video] 妙手状态同步: detailId=${detailId} → ${msSync.result} ${msSync.message}`);
+      } catch (syncErr: any) {
+        console.warn(`[Video] 妙手状态同步失败（不影响视频上传）: ${syncErr.message}`);
+      }
+    }
     res.json(result);
   } catch (e: any) {
     console.error(`[Video] upload 异常: ${e.message}`);
@@ -769,34 +823,82 @@ miaoshouRouter.post('/video/upload', async (req, res) => {
 });
 
 /**
+ * POST /video/refresh
+ * 刷新 ML Clips 上传 / 审核状态
+ *
+ * - 有 clip → 同步各站点审核状态（UNDER_REVIEW → AVAILABLE / REJECTED）
+ * - 无 clip（被拒/被删/从未上传）→ 按失败原因自动重传（优先复用服务器备份）
+ *
+ * body:
+ *   {}                        → 刷新全部记录
+ *   { key: "storeId|detailId" } → 刷新单条
+ *   { storeId, detailId }     → 刷新单条
+ *   { forceReupload: true }   → 强制重新上传（即使 ML 已有 clip）
+ */
+miaoshouRouter.post('/video/refresh', async (req, res) => {
+  const { key, storeId, detailId, forceReupload } = req.body as {
+    key?: string; storeId?: string; detailId?: string; forceReupload?: boolean;
+  };
+  const force = !!forceReupload;
+  try {
+    const all = getVideoRecords();
+
+    if (key || (storeId && detailId)) {
+      const k = key || recKey(String(storeId), String(detailId));
+      const rec = all[k];
+      if (!rec) {
+        return res.json({ success: false, error: `无视频记录：${k}` });
+      }
+      const updated = await refreshVideoRecord(rec, { forceReupload: force });
+      return res.json({ success: true, record: updated });
+    }
+
+    // 批量：串行处理，避免同时打爆 ML Clips API
+    const stats = await refreshAllVideoRecords(force);
+    res.json({ success: true, ...stats, records: listVideoRecordsSorted() });
+  } catch (e: any) {
+    console.error(`[Video] refresh 异常: ${e.message}`);
+    res.json({ success: false, error: e.message });
+  }
+});
+
+/**
  * GET /video/status/:itemId
- * 查询指定商品的 ML Clips 状态
- * query: ?storeId=<UUID>
+ * 查询指定 ML 商品的 Clips 状态，并同步到视频记录
+ * query: ?storeId=<UUID>&detailId=<妙手detailId>
  */
 miaoshouRouter.get('/video/status/:itemId', async (req, res) => {
   const { itemId } = req.params;
   const storeId = req.query.storeId as string;
+  const detailId = req.query.detailId as string | undefined;
   if (!storeId) return res.status(400).json({ success: false, error: '缺少 storeId' });
   const store = getStoreRaw(storeId);
   if (!store?.accessToken) return res.json({ success: false, error: '店铺无 token' });
   try {
-    const r = await fetch(
-      `https://api.mercadolibre.com/marketplace/items/${itemId}/clips?access_token=${store.accessToken}`
-    );
-    const data = await r.json();
-    const clips = data.clips || [];
+    // 有对应记录则走完整刷新（查状态 + 无 clip 时自动重传），保证前端看到最新审核状态
+    const k = detailId ? recKey(storeId, detailId) : '';
+    const cur = k ? getVideoRecords()[k] : undefined;
+    if (cur) {
+      const updated = await refreshVideoRecord(cur, {});
+      const st = updated.siteStatuses;
+      return res.json({
+        success: true,
+        itemId,
+        clipCount: Object.keys(st).length,
+        siteStatuses: st,
+        review: overallReview(st),
+        record: updated,
+      });
+    }
+    const st = await fetchClipStatus(itemId, storeId);
     res.json({
       success: true,
       itemId,
-      clipCount: clips.length,
-      clips: clips.map((c: any) => ({
-        clip_uuid: c.clip_uuid,
-        metadata: (c.metadata || []).map((m: any) => ({
-          site_id: m.site_id,
-          item_id: m.item_id,
-          status: m.status,
-        })),
-      })),
+      clipCount: st.clipCount,
+      clipUuids: st.clipUuids,
+      siteStatuses: st.siteStatuses,
+      review: overallReview(st.siteStatuses),
+      error: st.error,
     });
   } catch (e: any) {
     res.json({ success: false, error: e.message });
@@ -805,34 +907,86 @@ miaoshouRouter.get('/video/status/:itemId', async (req, res) => {
 
 /**
  * GET /video/records
- * 列出已发布但尚未上传视频的商品（有 mainImgVideoUrl 但无 clips）
+ * 全部视频处理记录（按上传时间倒序），含备份路径与综合审核结论
  */
-miaoshouRouter.get('/video/records', async (_req, res) => {
+miaoshouRouter.get('/video/records', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  const items = listVideoRecordsSorted().map((r) => ({
+    ...r,
+    hasBackup: !!r.backupFile && fs.existsSync(backupFilePath(r)),
+    review: overallReview(r.siteStatuses),
+  }));
+  res.json({ success: true, total: items.length, items, records: getVideoRecords() });
+});
+
+/**
+ * GET /video/file/:detailId
+ * 播放服务器备份的合规视频（用于「查看视频」）
+ */
+miaoshouRouter.get('/video/file/:detailId', (req, res) => {
+  const { detailId } = req.params;
+  const rec = Object.values(getVideoRecords()).find((r) => r.detailId === String(detailId));
+  const p = rec ? backupFilePath(rec) : path.join(BACKUP_DIR, `${detailId}.mp4`);
+  if (!p || !fs.existsSync(p) || fs.statSync(p).size < 1000) {
+    return res.status(404).json({ success: false, error: '无服务器备份视频' });
+  }
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  return res.sendFile(p);
+});
+
+// ============ 妙手侧已发布同步（妙手 ERP 已上传 → 本系统也显示已上传） ============
+
+/** 妙手虚拟店铺 key：无 ML 店铺归属时归到这里，不会阻断其它店铺上架 */
+export const MIAOSHOU_VIRTUAL_STORE = 'miaoshou-erp';
+
+/**
+ * POST /published/sync-miaoshou
+ * 拉取妙手采集箱「已发布」商品，合并进本系统发布记录（source=miaoshou）。
+ * 用途：妙手侧有上传限流对策会自己上架；这些商品会从妙手「未发布」列表消失，
+ * 不同步就看不到。同步后在「已发布」tab 显示，并按上传时间倒序。
+ */
+miaoshouRouter.post('/published/sync-miaoshou', async (_req, res) => {
   try {
-    const recordsPath = path.join(__dirname, '..', 'data', 'publish-records.json');
-    const rec = JSON.parse(fs.readFileSync(recordsPath, 'utf-8'));
-    const records = rec.records || rec;
-    const success = Object.values(records).filter((v: any) => v.status === 'success' && v.itemId);
-    const items: any[] = [];
-    for (const r of success) {
-      try {
-        const detail = await getMercadoCollectBoxDetail(String(r.detailId), '12637644', '0');
-        const info = detail?.siteCollectItemInfo || {};
-        const hasVideo = !!(info.mainImgVideoUrl || info.videoUrl);
-        if (hasVideo) {
-          items.push({
-            detailId: r.detailId,
-            itemId: r.itemId,
-            storeId: r.storeId,
-            title: info.title || '',
-            videoUrl: (info.mainImgVideoUrl || info.videoUrl).slice(0, 80),
-            publishedAt: r.publishedAt,
-          });
-        }
-      } catch { /* 跳过查询失败的商品 */ }
+    const result = await searchMercadoCollectBoxAll({ status: 'published', filterCidSite: 'CBT', pageSize: 500 });
+    const msList = result.detailList || [];
+    // 尝试用 妙手 appAccountId 匹配本系统的 mlUserId，能对上就归到真实店铺
+    const stores = getAllStores().filter((s) => s.authorized && s.enabled);
+    let added = 0;
+    let skipped = 0;
+    for (const it of msList) {
+      const detailId = String(it.collectBoxDetailId);
+      const msSites = msSitesToMl(it.collectBoxDetailShop?.sites || []);
+      const accId = String(it.appAccountId || '');
+      const matched = stores.find((s) => s.mlUserId && String(s.mlUserId) === accId);
+      const targetStoreId = matched ? matched.id : MIAOSHOU_VIRTUAL_STORE;
+      const key = recKey(targetStoreId, detailId);
+      if (recordsCache.records[key]) {
+        skipped++;
+        continue;
+      }
+      const msTs = Date.parse(it.gmtCreate);
+      saveRecord({
+        detailId,
+        shopId: String(it.collectBoxDetailShop?.shopId || '12637644'),
+        storeId: targetStoreId,
+        sites: msSites,
+        title: it.title,
+        publishedAt: Number.isFinite(msTs) && msTs > 0 ? msTs : Date.now(),
+        status: 'success',
+        source: 'miaoshou',
+        conflict: true,
+      });
+      added++;
     }
-    res.json({ success: true, total: items.length, items });
+    res.json({
+      success: true,
+      miaoshouPublished: msList.length,
+      added,
+      skipped,
+      records: getPublishRecords(),
+    });
   } catch (e: any) {
-    res.json({ success: false, error: e.message });
+    console.error('[Miaoshou Sync] 同步妙手已发布失败:', e?.message || e);
+    res.json({ success: false, error: e?.message || '同步失败' });
   }
 });
