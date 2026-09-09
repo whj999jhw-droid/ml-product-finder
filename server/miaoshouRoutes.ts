@@ -794,7 +794,14 @@ miaoshouRouter.post('/video/upload', async (req, res) => {
       finalTitle = finalTitle || info.title;
     }
     if (!videoUrl) {
-      return res.json({ success: false, error: '该商品无 1688 视频', stage: 'check' });
+      // 无 1688 视频时，若服务器已有备份（如「图片生成视频」产物）则直接复用
+      const backupPath = path.join(BACKUP_DIR, `${detailId}.mp4`);
+      if (fs.existsSync(backupPath) && fs.statSync(backupPath).size > 1000) {
+        videoUrl = `backup://${detailId}`;
+        console.log(`[VideoUpload] ${detailId} 无 1688 视频，复用服务器备份上传`);
+      } else {
+        return res.json({ success: false, error: '该商品无 1688 视频且无服务器备份', stage: 'check' });
+      }
     }
     const clipSites = msSitesToMl(sites || []).length > 0 ? msSitesToMl(sites!) : ['MLM'];
     const result = await processAndUploadVideo({
