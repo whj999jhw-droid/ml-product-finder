@@ -22,7 +22,7 @@ import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { fileURLToPath } from 'url';
-import { getStoreRaw } from './stores.js';
+import { getStoreRaw, ensureStoreToken } from './stores.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -75,6 +75,33 @@ export function overallReview(siteStatuses: Record<string, string> = {}): {
   if (vals.every((v) => CLIP_WAIT.includes(v) || CLIP_OK.includes(v))) return { label: '待审核', kind: 'wait' };
   return { label: clipStatusLabel(vals[0]), kind: 'wait' };
 }
+
+// ============ 店铺 token（上传前必须续期） ============
+
+/**
+ * 取店铺可用 access token：过期或临近过期（<5 分钟）自动用 refresh_token 续期。
+ *
+ * 为什么必须在这里做：ML 的 access token 寿命约 40 分钟，而定时续期是 30 分钟一次、
+ * 且启动时才预热。视频处理链路是长任务（下载+转换+上传可能跨越 token 过期点），
+ * 用过期 token 上传会得到 `{"code":"unauthorized","message":"invalid access token"}`，
+ * ML 侧则把该 clip 标成 UPLOADING_ERROR —— 视频本身完全合规也会「失败」。
+ */
+async function getValidToken(storeId: string): Promise<{ token: string; error?: string }> {
+  const store = getStoreRaw(storeId);
+  if (!store) return { token: '', error: '店铺不存在' };
+  if (!store.accessToken) {
+    return { token: '', error: '店铺无 access token，请到「店铺管理」重新授权' };
+  }
+  try {
+    return { token: await ensureStoreToken(store) };
+  } catch (e: any) {
+    return { token: '', error: `店铺 token 无效且自动续期失败：${e.message}` };
+  }
+}
+
+/** 判断错误是否为鉴权问题（用于区分「token 问题」与「视频内容问题」） */
+const isAuthError = (msg?: string) =>
+  !!msg && /unauthorized|invalid access token|invalid_token/i.test(msg);
 
 // ============ 下载视频 ============
 
@@ -262,17 +289,17 @@ export async function uploadClip(
   videoPath: string,
   siteIds: string[],
   storeId: string
-): Promise<{ success: boolean; clipUuid?: string; error?: string }> {
-  const store = getStoreRaw(storeId);
-  if (!store?.accessToken) {
-    return { success: false, error: '店铺无 access_token' };
+): Promise<{ success: boolean; clipUuid?: string; authError?: boolean; error?: string }> {
+  const { token, error } = await getValidToken(storeId);
+  if (!token) {
+    return { success: false, authError: true, error };
   }
 
   try {
     // 使用 curl 上传（ML Clips API 对 sites 字段格式敏感，curl 的 multipart 处理更可靠）
     const args = [
       '-s', '-X', 'POST',
-      '-H', `Authorization: Bearer ${store.accessToken}`,
+      '-H', `Authorization: Bearer ${token}`,
       '-F', `file=@${videoPath};type=video/mp4`,
       '-F', `site_id=${siteIds[0]}`,  // 上传到主站点，ML 会自动复制到该 CBT item 的所有站点
       `https://api.mercadolibre.com/marketplace/items/${cbtItemId}/clips/upload`,
@@ -290,7 +317,7 @@ export async function uploadClip(
 
     const msg = data?.message || data?.error_status || JSON.stringify(data);
     console.error(`[VideoClips] 上传失败: ${msg}`);
-    return { success: false, error: msg };
+    return { success: false, authError: isAuthError(msg), error: msg };
   } catch (e: any) {
     console.error(`[VideoClips] 上传异常: ${e.message}`);
     return { success: false, error: e.message };
@@ -323,7 +350,7 @@ export interface VideoRecord {
   variant?: number;
   /** 各站点审核状态：MLM → UNDER_REVIEW / AVAILABLE / REJECTED ... */
   siteStatuses: Record<string, string>;
-  stage?: 'check' | 'download' | 'convert' | 'backup' | 'upload' | 'done';
+  stage?: 'auth' | 'check' | 'download' | 'convert' | 'backup' | 'upload' | 'done';
   error?: string;
   createdAt: number;
   uploadedAt?: number;
@@ -396,24 +423,27 @@ export async function fetchClipStatus(
   clipCount: number;
   clipUuids: string[];
   siteStatuses: Record<string, string>;
+  authError?: boolean;
   error?: string;
 }> {
-  const store = getStoreRaw(storeId);
-  if (!store?.accessToken) {
-    return { ok: false, clipCount: 0, clipUuids: [], siteStatuses: {}, error: '店铺无 access_token' };
+  const { token, error } = await getValidToken(storeId);
+  if (!token) {
+    return { ok: false, clipCount: 0, clipUuids: [], siteStatuses: {}, authError: true, error };
   }
   try {
     const r = await fetch(
-      `https://api.mercadolibre.com/marketplace/items/${cbtItemId}/clips?access_token=${store.accessToken}`
+      `https://api.mercadolibre.com/marketplace/items/${cbtItemId}/clips?access_token=${token}`
     );
     const data = await r.json();
     if (!r.ok) {
+      const msg = data?.message || data?.error_status || `HTTP ${r.status}`;
       return {
         ok: false,
         clipCount: 0,
         clipUuids: [],
         siteStatuses: {},
-        error: data?.message || data?.error_status || `HTTP ${r.status}`,
+        authError: isAuthError(msg),
+        error: msg,
       };
     }
     const clips = data.clips || [];
@@ -497,42 +527,49 @@ export async function processAndUploadVideo(opts: {
   if (title) rec.title = title;
   rec.updatedAt = now();
 
-  // 0. 非强制：先查 ML 是否已有 clip → 正常则同步状态返回，全失败则继续重传
+  // 0. 先查 ML 是否已有 clip
   let retryVariant = 0;
-  if (!force) {
-    const st = await fetchClipStatus(cbtItemId, storeId);
-    if (st.ok && st.clipCount > 0) {
-      const review = overallReview(st.siteStatuses);
-      if (review.kind === 'bad') {
-        // 全部站点上传失败/被拒（如 UPLOADING_ERROR）→ 不算「已上传」，按原因重传
-        // 换裁切变体重传：ML Clips 按内容哈希去重，同一文件重传只会返回旧 clip 的失败状态
-        retryVariant = (rec.refreshAttempts || 0) + 1;
-        console.log(
-          `[VideoClips] ${detailId}@${storeId.slice(0, 8)} clip 状态异常（${review.label} ` +
-            `${JSON.stringify(st.siteStatuses)}），用变体 ${retryVariant} 重新转换上传`
-        );
-        rec.siteStatuses = { ...rec.siteStatuses, ...st.siteStatuses };
-        rec.error = `上次上传状态异常：${JSON.stringify(st.siteStatuses)}`;
-        rec.stage = 'check';
-        rec.variant = retryVariant;
-        saveVideoRecord(rec);
-      } else {
-        rec.status = 'uploaded';
-        rec.siteStatuses = { ...rec.siteStatuses, ...st.siteStatuses };
-        if (!rec.clipUuid) rec.clipUuid = st.clipUuids[0];
-        rec.error = undefined;
-        rec.stage = 'done';
-        if (!rec.uploadedAt) rec.uploadedAt = now();
-        rec.updatedAt = now();
-        rec.lastRefreshAt = now();
-        rec.refreshAttempts = (rec.refreshAttempts || 0) + 1;
-        saveVideoRecord(rec);
-        console.log(`[VideoClips] ${detailId}@${storeId.slice(0, 8)} 已有 clip，状态已同步`);
-        return { success: true, stage: 'already_uploaded', record: rec };
-      }
-    } else if (!st.ok) {
-      console.warn(`[VideoClips] ${detailId} 状态查询失败（继续尝试上传）: ${st.error}`);
+  const pre = await fetchClipStatus(cbtItemId, storeId);
+  // 鉴权失败：token 过期且续期失败 → 不浪费带宽下载/转换，直接给出可操作提示
+  if (!pre.ok && pre.authError) {
+    rec.status = 'failed';
+    rec.error = pre.error || '店铺 access token 无效';
+    rec.stage = 'auth';
+    rec.updatedAt = now();
+    saveVideoRecord(rec);
+    return { success: false, stage: 'auth', error: rec.error, record: rec };
+  }
+  if (!force && pre.ok && pre.clipCount > 0) {
+    const review = overallReview(pre.siteStatuses);
+    if (review.kind === 'bad') {
+      // 全部站点上传失败/被拒（如 UPLOADING_ERROR）→ 不算「已上传」，按原因重传
+      // 换裁切变体重传：ML Clips 按内容哈希去重，同一文件重传只会返回旧 clip 的失败状态
+      retryVariant = (rec.refreshAttempts || 0) + 1;
+      console.log(
+        `[VideoClips] ${detailId}@${storeId.slice(0, 8)} clip 状态异常（${review.label} ` +
+          `${JSON.stringify(pre.siteStatuses)}），用变体 ${retryVariant} 重新转换上传`
+      );
+      rec.siteStatuses = { ...rec.siteStatuses, ...pre.siteStatuses };
+      rec.error = `上次上传状态异常：${JSON.stringify(pre.siteStatuses)}`;
+      rec.stage = 'check';
+      rec.variant = retryVariant;
+      saveVideoRecord(rec);
+    } else {
+      rec.status = 'uploaded';
+      rec.siteStatuses = { ...rec.siteStatuses, ...pre.siteStatuses };
+      if (!rec.clipUuid) rec.clipUuid = pre.clipUuids[0];
+      rec.error = undefined;
+      rec.stage = 'done';
+      if (!rec.uploadedAt) rec.uploadedAt = now();
+      rec.updatedAt = now();
+      rec.lastRefreshAt = now();
+      rec.refreshAttempts = (rec.refreshAttempts || 0) + 1;
+      saveVideoRecord(rec);
+      console.log(`[VideoClips] ${detailId}@${storeId.slice(0, 8)} 已有 clip，状态已同步`);
+      return { success: true, stage: 'already_uploaded', record: rec };
     }
+  } else if (!pre.ok) {
+    console.warn(`[VideoClips] ${detailId} 状态查询失败（继续尝试上传）: ${pre.error}`);
   }
 
   // 1. 定位输出文件：优先复用服务器备份
@@ -632,10 +669,13 @@ export async function processAndUploadVideo(opts: {
   const uploadResult = await uploadClip(cbtItemId, outPath, siteIds, storeId);
   if (!uploadResult.success) {
     rec.status = 'failed';
-    rec.error = uploadResult.error || '上传失败';
+    rec.error = uploadResult.authError
+      ? `店铺 token 无效，请重新授权：${uploadResult.error || 'invalid access token'}`
+      : uploadResult.error || '上传失败';
+    rec.stage = uploadResult.authError ? 'auth' : 'upload';
     rec.updatedAt = now();
     saveVideoRecord(rec);
-    return { success: false, stage: 'upload', error: rec.error, record: rec };
+    return { success: false, stage: rec.stage, error: rec.error, record: rec };
   }
 
   // 3. 上传成功 → 立即查一次审核状态（通常 UNDER_REVIEW）

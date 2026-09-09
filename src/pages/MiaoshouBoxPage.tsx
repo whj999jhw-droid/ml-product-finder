@@ -151,6 +151,18 @@ function videoReviewTag(siteStatuses: Record<string, string> = {}): {
   return { label: '视频待审核', theme: 'warning' };
 }
 
+/** 综合视频记录状态：优先看后端 status（含鉴权失败），其次看各站点审核结论 */
+type VideoState = 'none' | 'uploading' | 'failed' | 'auth' | 'ok' | 'wait' | 'bad';
+function videoStateOf(v: any): VideoState {
+  if (!v) return 'none';
+  if (v.status === 'failed') return v.stage === 'auth' ? 'auth' : 'failed';
+  if (v.status === 'uploading') return 'uploading';
+  const t = videoReviewTag(v.siteStatuses || {}).theme;
+  if (t === 'success') return 'ok';
+  if (t === 'danger') return 'bad';
+  return 'wait';
+}
+
 // ============ 主组件 ============
 
 export function MiaoshouBoxPage() {
@@ -995,13 +1007,16 @@ export function MiaoshouBoxPage() {
               </span>
               <span className="text-xs text-gray-400 ml-auto">
                 {(() => {
-                  const ok = videoList.filter((v) =>
-                    videoReviewTag(v.siteStatuses).theme === 'success'
-                  ).length;
+                  const ok = videoList.filter((v) => videoStateOf(v) === 'ok').length;
                   const bad = videoList.filter((v) =>
-                    videoReviewTag(v.siteStatuses).theme === 'danger'
+                    ['bad', 'failed'].includes(videoStateOf(v))
                   ).length;
-                  return `已通过 ${ok} · 待审核 ${videoList.length - ok - bad} · 被拒 ${bad}`;
+                  const auth = videoList.filter((v) => videoStateOf(v) === 'auth').length;
+                  return (
+                    `已通过 ${ok} · 待审核 ${Math.max(0, videoList.length - ok - bad - auth)} · ` +
+                    `异常 ${bad}` +
+                    (auth ? ` · 需重新授权 ${auth}` : '')
+                  );
                 })()}
               </span>
             </div>
@@ -1075,16 +1090,29 @@ export function MiaoshouBoxPage() {
                               {/* 视频状态 */}
                               {fromMs ? (
                                 <span className="text-gray-400">视频状态未知</span>
-                              ) : !vrec ? (
+                              ) : videoStateOf(vrec) === 'none' ? (
                                 <Tag size="small" variant="light">📹 未上传视频</Tag>
-                              ) : vrec.status === 'failed' ? (
+                              ) : videoStateOf(vrec) === 'uploading' ? (
+                                <Tag size="small" theme="warning" variant="light">
+                                  📹 处理中
+                                </Tag>
+                              ) : videoStateOf(vrec) === 'auth' ? (
+                                <Tag
+                                  size="small"
+                                  theme="danger"
+                                  variant="light"
+                                  title={`${vrec.error || '店铺 access token 无效'}\n请到「店铺管理」重新授权`}
+                                >
+                                  📹 需重新授权
+                                </Tag>
+                              ) : videoStateOf(vrec) === 'failed' ? (
                                 <Tag
                                   size="small"
                                   theme="danger"
                                   variant="light"
                                   title={`${vrec.error || ''}\n阶段: ${vrec.stage || '-'}`}
                                 >
-                                  📹 失败
+                                  📹 上传失败
                                 </Tag>
                               ) : (
                                 <Tag size="small" theme={tag!.theme} variant="light" title={vrec.clipUuid}>
@@ -1124,8 +1152,7 @@ export function MiaoshouBoxPage() {
                                     onClick={() => handleUploadVideo(r)}
                                   >
                                     <CloudUpload size={12} className="inline mr-0.5" />
-                                    {vrec?.status === 'failed' ||
-                                    (tag && tag.theme === 'danger')
+                                    {['failed', 'auth', 'bad'].includes(videoStateOf(vrec))
                                       ? '重传视频'
                                       : '上传视频'}
                                   </Button>
