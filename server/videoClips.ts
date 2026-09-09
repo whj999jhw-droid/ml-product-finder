@@ -154,7 +154,8 @@ export async function getVideoInfo(filePath: string): Promise<VideoInfo | null> 
  */
 export async function convertToClipsFormat(
   inputPath: string,
-  outputPath: string
+  outputPath: string,
+  variant = 0
 ): Promise<{ success: boolean; info: VideoInfo | null; error?: string }> {
   const info = await getVideoInfo(inputPath);
   if (!info) return { success: false, info: null, error: 'ffprobe 失败' };
@@ -177,6 +178,14 @@ export async function convertToClipsFormat(
   // 确保裁剪区域在画面内
   cropW = Math.max(1, Math.min(cropW, srcW));
   cropX = Math.max(0, Math.min(cropX, srcW - cropW));
+
+  // 变体（variant>0）：平移裁切窗口，让输出文件内容不同。
+  // 原因：ML Clips 按内容哈希去重，同一文件重复上传只会返回上一次失败的 clip 状态，
+  // 必须换一片画面区域才能生成新 clip 重新送审。
+  if (variant > 0) {
+    const shift = ((variant * 7) % 9) * 2 - 8; // -8 .. +8 px
+    cropX = Math.max(0, Math.min(cropX + shift, srcW - cropW));
+  }
 
   // 移除底部 12%（文字/水印区域）
   const bottomCrop = Math.round(srcH * 0.12);
@@ -253,7 +262,7 @@ export async function uploadClip(
   videoPath: string,
   siteIds: string[],
   storeId: string
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; clipUuid?: string; error?: string }> {
   const store = getStoreRaw(storeId);
   if (!store?.accessToken) {
     return { success: false, error: '店铺无 access_token' };
@@ -273,8 +282,10 @@ export async function uploadClip(
     const data = JSON.parse(stdout);
 
     if (data.status === 'accepted') {
-      console.log(`[VideoClips] 上传成功: ${cbtItemId} → clip_uuid=${data.clip_uuid}`);
-      return { success: true };
+      console.log(
+        `[VideoClips] 上传成功: ${cbtItemId} → clip_uuid=${data.clip_uuid} sites=${JSON.stringify(data.site_ids)}`
+      );
+      return { success: true, clipUuid: data.clip_uuid };
     }
 
     const msg = data?.message || data?.error_status || JSON.stringify(data);
@@ -304,6 +315,12 @@ export interface VideoRecord {
   /** uploading=正在处理；uploaded=已提交 ML；failed=上传失败（可重试） */
   status: 'uploading' | 'uploaded' | 'failed';
   clipUuid?: string;
+  /** 本次上传响应里的 clip_uuid（与状态查询的 clipUuid 不同可证明 ML 未去重） */
+  lastUploadedClipUuid?: string;
+  /** 上传响应返回的站点列表 */
+  lastUploadedSiteIds?: string[];
+  /** 转换变体编号：>0 表示为绕过 ML 内容去重而平移了裁切窗口 */
+  variant?: number;
   /** 各站点审核状态：MLM → UNDER_REVIEW / AVAILABLE / REJECTED ... */
   siteStatuses: Record<string, string>;
   stage?: 'check' | 'download' | 'convert' | 'backup' | 'upload' | 'done';
@@ -481,19 +498,23 @@ export async function processAndUploadVideo(opts: {
   rec.updatedAt = now();
 
   // 0. 非强制：先查 ML 是否已有 clip → 正常则同步状态返回，全失败则继续重传
+  let retryVariant = 0;
   if (!force) {
     const st = await fetchClipStatus(cbtItemId, storeId);
     if (st.ok && st.clipCount > 0) {
       const review = overallReview(st.siteStatuses);
       if (review.kind === 'bad') {
         // 全部站点上传失败/被拒（如 UPLOADING_ERROR）→ 不算「已上传」，按原因重传
+        // 换裁切变体重传：ML Clips 按内容哈希去重，同一文件重传只会返回旧 clip 的失败状态
+        retryVariant = (rec.refreshAttempts || 0) + 1;
         console.log(
           `[VideoClips] ${detailId}@${storeId.slice(0, 8)} clip 状态异常（${review.label} ` +
-            `${JSON.stringify(st.siteStatuses)}），继续重新上传`
+            `${JSON.stringify(st.siteStatuses)}），用变体 ${retryVariant} 重新转换上传`
         );
         rec.siteStatuses = { ...rec.siteStatuses, ...st.siteStatuses };
         rec.error = `上次上传状态异常：${JSON.stringify(st.siteStatuses)}`;
         rec.stage = 'check';
+        rec.variant = retryVariant;
         saveVideoRecord(rec);
       } else {
         rec.status = 'uploaded';
@@ -521,7 +542,7 @@ export async function processAndUploadVideo(opts: {
     fs.existsSync(backupPath) && fs.statSync(backupPath).size > 1000;
   let outPath = backupPath;
 
-  if (reuseBackup && hasBackup) {
+  if (reuseBackup && hasBackup && retryVariant === 0) {
     rec.stage = 'backup';
     rec.status = 'uploading';
     rec.backupFile = backupName;
@@ -542,7 +563,7 @@ export async function processAndUploadVideo(opts: {
       // 1b. 转换为 ML 合规格式（9:16、10-61s、含音频、1080x1920）
       rec.stage = 'convert';
       saveVideoRecord(rec);
-      const convResult = await convertToClipsFormat(rawPath, tmpOut);
+      const convResult = await convertToClipsFormat(rawPath, tmpOut, retryVariant);
       if (convResult.success) {
         // 1c. 写入服务器备份（永久保留）
         fs.mkdirSync(BACKUP_DIR, { recursive: true });
@@ -620,9 +641,12 @@ export async function processAndUploadVideo(opts: {
   // 3. 上传成功 → 立即查一次审核状态（通常 UNDER_REVIEW）
   const st2 = await fetchClipStatus(cbtItemId, storeId);
   rec.status = 'uploaded';
+  rec.lastUploadedClipUuid = uploadResult.clipUuid;
   if (st2.ok) {
     rec.siteStatuses = { ...rec.siteStatuses, ...st2.siteStatuses };
-    if (!rec.clipUuid) rec.clipUuid = st2.clipUuids[0];
+    rec.clipUuid = st2.clipUuids[0] || rec.clipUuid;
+  } else {
+    rec.clipUuid = rec.clipUuid || uploadResult.clipUuid;
   }
   rec.error = undefined;
   rec.stage = 'done';
@@ -631,8 +655,8 @@ export async function processAndUploadVideo(opts: {
   saveVideoRecord(rec);
 
   console.log(
-    `[VideoClips] ${detailId}@${storeId.slice(0, 8)} 视频上传完成 ` +
-      `${JSON.stringify(rec.siteStatuses)}`
+    `[VideoClips] ${detailId}@${storeId.slice(0, 8)} 视频上传完成 variant=${rec.variant || 0} ` +
+      `uploaded=${uploadResult.clipUuid} status=${JSON.stringify(rec.siteStatuses)}`
   );
   return { success: true, stage: 'done', record: rec };
 }
