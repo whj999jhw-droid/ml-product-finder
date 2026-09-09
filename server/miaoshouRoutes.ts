@@ -731,3 +731,108 @@ miaoshouRouter.post('/publish', async (req, res) => {
     results,
   });
 });
+
+// ============ 视频处理 API（手动触发 + 状态查询） ============
+
+/**
+ * POST /video/upload
+ * 为已发布的商品手动上传 1688 视频到 ML Clips
+ * body: { detailId: string, itemId: string, storeId: string(UUID) }
+ */
+miaoshouRouter.post('/video/upload', async (req, res) => {
+  const { detailId, itemId, storeId } = req.body as {
+    detailId: string; itemId: string; storeId: string;
+  };
+  if (!detailId || !itemId || !storeId) {
+    return res.status(400).json({ success: false, error: '缺少 detailId/itemId/storeId' });
+  }
+  try {
+    // 先拉详情获取 videoUrl
+    const detail = await getMercadoCollectBoxDetail(detailId, '12637644', '0');
+    const info = detail?.siteCollectItemInfo || {};
+    const videoUrl = info.mainImgVideoUrl || info.videoUrl;
+    if (!videoUrl) {
+      return res.json({ success: false, error: '该商品无 1688 视频', stage: 'check' });
+    }
+    const result = await processAndUploadVideo({
+      detailId,
+      mainImgVideoUrl: videoUrl,
+      cbtItemId: itemId,
+      siteIds: ['MLM'],
+      storeId,
+    });
+    res.json(result);
+  } catch (e: any) {
+    console.error(`[Video] upload 异常: ${e.message}`);
+    res.json({ success: false, error: e.message, stage: 'error' });
+  }
+});
+
+/**
+ * GET /video/status/:itemId
+ * 查询指定商品的 ML Clips 状态
+ * query: ?storeId=<UUID>
+ */
+miaoshouRouter.get('/video/status/:itemId', async (req, res) => {
+  const { itemId } = req.params;
+  const storeId = req.query.storeId as string;
+  if (!storeId) return res.status(400).json({ success: false, error: '缺少 storeId' });
+  const store = getStoreRaw(storeId);
+  if (!store?.accessToken) return res.json({ success: false, error: '店铺无 token' });
+  try {
+    const r = await fetch(
+      `https://api.mercadolibre.com/marketplace/items/${itemId}/clips?access_token=${store.accessToken}`
+    );
+    const data = await r.json();
+    const clips = data.clips || [];
+    res.json({
+      success: true,
+      itemId,
+      clipCount: clips.length,
+      clips: clips.map((c: any) => ({
+        clip_uuid: c.clip_uuid,
+        metadata: (c.metadata || []).map((m: any) => ({
+          site_id: m.site_id,
+          item_id: m.item_id,
+          status: m.status,
+        })),
+      })),
+    });
+  } catch (e: any) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+/**
+ * GET /video/records
+ * 列出已发布但尚未上传视频的商品（有 mainImgVideoUrl 但无 clips）
+ */
+miaoshouRouter.get('/video/records', async (_req, res) => {
+  try {
+    const recordsPath = path.join(__dirname, '..', 'data', 'publish-records.json');
+    const rec = JSON.parse(fs.readFileSync(recordsPath, 'utf-8'));
+    const records = rec.records || rec;
+    const success = Object.values(records).filter((v: any) => v.status === 'success' && v.itemId);
+    const items: any[] = [];
+    for (const r of success) {
+      try {
+        const detail = await getMercadoCollectBoxDetail(String(r.detailId), '12637644', '0');
+        const info = detail?.siteCollectItemInfo || {};
+        const hasVideo = !!(info.mainImgVideoUrl || info.videoUrl);
+        if (hasVideo) {
+          items.push({
+            detailId: r.detailId,
+            itemId: r.itemId,
+            storeId: r.storeId,
+            title: info.title || '',
+            videoUrl: (info.mainImgVideoUrl || info.videoUrl).slice(0, 80),
+            publishedAt: r.publishedAt,
+          });
+        }
+      } catch { /* 跳过查询失败的商品 */ }
+    }
+    res.json({ success: true, total: items.length, items });
+  } catch (e: any) {
+    res.json({ success: false, error: e.message });
+  }
+});
