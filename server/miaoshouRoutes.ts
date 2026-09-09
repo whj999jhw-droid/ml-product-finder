@@ -911,9 +911,23 @@ miaoshouRouter.get('/video/status/:itemId', async (req, res) => {
  */
 miaoshouRouter.get('/video/records', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  // 同一个 detailId 可能有多个店铺的记录（每个店铺一条），但备份视频是按
+  // detailId 全局共享一份的（BACKUP_DIR/<detailId>.mp4）。所以 hasBackup 必须
+  // 按 detailId 判定：只要任一店铺的记录里有可用备份，该 detailId 就算有备份。
+  // 否则「查看视频」按钮会因落在没有 backupFile 的那条记录上而隐藏。
+  const recsByDetail = new Map<string, any[]>();
+  for (const r of Object.values(getVideoRecords())) {
+    const arr = recsByDetail.get(r.detailId);
+    if (arr) arr.push(r); else recsByDetail.set(r.detailId, [r]);
+  }
+  const hasBackupFor = (d: string): boolean => {
+    const direct = path.join(BACKUP_DIR, `${d}.mp4`);
+    if (fs.existsSync(direct) && fs.statSync(direct).size >= 1000) return true;
+    return (recsByDetail.get(d) || []).some((r) => r.backupFile && fs.existsSync(backupFilePath(r)));
+  };
   const items = listVideoRecordsSorted().map((r) => ({
     ...r,
-    hasBackup: !!r.backupFile && fs.existsSync(backupFilePath(r)),
+    hasBackup: hasBackupFor(r.detailId),
     review: overallReview(r.siteStatuses),
   }));
   res.json({ success: true, total: items.length, items, records: getVideoRecords() });
@@ -922,15 +936,21 @@ miaoshouRouter.get('/video/records', (_req, res) => {
 /**
  * GET /video/file/:detailId
  * 播放服务器备份的合规视频（用于「查看视频」）
+ * 同一 detailId 可能有多条店铺记录，只有实际做过转换的那条才有 backupFile，
+ * 因此必须挑有 backupFile 的记录，并回退到 BACKUP_DIR/<detailId>.mp4。
  */
 miaoshouRouter.get('/video/file/:detailId', (req, res) => {
   const { detailId } = req.params;
-  const rec = Object.values(getVideoRecords()).find((r) => r.detailId === String(detailId));
-  const p = rec ? backupFilePath(rec) : path.join(BACKUP_DIR, `${detailId}.mp4`);
+  const all = Object.values(getVideoRecords()).filter((r) => r.detailId === String(detailId));
+  const rec = all.find((r) => r.backupFile) || all[0];
+  const p = (rec && rec.backupFile && fs.existsSync(backupFilePath(rec)))
+    ? backupFilePath(rec)
+    : path.join(BACKUP_DIR, `${detailId}.mp4`);
   if (!p || !fs.existsSync(p) || fs.statSync(p).size < 1000) {
     return res.status(404).json({ success: false, error: '无服务器备份视频' });
   }
   res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.setHeader('Content-Type', 'video/mp4');
   return res.sendFile(p);
 });
 
