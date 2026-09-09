@@ -118,6 +118,8 @@ const MIAOSHOU_STORE_KEY = 'miaoshou-erp';
 const CLIP_LABEL: Record<string, string> = {
   UNDER_REVIEW: '待审核',
   PROCESSING: '处理中',
+  UPLOADED: '已上传待处理',
+  READY: '待发布',
   AVAILABLE: '已通过',
   PUBLISHED: '已通过',
   APPROVED: '已通过',
@@ -126,9 +128,15 @@ const CLIP_LABEL: Record<string, string> = {
   BLOCKED: '已拒绝',
   REMOVED: '已移除',
   FAILED: '失败',
+  UPLOADING_ERROR: '上传失败',
+  UPLOAD_ERROR: '上传失败',
+  NOT_AVAILABLE: '不可用',
 };
 const CLIP_OK = ['AVAILABLE', 'PUBLISHED', 'APPROVED', 'LIVE'];
-const CLIP_BAD = ['REJECTED', 'BLOCKED', 'FAILED'];
+const CLIP_BAD = [
+  'REJECTED', 'BLOCKED', 'FAILED', 'REMOVED',
+  'UPLOADING_ERROR', 'UPLOAD_ERROR', 'NOT_AVAILABLE',
+];
 
 /** 视频综合状态标签：用于「已发布」列表逐店铺显示 */
 function videoReviewTag(siteStatuses: Record<string, string> = {}): {
@@ -1116,7 +1124,10 @@ export function MiaoshouBoxPage() {
                                     onClick={() => handleUploadVideo(r)}
                                   >
                                     <CloudUpload size={12} className="inline mr-0.5" />
-                                    {vrec?.status === 'failed' ? '重试视频' : '上传视频'}
+                                    {vrec?.status === 'failed' ||
+                                    (tag && tag.theme === 'danger')
+                                      ? '重传视频'
+                                      : '上传视频'}
                                   </Button>
                                 )}
                                 {vrec && (

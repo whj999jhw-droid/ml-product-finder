@@ -884,7 +884,7 @@ miaoshouRouter.get('/video/status/:itemId', async (req, res) => {
       return res.json({
         success: true,
         itemId,
-        clipCount: Object.keys(st).length,
+        siteCount: Object.values(st).filter(Boolean).length,
         siteStatuses: st,
         review: overallReview(st),
         record: updated,

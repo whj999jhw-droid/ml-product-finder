@@ -35,10 +35,12 @@ const execFileAsync = promisify(execFile);
 
 // ============ ML Clips 审核状态 ============
 // ML 实际返回的 status 见 /marketplace/items/{id}/clips → clips[].metadata[].status
-// 未在映射表内的状态原样展示（避免臆造结论）
+// 实测（2026-09-09）：UNDER_REVIEW / UPLOADING_ERROR；未在映射表内的状态原样展示
 export const CLIP_STATUS_LABEL: Record<string, string> = {
   UNDER_REVIEW: '待审核',
   PROCESSING: '处理中',
+  UPLOADED: '已上传待处理',
+  READY: '待发布',
   AVAILABLE: '已通过',
   PUBLISHED: '已通过',
   APPROVED: '已通过',
@@ -47,11 +49,17 @@ export const CLIP_STATUS_LABEL: Record<string, string> = {
   BLOCKED: '已拒绝',
   REMOVED: '已移除',
   FAILED: '失败',
+  UPLOADING_ERROR: '上传失败',
+  UPLOAD_ERROR: '上传失败',
+  NOT_AVAILABLE: '不可用',
   UNKNOWN: '未知',
 };
 const CLIP_OK = ['AVAILABLE', 'PUBLISHED', 'APPROVED', 'LIVE'];
-const CLIP_WAIT = ['UNDER_REVIEW', 'PROCESSING'];
-const CLIP_BAD = ['REJECTED', 'BLOCKED', 'FAILED'];
+const CLIP_WAIT = ['UNDER_REVIEW', 'PROCESSING', 'UPLOADED', 'READY'];
+const CLIP_BAD = [
+  'REJECTED', 'BLOCKED', 'FAILED', 'REMOVED',
+  'UPLOADING_ERROR', 'UPLOAD_ERROR', 'NOT_AVAILABLE',
+];
 
 export const clipStatusLabel = (s?: string) => (s && CLIP_STATUS_LABEL[s]) || s || '未知';
 
@@ -472,24 +480,36 @@ export async function processAndUploadVideo(opts: {
   if (title) rec.title = title;
   rec.updatedAt = now();
 
-  // 0. 非强制：先查 ML 是否已有 clip → 有则同步状态直接返回
+  // 0. 非强制：先查 ML 是否已有 clip → 正常则同步状态返回，全失败则继续重传
   if (!force) {
     const st = await fetchClipStatus(cbtItemId, storeId);
     if (st.ok && st.clipCount > 0) {
-      rec.status = 'uploaded';
-      rec.siteStatuses = { ...rec.siteStatuses, ...st.siteStatuses };
-      if (!rec.clipUuid) rec.clipUuid = st.clipUuids[0];
-      rec.error = undefined;
-      rec.stage = 'done';
-      if (!rec.uploadedAt) rec.uploadedAt = now();
-      rec.updatedAt = now();
-      rec.lastRefreshAt = now();
-      rec.refreshAttempts = (rec.refreshAttempts || 0) + 1;
-      saveVideoRecord(rec);
-      console.log(`[VideoClips] ${detailId}@${storeId.slice(0, 8)} 已有 clip，状态已同步`);
-      return { success: true, stage: 'already_uploaded', record: rec };
-    }
-    if (!st.ok) {
+      const review = overallReview(st.siteStatuses);
+      if (review.kind === 'bad') {
+        // 全部站点上传失败/被拒（如 UPLOADING_ERROR）→ 不算「已上传」，按原因重传
+        console.log(
+          `[VideoClips] ${detailId}@${storeId.slice(0, 8)} clip 状态异常（${review.label} ` +
+            `${JSON.stringify(st.siteStatuses)}），继续重新上传`
+        );
+        rec.siteStatuses = { ...rec.siteStatuses, ...st.siteStatuses };
+        rec.error = `上次上传状态异常：${JSON.stringify(st.siteStatuses)}`;
+        rec.stage = 'check';
+        saveVideoRecord(rec);
+      } else {
+        rec.status = 'uploaded';
+        rec.siteStatuses = { ...rec.siteStatuses, ...st.siteStatuses };
+        if (!rec.clipUuid) rec.clipUuid = st.clipUuids[0];
+        rec.error = undefined;
+        rec.stage = 'done';
+        if (!rec.uploadedAt) rec.uploadedAt = now();
+        rec.updatedAt = now();
+        rec.lastRefreshAt = now();
+        rec.refreshAttempts = (rec.refreshAttempts || 0) + 1;
+        saveVideoRecord(rec);
+        console.log(`[VideoClips] ${detailId}@${storeId.slice(0, 8)} 已有 clip，状态已同步`);
+        return { success: true, stage: 'already_uploaded', record: rec };
+      }
+    } else if (!st.ok) {
       console.warn(`[VideoClips] ${detailId} 状态查询失败（继续尝试上传）: ${st.error}`);
     }
   }
