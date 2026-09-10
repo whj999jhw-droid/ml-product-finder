@@ -1,6 +1,6 @@
 /**
  * server/publisherAi.ts
- * 「妙手自动发布助手」插件专用 AI 代跑端点。
+ * 「妙手自动发布助手」插件专用端点（AI 代跑 + 商品素材聚合）。
  *
  * 背景：Chrome 插件（miaoshou-auto-publisher）跑在用户浏览器里，本身不该持有 AI key：
  *   1) ml-finder 的 GET /api/ml/llm-config 出于安全**不返回 apiKey**，插件拿到的是空壳 provider；
@@ -17,6 +17,17 @@
  *     task=pick-trends      { title, keywords[], maxWords? } → { picks[] }
  *     task=extract-attrs    { notesFull, existing? }         → { json }
  *     task=decide-variation { skuInfo }                      → { json }
+ *   GET  /api/ml/publisher/material?detailId=&site=&ai=1   → 商品素材聚合包（★ 见下）
+ *
+ * ★ /material —— 「商品数据不用爬 DOM，服务器直连妙手开放平台拿」
+ *   插件原来靠读弹框 DOM「猜」标题/属性/SKU/进价，页面一改版就失效。
+ *   服务器上有 MIAOSHOU_APP_KEY，进程内直连妙手开放平台就能拿到**结构化全字段**：
+ *     详情接口 get_site_collect_item_info 返回 title/notes/notesFull/cid/breadcrumb/
+ *     sourceImgUrls[]/videoUrl/attributes[]/saleAttributes[]/siteAndTitleList[]/skuMap(含 weight/尺寸/imgUrls)
+ *   /material 把这些 + AI（净化标题/译标题/挑热搜词）一次聚合返回，插件只负责往 DOM 里写。
+ *   → 入参只需 detailId：shopId/cid/货源价/净收益 都从采集箱列表缓存补齐（插件零配置）。
+ *   → 注意：妙手详情接口**不返回 globalPrice**，且其 price 字段语义与列表不同，
+ *     所以货源价/净收益一律取列表接口的 price / globalPrice（见 hidePitfall 注释）。
  *
  * ★ 鲁棒性（都是实测踩出来的，别改回去）：
  *   1) aiService.llmGenerate 不传 timeoutMs 时默认 **120 秒** —— 这里必须给每个平台设 15s，
@@ -33,6 +44,13 @@
 import { Router } from 'express';
 import { llmGenerate, getLlmProviders, detectProviderType } from './aiService.js';
 import type { LlmProvider } from './aiService.js';
+import {
+  getMercadoCollectBoxDetail,
+  getCachedBoxList,
+  setCachedBoxList,
+  searchMercadoCollectBoxAll,
+} from './miaoshou.js';
+import { getTrendsKeywords } from './trends.js';
 
 const router = Router();
 
@@ -243,6 +261,78 @@ function respond(
   return res.json(body);
 }
 
+// ============ AI 任务的提示词（/ai 与 /material 共用，只写一份） ============
+
+const SYS_CLEAN_TITLE =
+  '你是美客多(CBT)跨境刊登标题优化助手。把电商货源的中文/混杂标题清理成可发布的干净中文标题。规则：' +
+  '1) 删除营销话术、店铺名、与商品无关的泛词(如"跨境专供""热销""工厂直供""现货批发""一件代发""包邮")、乱码、重复品牌词；' +
+  '2) 保留并理顺:核心产品名+关键卖点+规格(型号/接口/适用机型/材质/颜色/尺寸/数量)；' +
+  '3) 若含多个无关产品名只保留最主要的；' +
+  '4) 只输出清理后的标题本身,不要任何解释、不要加引号、不要JSON、不要反问用户。';
+
+function sysTranslate(kind: string, langName: string) {
+  return kind === 'desc'
+    ? `你是跨境电商商品描述翻译助手，把中文商品描述翻译成地道、简洁的${langName}，保留规格与参数，不要臆造信息。只输出译文，不要解释、不要反问。`
+    : `你是跨境电商商品标题翻译助手，把中文标题翻译成符合 Mercado Libre（拉美）搜索习惯的${langName}标题，自然简洁、保留品牌/型号/规格，不要臆造参数。只输出译文，不要解释、不要反问。`;
+}
+
+function sysPickTrends(cap: number) {
+  return `你是美客多(Mercado Libre)跨境刊登的 SEO 助手。给定商品标题与目标站点当前热搜词列表，` +
+    `从中挑出与该商品**确属同一品类/强相关**的热搜词（最多 ${cap} 个），用于拼进标题提升搜索曝光。` +
+    '规则：宁缺勿滥；语义不相关就一个都不要；不得编造列表以外的词；不要挑过于泛而无意义的⼤词。' +
+    '严格只输出 JSON：{"picks":["词1","词2"]}；若一个都不相关就输出 {"picks":[]}。不要反问、不要解释。';
+}
+
+const SYS_EXTRACT_ATTRS =
+  '你是一名跨境电商商品属性抽取助手。根据货源规格文本(可能来自1688商品详情快照)提取对美客多刊登有用的属性键值。' +
+  '要求：只输出能作为类目属性填写的键值(如品牌/型号/适用机型/接口/线材长度/颜色/材质等)；丢弃营销废话。' +
+  '已有属性请合并去重，别重复。若某信息不存在则不写该键。不要反问用户。' +
+  '严格只输出 JSON：{"attributes":{"属性名":"值"},"notes":"一句话说明不确定点"}';
+
+const SYS_DECIDE_VARIATION =
+  '你是美客多刊登决策助手。给定一个商品当前 SKU 情况与货源描述，判断：' +
+  '1) 该上"单品"还是"多规格(有变体)"？若只有1个SKU且无不同颜色/规格变体→单品；多个SKU(不同颜色/容量/尺寸等)→多规格。' +
+  '2) 若是多规格，主属性叫什么(颜色/容量/尺寸/套餐...)，值分别是什么。' +
+  '3) 若是单品但货源描述里提到颜色，给出建议颜色值。不要反问用户。' +
+  '严格只输出 JSON：{"type":"single"|"multi","variationName":"","values":[],"notes":""}';
+
+/** 净化标题（中文） */
+function runCleanTitle(title: string, pool = DEFAULT_POOL, overallMs = DEFAULT_OVERALL_MS) {
+  return raceProviders(
+    { systemPrompt: SYS_CLEAN_TITLE, prompt: '原标题: ' + String(title || '').slice(0, 500), temperature: 0.2, maxTokens: 200 },
+    (raw) => validTitleText(tidy(raw)),
+    { pool, overallMs }
+  );
+}
+
+/** 翻译 */
+function runTranslate(text: string, kind: string, target: string, pool = DEFAULT_POOL, overallMs?: number) {
+  const langName = target.startsWith('es') ? '西班牙语' : target.startsWith('pt') ? '葡萄牙语' : '英文';
+  const budget = overallMs || (kind === 'desc' ? 36000 : DEFAULT_OVERALL_MS);
+  return raceProviders(
+    {
+      systemPrompt: sysTranslate(kind, langName),
+      prompt: String(text || '').slice(0, 3000),
+      temperature: 0.2,
+      maxTokens: kind === 'desc' ? 2000 : 300,
+      timeoutMs: kind === 'desc' ? 25000 : PER_PROVIDER_TIMEOUT_MS,
+    },
+    (raw) => validTranslatedText(tidy(raw)),
+    { pool, overallMs: budget }
+  );
+}
+
+/** 挑热搜词 */
+function runPickTrends(title: string, keywords: string[], cap: number, pool = DEFAULT_POOL, overallMs = DEFAULT_OVERALL_MS) {
+  return raceProviders(
+    { systemPrompt: sysPickTrends(cap), prompt: JSON.stringify({ title: String(title || '').slice(0, 160), keywords }), temperature: 0.2, maxTokens: 300 },
+    (raw) => extractPicks(raw, keywords, cap).wellFormed,
+    { pool, overallMs }
+  );
+}
+
+// ============ 健康检查 ============
+
 /** 健康检查：插件启动时先探一次，能拿到 chat 平台就说明 AI 已就绪 */
 router.get('/health', (_req, res) => {
   const providers = getLlmProviders();
@@ -258,6 +348,8 @@ router.get('/health', (_req, res) => {
   });
 });
 
+// ============ AI 代跑（单任务） ============
+
 router.post('/ai', async (req, res) => {
   const body = req.body || {};
   const task = String(body.task || '').trim();
@@ -268,17 +360,7 @@ router.post('/ai', async (req, res) => {
       case 'clean-title': {
         const title = String(body.title || '').slice(0, 500);
         if (!title) return res.status(400).json({ success: false, message: '请提供 title' });
-        const r = await raceProviders({
-          systemPrompt:
-            '你是美客多(CBT)跨境刊登标题优化助手。把电商货源的中文/混杂标题清理成可发布的干净中文标题。规则：' +
-            '1) 删除营销话术、店铺名、与商品无关的泛词(如"跨境专供""热销""工厂直供""现货批发""一件代发""包邮")、乱码、重复品牌词；' +
-            '2) 保留并理顺:核心产品名+关键卖点+规格(型号/接口/适用机型/材质/颜色/尺寸/数量)；' +
-            '3) 若含多个无关产品名只保留最主要的；' +
-            '4) 只输出清理后的标题本身,不要任何解释、不要加引号、不要JSON、不要反问用户。',
-          prompt: '原标题: ' + title,
-          temperature: 0.2,
-          maxTokens: 200,
-        }, (raw) => validTitleText(tidy(raw)), { pool });
+        const r = await runCleanTitle(title, pool);
         return respond(res, r, (t) => (validTitleText(tidy(t)) ? tidy(t) : ''), 'text');
       }
 
@@ -286,19 +368,7 @@ router.post('/ai', async (req, res) => {
       case 'translate': {
         const text0 = String(body.text || '').slice(0, 3000);
         if (!text0) return res.status(400).json({ success: false, message: '请提供 text' });
-        const target = String(body.target || 'en').toLowerCase();
-        const kind = String(body.kind || 'title');
-        const langName = target.startsWith('es') ? '西班牙语' : target.startsWith('pt') ? '葡萄牙语' : '英文';
-        const sys = kind === 'desc'
-          ? `你是跨境电商商品描述翻译助手，把中文商品描述翻译成地道、简洁的${langName}，保留规格与参数，不要臆造信息。只输出译文，不要解释、不要反问。`
-          : `你是跨境电商商品标题翻译助手，把中文标题翻译成符合 Mercado Libre（拉美）搜索习惯的${langName}标题，自然简洁、保留品牌/型号/规格，不要臆造参数。只输出译文，不要解释、不要反问。`;
-        const r = await raceProviders({
-          systemPrompt: sys,
-          prompt: text0,
-          temperature: 0.2,
-          maxTokens: kind === 'desc' ? 2000 : 300,
-          timeoutMs: kind === 'desc' ? 25000 : PER_PROVIDER_TIMEOUT_MS,
-        }, (raw) => validTranslatedText(tidy(raw)), { pool, overallMs: kind === 'desc' ? 36000 : DEFAULT_OVERALL_MS });
+        const r = await runTranslate(text0, String(body.kind || 'title'), String(body.target || 'en').toLowerCase(), pool);
         return respond(res, r, (t) => (validTranslatedText(tidy(t)) ? tidy(t) : ''), 'text');
       }
 
@@ -308,18 +378,7 @@ router.post('/ai', async (req, res) => {
           .map((k: any) => String(k || '').trim()).filter(Boolean).slice(0, 40);
         if (!list.length) return res.json({ success: true, picks: [], engine: 'ai' });
         const cap = Math.max(1, Math.min(Number(body.maxWords) || 2, 3));
-        const sys =
-          `你是美客多(Mercado Libre)跨境刊登的 SEO 助手。给定商品标题与目标站点当前热搜词列表，` +
-          `从中挑出与该商品**确属同一品类/强相关**的热搜词（最多 ${cap} 个），用于拼进标题提升搜索曝光。` +
-          '规则：宁缺勿滥；语义不相关就一个都不要；不得编造列表以外的词；不要挑过于泛而无意义的大词。' +
-          '严格只输出 JSON：{"picks":["词1","词2"]}；若一个都不相关就输出 {"picks":[]}。不要反问、不要解释。';
-        const user = JSON.stringify({ title: String(body.title || '').slice(0, 160), keywords: list });
-        // 「确实没有相关词」也是合法答案 → 只要模型给出结构化 picks 就采纳
-        const r = await raceProviders(
-          { systemPrompt: sys, prompt: user, temperature: 0.2, maxTokens: 300 },
-          (raw) => extractPicks(raw, list, cap).wellFormed,
-          { pool }
-        );
+        const r = await runPickTrends(String(body.title || ''), list, cap, pool);
         const picks = r.text ? extractPicks(r.text, list, cap).picks : [];
         return res.json({
           success: true, picks, engine: 'ai',
@@ -331,11 +390,7 @@ router.post('/ai', async (req, res) => {
       // ---------- 4) 从货源规格快照抽取类目属性 ----------
       case 'extract-attrs': {
         const r = await raceProviders({
-          systemPrompt:
-            '你是一名跨境电商商品属性抽取助手。根据货源规格文本(可能来自1688商品详情快照)提取对美客多刊登有用的属性键值。' +
-            '要求：只输出能作为类目属性填写的键值(如品牌/型号/适用机型/接口/线材长度/颜色/材质等)；丢弃营销废话。' +
-            '已有属性请合并去重，别重复。若某信息不存在则不写该键。不要反问用户。' +
-            '严格只输出 JSON：{"attributes":{"属性名":"值"},"notes":"一句话说明不确定点"}',
+          systemPrompt: SYS_EXTRACT_ATTRS,
           prompt: JSON.stringify({ specText: String(body.notesFull || '').slice(0, 2500), existing: body.existing || {} }),
           temperature: 0.1,
           maxTokens: 800,
@@ -354,12 +409,7 @@ router.post('/ai', async (req, res) => {
       // ---------- 5) 判单品/多规格 + 主属性 ----------
       case 'decide-variation': {
         const r = await raceProviders({
-          systemPrompt:
-            '你是美客多刊登决策助手。给定一个商品当前 SKU 情况与货源描述，判断：' +
-            '1) 该上"单品"还是"多规格(有变体)"？若只有1个SKU且无不同颜色/规格变体→单品；多个SKU(不同颜色/容量/尺寸等)→多规格。' +
-            '2) 若是多规格，主属性叫什么(颜色/容量/尺寸/套餐...)，值分别是什么。' +
-            '3) 若是单品但货源描述里提到颜色，给出建议颜色值。不要反问用户。' +
-            '严格只输出 JSON：{"type":"single"|"multi","variationName":"","values":[],"notes":""}',
+          systemPrompt: SYS_DECIDE_VARIATION,
           prompt: JSON.stringify(body.skuInfo || {}),
           temperature: 0.1,
           maxTokens: 400,
@@ -381,6 +431,175 @@ router.post('/ai', async (req, res) => {
   } catch (err: any) {
     // AI 全平台失败 → 交给插件侧规则兜底，不算致命错误
     return res.json({ success: false, message: err?.message || String(err), engine: 'none' });
+  }
+});
+
+// ============ 商品素材聚合（★ 插件改造的核心） ============
+
+/**
+ * material 缓存：同一个 detailId 在 60s 内重复请求直接复用。
+ * 场景：用户点「编辑」先探一次、正式开跑又探一次；或同商品重试。
+ * 注意不能用太长的 TTL —— 妙手侧改了图/属性要能较快反映。
+ */
+const MATERIAL_TTL_MS = 60_000;
+const _materialCache = new Map<string, { ts: number; data: any }>();
+
+function materialCachePut(key: string, data: any) {
+  _materialCache.set(key, { ts: Date.now(), data });
+  if (_materialCache.size > 300) {
+    // 简单淘汰：按时间排序，删掉最旧的 100 条
+    const arr = Array.from(_materialCache.entries()).sort((a, b) => a[1].ts - b[1].ts);
+    for (const [k] of arr.slice(0, 100)) _materialCache.delete(k);
+  }
+}
+
+/** 保证采集箱列表在缓存里（material 要用它补 shopId/cid/货源价/净收益） */
+async function ensureBoxList(): Promise<any[]> {
+  const cached = getCachedBoxList();
+  if (cached && cached.length) return cached as any[];
+  const r = await searchMercadoCollectBoxAll({ status: 'notPublished', filterCidSite: 'CBT', pageSize: 500 });
+  const items = (r.detailList || []) as any[];
+  if (items.length) setCachedBoxList(items as any);
+  return items;
+}
+
+function numOf(v: any): number | null {
+  const n = parseFloat(String(v ?? '').replace(/[^\d.]/g, ''));
+  return isNaN(n) ? null : n;
+}
+
+/**
+ * GET /material?detailId=xxx[&site=MLM][&ai=1][&maxWords=2][&target=en]
+ *
+ * 返回：
+ *   product  —— 妙手开放平台拿到的结构化商品数据（标题/描述/类目/图片/属性/SKU/货源价/净收益/站点）
+ *   ai       —— cleanTitle(中文净化) / titleTranslated(译标题) / trendPicks(相关热搜词) / attrSuggestions
+ *   meta     —— elapsedMs / cached / listMatched / aiEngine
+ *
+ * ★ 货源价与净收益取「列表接口」的 price / globalPrice：
+ *   妙手详情接口的 price 字段在 netProceeds 模式下语义是「目标净利润」而非货源价，
+ *   且详情**不返回** globalPrice（这里也不硬编码假设，先取列表权威值，详情值仅兜底）。
+ */
+router.get('/material', async (req, res) => {
+  const detailId = String(req.query.detailId || '').trim();
+  if (!detailId || !/^\d+$/.test(detailId)) {
+    return res.status(400).json({ success: false, message: '缺少或非法 detailId（应为纯数字）' });
+  }
+  const wantAi = String(req.query.ai ?? '1') !== '0';
+  const site = String(req.query.site || 'MLM').toUpperCase();
+  const maxWords = Math.max(1, Math.min(Number(req.query.maxWords) || 2, 3));
+  const target = String(req.query.target || 'en').toLowerCase();
+  const withDesc = String(req.query.desc ?? '0') === '1';
+
+  const ck = [detailId, wantAi ? 1 : 0, site, maxWords, target, withDesc ? 1 : 0].join(':');
+  const hit = _materialCache.get(ck);
+  if (hit && Date.now() - hit.ts < MATERIAL_TTL_MS) {
+    return res.json(Object.assign({}, hit.data, {
+      meta: Object.assign({}, hit.data.meta, { cached: true, elapsedMs: Date.now() - hit.ts }),
+    }));
+  }
+
+  const t0 = Date.now();
+  try {
+    // ---- 1) 列表项：补 shopId / cid / 货源价 / 净收益（插件不必知道这些） ----
+    const list = await ensureBoxList();
+    const item: any = list.find((x: any) => String(x.collectBoxDetailId) === detailId);
+    const shopId = String(item?.collectBoxDetailShop?.shopId || req.query.shopId || '');
+    const cid = String(item?.cid || req.query.cid || '');
+    if (!shopId || !cid) {
+      return res.status(404).json({
+        success: false,
+        message: `未在采集箱列表里找到 detailId=${detailId} 的 shopId/cid（可能已被发布/移除，或不在「未发布」状态）`,
+      });
+    }
+
+    // ---- 2) 详情：妙手开放平台结构化全字段（AK 直连，进程内调用） ----
+    const detail = await getMercadoCollectBoxDetail(detailId, shopId, cid);
+    const d: any = (detail && (detail as any).siteCollectItemInfo) || {};
+
+    const product = {
+      title: d.title || item?.title || '',
+      itemNum: d.itemNum || item?.itemNum || '',
+      notes: d.notes || '',
+      notesFull: d.notesFull || '',
+      /** 货源价（CNY）—— 取列表的 price（详情接口同名字段语义不同，别用） */
+      costCny: numOf(item?.price),
+      /** 妙手已填的全球净收益（USD），列表有值则用 */
+      globalPriceUsd: numOf(item?.globalPrice) ?? numOf(d.globalPrice),
+      cid: String(d.cid || cid),
+      breadcrumb: d.breadcrumb || item?.breadcrumb || '',
+      cateList: d.cateList || [],
+      sourceImgUrls: d.sourceImgUrls || [],
+      videoUrl: d.videoUrl || '',
+      mainImgVideoUrl: d.mainImgVideoUrl || '',
+      sourceItemUrl: d.sourceItemUrl || '',
+      sites: d.sites || item?.collectBoxDetailShop?.sites || [],
+      siteAndTitleList: d.siteAndTitleList || [],
+      attributes: d.attributes || [],
+      saleAttributes: d.saleAttributes || [],
+      skuMap: d.skuMap || {},
+      pricingMode: d.pricingMode || item?.collectBoxDetailShop?.pricingMode || '',
+      source: d.source || '',
+    };
+
+    // ---- 3) AI：净化标题 / 译标题 / 挑热搜词（三路并发，任一失败不影响其它） ----
+    // ★ 预算必须收紧：实测三路并发时，只要有一路（多半是热搜词）全平台失败，
+    //   raceProviders 会一直重试到 overallMs 上限 —— 曾把整体拖到 33.8s。
+    //   这里统一按 aiBudget（默认 15s）封顶，拿不到就返回部分结果，绝不阻塞插件。
+    let ai: any = { engine: 'none' };
+    if (wantAi) {
+      const aiBudget = Math.max(6000, Math.min(Number(req.query.aiBudget) || 12000, 30000));
+      const keywords = await getTrendsKeywords(site, 50).catch(() => [] as string[]);
+      const [cleanR, trR, trendR] = await Promise.all([
+        runCleanTitle(product.title, DEFAULT_POOL, aiBudget),
+        product.title ? runTranslate(product.title, 'title', target, DEFAULT_POOL, aiBudget) : Promise.resolve({ text: '', used: '', errors: [] as string[] }),
+        keywords.length ? runPickTrends(product.title, keywords, maxWords, DEFAULT_POOL, Math.min(aiBudget, 8000)) : Promise.resolve({ text: '', used: '', errors: [] as string[] }),
+      ]);
+      const cleanTitle = cleanR.text ? tidy(cleanR.text) : '';
+      const titleTranslated = trR.text ? tidy(trR.text) : '';
+      const trendPicks = trendR.text ? extractPicks(trendR.text, keywords, maxWords).picks : [];
+      ai = {
+        engine: (cleanTitle || titleTranslated) ? 'ai' : 'none',
+        cleanTitle,
+        titleTranslated,
+        trendPicks,
+        trendSourceSite: keywords.length ? site : '',
+        used: cleanR.used || trR.used || trendR.used || undefined,
+        errors: [] as string[],
+      };
+      if (!cleanTitle) (ai.errors as string[]).push('clean-title：' + (cleanR.errors.join('； ') || '无合格结果'));
+      if (product.title && !titleTranslated) (ai.errors as string[]).push('translate：' + (trR.errors.join('； ') || '无合格结果'));
+      if (keywords.length && !trendPicks.length && !trendR.text) (ai.errors as string[]).push('pick-trends：' + (trendR.errors.join('； ') || '无合格结果'));
+      if (!ai.errors.length) delete ai.errors;
+    }
+
+    // ---- 4) 可选：描述翻译 ----
+    let descTranslated = '';
+    if (wantAi && withDesc && product.notes) {
+      const r = await runTranslate(product.notes, 'desc', target);
+      descTranslated = r.text ? tidy(r.text) : '';
+    }
+
+    const data: any = {
+      success: true,
+      detailId,
+      shopId,
+      cid,
+      product,
+      ai,
+      descTranslated: descTranslated || undefined,
+      meta: {
+        elapsedMs: Date.now() - t0,
+        cached: false,
+        listMatched: !!item,
+        aiEngine: ai.engine,
+      },
+    };
+    materialCachePut(ck, data);
+    return res.json(data);
+  } catch (e: any) {
+    console.error(`[publisher/material] detailId=${detailId} 失败:`, e?.message || e);
+    return res.json({ success: false, message: e?.message || String(e), elapsedMs: Date.now() - t0 });
   }
 });
 
