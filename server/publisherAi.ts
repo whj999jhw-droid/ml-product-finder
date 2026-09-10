@@ -18,9 +18,10 @@
  *     task=extract-attrs    { notesFull, existing? }         → { json }
  *     task=decide-variation { skuInfo }                      → { json }
  *   GET  /api/ml/publisher/material?detailId=&site=&ai=1   → 商品素材聚合包（★ 见下）
- *     &dims=0 关掉重量尺寸的 AI 估算（只做规则兜底，快路径）；&dimsBudget=15000 控制预算
+ *     &dims=0 关掉重量尺寸补齐（只做规则兜底，快路径）；&dimsBudget=15000 控制 AI 估算预算
+ *     &vision=0 关掉「视觉读参数图」；&visionBudget=18000 控制扫图预算
  *   ★ 返回里 product.shipping / product.skuRows[].shipping = 解析好的包裹重量尺寸
- *     （三层：妙手真值 → AI 估算 → 类目规则表；见 resolveShipping）
+ *     （四层：妙手真值 → 视觉读参数图 → AI 估算 → 类目规则表；见 resolveShipping）
  *
  * ★ /material —— 「商品数据不用爬 DOM，服务器直连妙手开放平台拿」
  *   插件原来靠读弹框 DOM「猜」标题/属性/SKU/进价，页面一改版就失效。
@@ -471,6 +472,289 @@ function runEstimateDims(
   );
 }
 
+// ============ 视觉读图：直接从货源图里识别尺寸/重量（最接近真值的一层） ============
+// 实测（2026-09-10）：妙手保留的货源图里含「产品参数图」，图上直接印着尺寸标注
+//   （type-c 转接头实测读出 0.8cm / 2.5cm / 1.2cm，与人工看图一致）。
+// 为什么必须走视觉：1688 官方 AK 接口只回一段 markdown 摘要（无重量尺寸）、
+//   1688 网页是反爬壳页（HTTP 200 但只有 4.8KB）、妙手 notesFull 被截断到 200 字、
+//   服务器 DB 历史尺寸列全是 null —— 真值渠道全断，但**图我们拿得到**。
+// 池内可用视觉模型（沿用服务器已配 key，无需额外配置）：智谱 glm-4.6v、deepseek-v4-flash-vision-exp。
+const VISION_MODEL_RE = /(glm-[\d.]+v$|vision|\bvl\b|qwen[\w.-]*vl|gpt-4o|gemini|omni|pixtral|internvl|llava)/i;
+
+/** 视觉平台候选：健康优先（冷却中的排后面） */
+function visionProviders(): LlmProvider[] {
+  const all = getLlmProviders().filter((p) => VISION_MODEL_RE.test(String(p.model || '').trim()));
+  return all.slice().sort((a, b) => (_badUntil.get(pkey(a)) || 0) - (_badUntil.get(pkey(b)) || 0));
+}
+
+/** 真正可用的视觉平台：排除冷却中的；若全在冷却里则退回全部（宁可重试也别空手） */
+function healthyVisionProviders(): LlmProvider[] {
+  const all = visionProviders();
+  const now = Date.now();
+  const ok = all.filter((p) => (_badUntil.get(pkey(p)) || 0) <= now);
+  return ok.length ? ok : all;
+}
+
+const SYS_VISION_DIMS =
+  '你是电商商品图参数识别助手。看图，把图上标注的「尺寸」「重量」数字识别出来。' +
+  '严格只输出一行 JSON，不要思考过程、不要解释、不要 Markdown 代码块：' +
+  '{"hasSize":true,"lengthCm":null,"widthCm":null,"heightCm":null,"weightG":null,' +
+  '"packLengthCm":null,"packWidthCm":null,"packHeightCm":null,"packWeightG":null,"rawText":""} ' +
+  '规则：' +
+  '1) 单位一律换算成 cm 与 g（mm→cm 除以10；m→cm 乘100；kg→g 乘1000）；' +
+  '2) 三边按 长≥宽≥高 排列填进 lengthCm/widthCm/heightCm（这是**单件本体**尺寸）；' +
+  '3) 图上写「包装尺寸/彩盒尺寸/外箱尺寸」的填 packLengthCm/packWidthCm/packHeightCm；' +
+  '4) 图上写「带包装重量/毛重」的填 packWeightG，写「净重/裸重」的填 weightG；' +
+  '5) 「箱规」（如 44*39*44，400pcs）是整箱数据**不是单件**，只抄进 rawText，绝对不要当单件尺寸/重量；' +
+  '6) 图上没有任何尺寸重量信息 → hasSize=false，其余字段全 null；' +
+  '7) rawText 原样抄图上的相关文字（便于人工复核）。';
+
+/**
+ * 视觉专用的冷却判定。
+ * ★ 不能直接复用 cooldownMs：它对 429 也冷却 90s，而池里**只有一个**可用视觉模型
+ *   （glm-4.6v），一旦因为并发限流被冷却，整个视觉层就瘫了（实测就是这个原因导致
+ *   「同一商品有时能读出尺寸、有时读不出」）。所以视觉只对「确定废掉」的错误冷却：
+ *   日额度耗尽 / 余额不足 / 403 / 404 / 模型下架。429 只当次失败，下次照试。
+ */
+function visionCooldownMs(msg: string): number {
+  const m = msg || '';
+  if (/per[-_ ]?day|free-models-per-day|daily|insufficient|balance|quota exceeded|今日额度/i.test(m)) return BAD_COOLDOWN_LONG_MS;
+  if (/403|404|unavailable|not available|invalid model|no permission|model not found/i.test(m)) return BAD_COOLDOWN_LONG_MS;
+  return 0;
+}
+
+/**
+ * 对单张图问一次视觉模型。
+ * 返回 { json } 成功 / { err } 失败。
+ */
+async function visionReadOnce(prov: LlmProvider, imgUrl: string, timeoutMs: number): Promise<{ json?: any; err?: string }> {
+  const base = String(prov.baseUrl || '').replace(/\/+$/, '');
+  const url = /\/chat\/completions$/i.test(base) ? base : base + '/chat/completions';
+  const label = pkey(prov);
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), Math.max(4000, timeoutMs));
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${prov.apiKey}` },
+      body: JSON.stringify({
+        model: prov.model,
+        messages: [
+          { role: 'system', content: '只输出一行 JSON，禁止输出思考过程或解释。' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: SYS_VISION_DIMS },
+              { type: 'image_url', image_url: { url: imgUrl } },
+            ],
+          },
+        ],
+        temperature: 0.1,
+        max_tokens: 1200,
+        stream: false,
+        // ★ 智谱 glm-4.6v 默认会先输出一大段 reasoning_content（思考过程），
+        //   取 max_tokens=500 时正文会被截断成空串（finish_reason:"length"）→
+        //   表现就是「同一张图有时读得出、有时读不出」。实测关掉思考后：
+        //   耗时 18~22s → 2~4s，且答案稳定正确。别删这行。
+        ...(/(bigmodel\.cn|zhipu)/i.test(base) ? { thinking: { type: 'disabled' } } : {}),
+      }),
+      signal: ac.signal,
+    });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      const err = `HTTP ${res.status} ${txt.slice(0, 160)}`;
+      const cd = visionCooldownMs(err);
+      if (cd > 0) _badUntil.set(label, Date.now() + cd);
+      return { err };
+    }
+    const j: any = await res.json();
+    const msg = j?.choices?.[0]?.message || {};
+    // 正文为空时兜底去 reasoning_content 里捞（万一某平台不支持关闭思考）
+    const c = (typeof msg.content === 'string' && msg.content.trim()) ? msg.content : (msg.reasoning_content || '');
+    if (!c) return { err: `返回空内容(finish=${j?.choices?.[0]?.finish_reason || '?'})` };
+    const parsed = parseJson(c);
+    if (!parsed) return { err: '非 JSON 输出' };
+    _badUntil.delete(label);
+    return { json: parsed };
+  } catch (e: any) {
+    const err = e?.message || String(e);
+    const cd = visionCooldownMs(err);
+    if (cd > 0) _badUntil.set(label, Date.now() + cd);
+    return { err };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 对单张图并发问**所有**视觉平台，取第一个合格 JSON。
+ * ★ 别改成「按平台轮流分配图片」——实测那样 2/3 的并发槽被失效平台（429/余额0）占掉，
+ *   12 张图扫完一张合格结果都没有（glm-4.6v 明明 4~6 秒就能给出正确答案）。
+ *   并发问的话失效平台 <1s 就返回错误，完全不拖慢。
+ */
+function visionReadRace(imgUrl: string, timeoutMs: number): Promise<any | null> {
+  const provs = healthyVisionProviders();
+  if (!provs.length) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let pending = provs.length;
+    let done = false;
+    const settle = (j: any | null) => {
+      if (done) return;
+      if (j) { done = true; resolve(j); return; }
+      if (--pending === 0) { done = true; resolve(null); }
+    };
+    for (const p of provs) {
+      visionReadOnce(p, imgUrl, timeoutMs).then((r) => settle(r.json || null)).catch(() => settle(null));
+    }
+  });
+}
+
+/** 视觉结果 → 可用尺寸/重量（含合理性校验，防止把 mm/kg/箱规 当单件） */
+function pickVisionDims(j: any) {
+  if (!j || typeof j !== 'object') return null;
+  const pos = (v: any) => { const n = numOf(v); return n != null && n > 0 ? n : null; };
+  const sorted = (a: number, b: number, c: number) => {
+    const [l, w, h] = [a, b, c].sort((x, y) => y - x);
+    if (l < 1.5 || h < 0.2 || l > 80) return null;    // 单边合理性（cm）
+    if (l * w * h > 150_000) return null;             // 体积上限 150L（再大不是我们卖的轻小件）
+    return { l: +l.toFixed(1), w: +w.toFixed(1), h: +h.toFixed(1) };
+  };
+  const L = pos(j.lengthCm ?? j.length), W = pos(j.widthCm ?? j.width), H = pos(j.heightCm ?? j.height);
+  const PL = pos(j.packLengthCm), PW = pos(j.packWidthCm), PH = pos(j.packHeightCm);
+  const dims = (L && W && H) ? sorted(L, W, H) : null;
+  const packDims = (PL && PW && PH) ? sorted(PL, PW, PH) : null;
+  const weightG = pos(j.weightG ?? j.netWeightG ?? j.weight);
+  const packWeightG = pos(j.packWeightG ?? j.grossWeightG);
+  if (!dims && !packDims && !weightG && !packWeightG) return null;
+  return { dims, packDims, weightG, packWeightG, raw: String(j.rawText || '').slice(0, 200) };
+}
+
+/** 解析 JPEG/PNG 头拿宽高（配合 Range 请求，只下前 8KB） */
+function jpegPngSize(b: Buffer): { w: number; h: number } | null {
+  if (b.length > 24 && b[0] === 0x89 && b[1] === 0x50) {
+    return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+  }
+  if (b.length > 4 && b[0] === 0xFF && b[1] === 0xD8) {
+    let i = 2;
+    while (i < b.length - 9) {
+      if (b[i] !== 0xFF) { i++; continue; }
+      const m = b[i + 1];
+      if (m >= 0xC0 && m <= 0xCF && m !== 0xC4 && m !== 0xC8 && m !== 0xCC) {
+        return { h: b.readUInt16BE(i + 5), w: b.readUInt16BE(i + 7) };
+      }
+      if (m === 0xD8 || (m >= 0xD0 && m <= 0xD7)) { i += 2; continue; }
+      const len = b.readUInt16BE(i + 2);
+      if (len < 2) return null;
+      i += 2 + len;
+    }
+  }
+  return null;
+}
+
+/**
+ * 只下前 8KB 探测图片宽高 —— 用来挑「详情图/参数图」。
+ * 实测妙手给的 40 张图混合了：主图(800×800/500×500)、分隔条(790×50)、详情长图(790×1200~1750)。
+ * 尺寸标注几乎只出现在**竖长图**上，所以按 高/宽 比值排序优先扫，比盲扫前 12 张命中率高得多
+ * （实测盲扫前 12 张直接漏掉了排在第 27 位的「产品参数」图）。
+ */
+async function probeImageSize(url: string, timeoutMs = 6000): Promise<{ w: number; h: number } | null> {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { headers: { Range: 'bytes=0-8191' }, signal: ac.signal });
+    if (!r.ok && r.status !== 206) return null;
+    const buf = Buffer.from(await r.arrayBuffer());
+    return jpegPngSize(buf);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/**
+ * 并发扫货源图找尺寸/重量。
+ * 选图策略：先探宽高 → 丢掉缩略图(.500x500)与细长分隔条(高<150) → 按「竖长」优先排序 → 扫前 12 张。
+ * 并发 6，**首个合格结果即返回**。实测单张视觉推理 ≈6s；只在妙手真值缺项时才调用。
+ */
+/**
+ * 视觉结果缓存（按图片签名）：**正面结果存 24h、负面结果存 30min**。
+ * 理由：同一个商品会被反复规划（重跑、多规格、多站点），每次扫图 15~20s 太浪费；
+ * 负面结果只短存 —— 可能只是撞上限流，过一会儿重试是值得的。
+ */
+const _visionCache = new Map<string, { ts: number; val: any }>();
+const VISION_POS_TTL_MS = 24 * 60 * 60 * 1000;
+const VISION_NEG_TTL_MS = 30 * 60 * 1000;
+
+async function extractDimsFromImages(urls: string[], budgetMs = 22000) {
+  const provs = healthyVisionProviders();
+  const raw = (urls || []).map((u) => String(u || '').trim())
+    .filter((u) => /^https?:\/\//i.test(u) && !/\.500x500\./i.test(u));
+  const seen = new Set<string>();
+  const uniq: string[] = [];
+  for (const u of raw) {
+    const k = u.split('?')[0].toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k); uniq.push(u);
+  }
+  if (!provs.length) return { result: null as any, errors: ['池内无视觉模型（如 glm-4.6v）'] };
+  if (!uniq.length) return { result: null as any, errors: ['没有可扫的货源图'] };
+
+  const cacheKey = uniq.slice(0, 4).map((u) => u.split('?')[0]).join('|') + '#' + uniq.length;
+  const cached = _visionCache.get(cacheKey);
+  if (cached) {
+    const ttl = cached.val ? VISION_POS_TTL_MS : VISION_NEG_TTL_MS;
+    if (Date.now() - cached.ts < ttl) {
+      return { result: cached.val, errors: cached.val ? [] : ['（缓存）此前扫过，参数图里没有尺寸'], cached: true };
+    }
+  }
+
+  // 探尺寸（并发 8）→ 只留「真正的竖长详情图」
+  const probed: { url: string; w: number; h: number }[] = [];
+  let pi = 0;
+  const probeWorker = async () => {
+    while (pi < uniq.length) {
+      const u = uniq[pi++];
+      const s = await probeImageSize(u);
+      if (s && s.w >= 300) probed.push({ url: u, w: s.w, h: s.h });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(8, uniq.length) }, () => probeWorker()));
+  // 详情长图的宽高比普遍 ≥1.35（主图 1:1、分隔条 0.06、横版海报 <1）；
+  // 阈值 1.35 能把「产品参数/规格表」这类图圈进来，同时把主图排除掉，候选从 20+ 降到 ~7 张。
+  let tall = probed.filter((x) => x.h >= 400 && x.h / x.w >= 1.35);
+  if (tall.length < 2) tall = probed.filter((x) => x.h >= 300 && x.h / x.w >= 0.9);
+  tall.sort((a, b) => (b.h / b.w) - (a.h / a.w));
+  const cand = (tall.length ? tall.map((x) => x.url) : uniq).slice(0, 10);
+
+  const deadline = Date.now() + budgetMs;
+  let idx = 0;
+  let found: any = null;
+  let scanned = 0;
+  let okCalls = 0;
+  // 并发 4：关掉 glm 的思考后单张只要 2~4s，4 路并发既快又不容易撞限流
+  // （曾经 6 路并发被限流 → 结果时好时坏）。
+  const concurrency = Math.min(4, cand.length);
+  const worker = async () => {
+    while (!found && Date.now() < deadline) {
+      const i = idx++;
+      if (i >= cand.length) return;
+      scanned++;
+      const j = await visionReadRace(cand[i], deadline - Date.now());
+      if (j) okCalls++;
+      const pick = pickVisionDims(j);
+      if (pick) found = Object.assign(pick, { img: cand[i] });
+    }
+  };
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  if (found) _visionCache.set(cacheKey, { ts: Date.now(), val: found });
+  else if (okCalls > 0) _visionCache.set(cacheKey, { ts: Date.now(), val: null }); // 模型答了但图里没尺寸 → 短存负面
+  return {
+    result: found,
+    errors: found ? [] : [`探了 ${probed.length} 张、扫了 ${scanned} 张竖长图（成功应答 ${okCalls} 次），未发现印着尺寸/重量的参数图`],
+  };
+}
+
 export interface ShippingResolved {
   /** 单件净重（g）—— 不含外包装 */
   netWeightG: number;
@@ -478,15 +762,16 @@ export interface ShippingResolved {
   dims: { l: number; w: number; h: number };
   /** 体积重（kg，长×宽×高/5000），插件侧计费重要用 */
   volumeWeightKg: number;
-  /** 各字段来源：miaoshou(妙手真值) / ai / rule */
+  /** 各字段来源：miaoshou(妙手真值) / vision(参数图识别) / vision-pack(参数图识别,含包装) / ai / rule */
   source: { weight: string; dims: string };
   /** 说人话的解释，便于日志排查 */
   note: string;
   aiError?: string;
+  visionError?: string;
 }
 
 /**
- * 解析一个商品的包裹重量/尺寸：妙手真值 → AI 估算 → 类目规则表。
+ * 解析一个商品的包裹重量/尺寸：妙手真值 → 视觉读图 → AI 估算 → 类目规则表。
  * wantAi=false 时跳过 AI（快路径，用于 /material?dims=0 或纯列表场景）。
  */
 async function resolveShipping(input: {
@@ -494,8 +779,11 @@ async function resolveShipping(input: {
   breadcrumb?: string;
   weightG?: any;
   dims?: { l?: any; w?: any; h?: any };
+  /** 货源图 URL 列表（妙手 sourceImgUrls）—— 视觉读图用 */
+  images?: string[];
   wantAi?: boolean;
   budgetMs?: number;
+  visionBudgetMs?: number;
 }): Promise<ShippingResolved> {
   const title = String(input.title || '');
   const breadcrumb = String(input.breadcrumb || '');
@@ -509,13 +797,44 @@ async function resolveShipping(input: {
   let dims = miaoshouDims ? { l: miaoshouDims.l, w: miaoshouDims.w, h: miaoshouDims.h } : null;
   const source = { weight: mWeight != null ? 'miaoshou' : 'none', dims: miaoshouDims ? 'miaoshou' : 'none' };
   let aiError = '';
+  let visionError = '';
   const notes: string[] = [];
 
   // 规则值先算好：既是兜底，也用作 AI 结果的**保守校验基准**
   const rd = ruleDims(title, breadcrumb, netWeightG);
   const vol = (d: { l: number; w: number; h: number }) => d.l * d.w * d.h;
 
-  // 2) AI 估算（只在缺项时调用，省时间）
+  // 2) 视觉读图（最接近真值：货源图里的「产品参数图」常直接印着尺寸标注）
+  //    —— 比 AI 凭标题猜准得多，也不受「标题没写尺寸」限制。实测单张 ≈6s、并发 5、首个命中即返回。
+  if (input.wantAi && Array.isArray(input.images) && input.images.length && (!dims || netWeightG == null)) {
+    try {
+      const v = await extractDimsFromImages(input.images, input.visionBudgetMs || 22000);
+      const vr: any = v.result;
+      if (vr) {
+        const vd = vr.dims || vr.packDims;
+        if (!dims && vd) {
+          dims = { l: vd.l, w: vd.w, h: vd.h };
+          // 图上写的是「包装尺寸」时标记 vision-pack —— 插件据此**不再叠加包装增量**
+          source.dims = vr.dims ? 'vision' : 'vision-pack';
+          notes.push(`尺寸由参数图识别(${vr.dims ? '本体' : '包装'} ${vd.l}×${vd.w}×${vd.h})`);
+        }
+        if (netWeightG == null) {
+          const vw = vr.weightG || vr.packWeightG;
+          if (vw != null) {
+            netWeightG = vw;
+            source.weight = 'vision';
+            notes.push(`净重由参数图识别(${vw}g)`);
+          }
+        }
+      } else {
+        visionError = (v.errors || []).join('； ');
+      }
+    } catch (e: any) {
+      visionError = e?.message || String(e);
+    }
+  }
+
+  // 3) AI 估算（只在缺项时调用，省时间）
   if (input.wantAi && (!dims || netWeightG == null)) {
     try {
       const r = await runEstimateDims(
@@ -554,7 +873,7 @@ async function resolveShipping(input: {
     }
   }
 
-  // 3) 规则兜底（保证绝不留空）
+  // 4) 规则兜底（保证绝不留空）
   if (!dims) { dims = { ...rd.dims }; source.dims = 'rule'; notes.push(`尺寸按品类规则「${rd.note}」取值`); }
   if (netWeightG == null) { netWeightG = rd.netWeightG; source.weight = 'rule'; notes.push(`净重按品类规则「${rd.note}」取值`); }
 
@@ -567,6 +886,7 @@ async function resolveShipping(input: {
     note: notes.join('；') || '妙手侧真实值，无需估算',
   };
   if (aiError) out.aiError = aiError;
+  if (visionError) out.visionError = visionError;
   return out;
 }
 
@@ -712,6 +1032,26 @@ router.post('/ai', async (req, res) => {
         return res.json({ success: true, shipping: r, engine: r.source.dims === 'ai' || r.source.weight === 'ai' ? 'ai' : 'rule' });
       }
 
+      // ---------- 7) 视觉读货源图，直接识别尺寸/重量（参数图上印着的真值） ----------
+      case 'vision-dims': {
+        const images: string[] = (Array.isArray(body.images) ? body.images : Array.isArray(body.sourceImgUrls) ? body.sourceImgUrls : [])
+          .map((u: any) => String(u || '').trim()).filter(Boolean).slice(0, 20);
+        if (!images.length) return res.status(400).json({ success: false, message: '请提供 images[]（货源图 URL）' });
+        const v = await extractDimsFromImages(images, Math.max(6000, Math.min(Number(body.budgetMs) || 22000, 30000)));
+        return res.json({
+          success: !!v.result,
+          shipping: v.result ? {
+            netWeightG: v.result.packWeightG || v.result.weightG || null,
+            dims: v.result.dims || v.result.packDims || null,
+            isPackDims: !v.result.dims && !!v.result.packDims,
+            rawText: v.result.raw,
+          } : undefined,
+          scannedBy: v.result ? (v.result.model || 'vision') : undefined,
+          matchedImg: v.result ? v.result.img : undefined,
+          message: v.result ? undefined : v.errors.join('； '),
+        });
+      }
+
       default:
         return res.status(400).json({ success: false, message: '未知 task：' + task });
     }
@@ -787,7 +1127,7 @@ router.get('/material', async (req, res) => {
     return res.status(400).json({ success: false, message: 'detailId 应为纯数字' });
   }
 
-  const ck = [qDetailId || ('t:' + qThumb) || ('n:' + qTitle), wantAi ? 1 : 0, site, maxWords, target, withDesc ? 1 : 0, String(req.query.dims ?? '1')].join(':');
+  const ck = [qDetailId || ('t:' + qThumb) || ('n:' + qTitle), wantAi ? 1 : 0, site, maxWords, target, withDesc ? 1 : 0, String(req.query.dims ?? '1'), String(req.query.vision ?? '1')].join(':');
   const hit = _materialCache.get(ck);
   if (hit && Date.now() - hit.ts < MATERIAL_TTL_MS) {
     return res.json(Object.assign({}, hit.data, {
@@ -928,6 +1268,8 @@ router.get('/material', async (req, res) => {
     //   所以这里按「妙手真值 → AI 估算 → 类目规则表」补齐，保证绝不留空。
     //   ?dims=0 可关掉（快路径，只做规则兜底不调 AI）。
     const wantDims = String(req.query.dims ?? '1') !== '0';
+    // ?vision=0 关掉「视觉读参数图」（默认开：只在妙手真值缺项时才真的扫图）
+    const wantVision = String(req.query.vision ?? '1') !== '0';
     const shipBase: any = skuRows.find((r: any) => r.weightG != null || r.dims.l != null) || null;
     let shipping: ShippingResolved | null = null;
     try {
@@ -936,8 +1278,10 @@ router.get('/material', async (req, res) => {
         breadcrumb: product.breadcrumb,
         weightG: shipBase ? shipBase.weightG : null,
         dims: shipBase ? shipBase.dims : { l: null, w: null, h: null },
+        images: wantVision ? (product.sourceImgUrls as string[]) : [],
         wantAi: wantAi && wantDims,
         budgetMs: Math.max(4000, Math.min(Number(req.query.dimsBudget) || 15000, 20000)),
+        visionBudgetMs: Math.max(6000, Math.min(Number(req.query.visionBudget) || 22000, 30000)),
       });
       // 逐 SKU：自己那一行有真值就用真值，缺项继承整单解析结果
       for (const r of skuRows as any[]) {
