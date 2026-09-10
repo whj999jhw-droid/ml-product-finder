@@ -34,6 +34,7 @@ import { configure1688AK, check1688Config } from './ali1688Skill.js';
 import profitLicenseRouter from './profitLicense.js';
 import shippingRouter from './shippingRules.js';
 import { miaoshouRouter } from './miaoshouRoutes.js';
+import publisherAiRouter from './publisherAi.js';
 import {
   isYouTubeConfigured,
   saveYouTubeClient,
@@ -3707,6 +3708,9 @@ app.use('/api/profit/shipping', shippingRouter);
 
 // 妙手美客多采集箱（读取/预览/一键发布）
 app.use('/api/ml/miaoshou', miaoshouRouter);
+
+// 妙手自动发布助手（Chrome 插件）专用 AI 代跑：插件不持 key，统一用服务端已配好的 LLM
+app.use('/api/ml/publisher', publisherAiRouter);
 
 // ============= 静态文件服务 (Electron 模式) =============
 
