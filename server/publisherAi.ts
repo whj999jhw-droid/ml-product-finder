@@ -18,6 +18,9 @@
  *     task=extract-attrs    { notesFull, existing? }         → { json }
  *     task=decide-variation { skuInfo }                      → { json }
  *   GET  /api/ml/publisher/material?detailId=&site=&ai=1   → 商品素材聚合包（★ 见下）
+ *     &dims=0 关掉重量尺寸的 AI 估算（只做规则兜底，快路径）；&dimsBudget=15000 控制预算
+ *   ★ 返回里 product.shipping / product.skuRows[].shipping = 解析好的包裹重量尺寸
+ *     （三层：妙手真值 → AI 估算 → 类目规则表；见 resolveShipping）
  *
  * ★ /material —— 「商品数据不用爬 DOM，服务器直连妙手开放平台拿」
  *   插件原来靠读弹框 DOM「猜」标题/属性/SKU/进价，页面一改版就失效。
@@ -331,6 +334,242 @@ const SYS_DECIDE_VARIATION =
   '3) 若是单品但货源描述里提到颜色，给出建议颜色值。不要反问用户。' +
   '严格只输出 JSON：{"type":"single"|"multi","variationName":"","values":[],"notes":""}';
 
+// ============ 包裹重量 / 尺寸解析（★ 净收益准不准全看这个） ============
+//
+// 为什么必须有：profit 引擎里 `计费重 = max(实重, 长×宽×高/5000)`。
+// 尺寸为空时体积重为 0 → 计费重只剩实重 → 运费被低估 → **净收益虚高**。
+// 例：20×15×5cm 的泡货体积重 0.3kg，实重才 0.065kg，差 4.6 倍。
+//
+// 三层取数（实测过每一层的可得性）：
+//   1) 妙手 SKU：weight 有真值（来自 1688，实测 30g），但 length/width/height **常年为 null**
+//      —— 妙手侧压根没采集尺寸，别指望它。
+//   2) AI 估算：拿标题+类目+已知净重让服务端 LLM 估「商品本体」三边，过合理性校验才采用。
+//   3) 类目规则表：命中品类关键词取典型值；再按净重修一下量级。保证**绝不留空**。
+//
+// 实测排除的路径（别再试）：
+//   - 1688 官方 AK 接口 offer_detail：只回一段 markdown 摘要，无重量尺寸。
+//   - 直接 curl detail.1688.com/offer/xxx.html：反爬壳页（HTTP 200 但仅 4.8KB，无内容）。
+//   - 服务器 DB 历史（candidates/published_items 的 length_cm 等）：实测全为 null，无数据可挖。
+
+/** 常见跨境品类的典型「商品本体尺寸(cm) + 净重(g)」。顺序即优先级（先匹配到先用）。 */
+const DIM_RULES: Array<{ re: RegExp; l: number; w: number; h: number; g: number; note: string }> = [
+  { re: /(转接头|转接器|转换头|转换器|otg|适配头)/i, l: 9, w: 6, h: 2, g: 30, note: '转接头' },
+  { re: /(数据线|充电线|线材|延长线|usb线|type-?c\s*线|lightning\s*线)/i, l: 12, w: 8, h: 2, g: 55, note: '线材' },
+  { re: /(充电器|充电头|电源适配器|快充头|插头|车充)/i, l: 10, w: 8, h: 4, g: 110, note: '充电头' },
+  { re: /(充电宝|移动电源|power\s*bank)/i, l: 15, w: 10, h: 3, g: 220, note: '充电宝' },
+  { re: /(耳机|蓝牙|earbud|headphone|headset)/i, l: 12, w: 10, h: 5, g: 90, note: '耳机' },
+  { re: /(手机壳|保护壳|手机套|后壳)/i, l: 18, w: 10, h: 2, g: 40, note: '手机壳' },
+  { re: /(钢化膜|贴膜|保护膜|screen\s*protector)/i, l: 18, w: 10, h: 1.5, g: 35, note: '贴膜' },
+  { re: /(手表|手环|表带|watch|band)/i, l: 12, w: 10, h: 4, g: 80, note: '手表手环' },
+  { re: /(支架|holder|stand)/i, l: 15, w: 12, h: 8, g: 130, note: '支架' },
+  { re: /(鼠标|键盘|mouse|keyboard)/i, l: 20, w: 14, h: 5, g: 200, note: '鼠标键盘' },
+  { re: /(音箱|喇叭|speaker)/i, l: 18, w: 12, h: 10, g: 300, note: '音箱' },
+  { re: /(灯|led|lamp)/i, l: 18, w: 14, h: 12, g: 200, note: '灯具' },
+  { re: /(摄像头|camera|监控)/i, l: 14, w: 12, h: 10, g: 180, note: '摄像头' },
+  { re: /(手机|平板|tablet|phone)/i, l: 20, w: 12, h: 5, g: 320, note: '手机平板' },
+  { re: /(玩具|模型|figure|公仔|玩偶|toy)/i, l: 20, w: 15, h: 10, g: 250, note: '玩具' },
+  { re: /(首饰|耳环|项链|戒指|手链|发饰|头绳|发夹)/i, l: 12, w: 8, h: 4, g: 50, note: '饰品' },
+  { re: /(钥匙扣|挂件|吊坠)/i, l: 10, w: 8, h: 3, g: 40, note: '挂件' },
+  { re: /(笔袋|文具|橡皮|尺子|文具盒|pen|pencil)/i, l: 20, w: 12, h: 4, g: 120, note: '文具' },
+  { re: /(贴纸|sticker)/i, l: 18, w: 12, h: 1, g: 30, note: '贴纸' },
+  { re: /(工具|螺丝刀|扳手|钳|钻|tool)/i, l: 25, w: 15, h: 5, g: 400, note: '工具' },
+  { re: /(杯|水壶|保温|bottle|杯子)/i, l: 25, w: 10, h: 10, g: 400, note: '杯壶' },
+  { re: /(背包|收纳|手提包|bag|wallet|钱包)/i, l: 35, w: 25, h: 10, g: 500, note: '包袋' },
+  { re: /(t恤|衬衫|卫衣|外套|裤|裙|dress|shirt|pants|衣)/i, l: 30, w: 22, h: 4, g: 350, note: '服饰' },
+  { re: /(鞋|sneaker|slipper|拖鞋|shoe)/i, l: 32, w: 20, h: 12, g: 700, note: '鞋' },
+  { re: /(帽|hat|cap)/i, l: 25, w: 22, h: 12, g: 200, note: '帽子' },
+  { re: /(毛巾|浴巾|towel|毯)/i, l: 28, w: 20, h: 6, g: 350, note: '家纺' },
+  { re: /(口红|唇|粉底|眼影|面霜|护肤|面膜|美妆|化妆)/i, l: 12, w: 6, h: 4, g: 90, note: '美妆' },
+  { re: /(宠物|猫|狗|pet)/i, l: 20, w: 15, h: 8, g: 250, note: '宠物用品' },
+  { re: /(车载|汽车|car)/i, l: 22, w: 15, h: 8, g: 300, note: '车载用品' },
+  { re: /(钓|渔具|帐篷|露营|户外|camping)/i, l: 35, w: 20, h: 10, g: 600, note: '户外渔具' },
+  { re: /(雨伞|伞|umbrella)/i, l: 30, w: 8, h: 6, g: 350, note: '伞' },
+  { re: /(腰带|皮带|belt|手套|围巾|袜)/i, l: 22, w: 16, h: 4, g: 200, note: '配饰' },
+];
+const DIM_FALLBACK = { l: 20, w: 15, h: 5, g: 150, note: '通用轻小件' };
+
+/** 按净重把规则尺寸放量（小件不放大，大件按体积/重量线性放大） */
+function scaleByWeight(d: { l: number; w: number; h: number }, weightG: number | null) {
+  const g = Number(weightG) || 0;
+  if (g <= 150) return d;
+  const k = g <= 400 ? 1.15 : g <= 1000 ? 1.35 : g <= 2500 ? 1.7 : 2.1;
+  return { l: +(d.l * k).toFixed(1), w: +(d.w * k).toFixed(1), h: +(d.h * k).toFixed(1) };
+}
+
+/** 关键词 → 典型尺寸/净重（标题优先，其次类目面包屑） */
+function ruleDims(title: string, breadcrumb?: string, weightG?: number | null) {
+  const t = String(title || '');
+  const bc = String(breadcrumb || '');
+  let hit = DIM_RULES.find((r) => r.re.test(t));
+  if (!hit && bc) hit = DIM_RULES.find((r) => r.re.test(bc));
+  const base = hit || DIM_FALLBACK;
+  const s = scaleByWeight({ l: base.l, w: base.w, h: base.h }, weightG ?? base.g);
+  return {
+    note: base.note,
+    dims: { l: s.l, w: s.w, h: s.h },
+    netWeightG: base.g,
+    matchedTitle: !!hit,
+  };
+}
+
+/**
+ * 校验 AI 估的尺寸是否可用。
+ * 实测免费模型会回负数、单边 1000cm、或干脆把「体积重」当尺寸回 —— 一律拦掉。
+ */
+function validDimsJson(j: any) {
+  if (!j || typeof j !== 'object') return null;
+  const raw = [numOf(j.lengthCm ?? j.length), numOf(j.widthCm ?? j.width), numOf(j.heightCm ?? j.height)];
+  if (raw.some((v) => v == null)) return null;
+  const arr = (raw as number[]).sort((a, b) => b - a);
+  const [l, w, h] = arr;
+  if (l < 2) return null;                          // 最长边不足 2cm = 明显不是商品尺寸
+  if (h < 0.5 || l > 80) return null;              // 单边 0.5~80cm
+  if (l * w * h > 150_000) return null;            // 体积上限 150L（再大不是我们卖的轻小件）
+  if (l > 900) return null;                        // 明显把 mm 当 cm
+  const volKg = (l * w * h) / 5000;
+  const g = numOf(j.netWeightG ?? j.weightG ?? j.weight);
+  if (g != null && g > 0 && volKg > 0) {
+    const ratio = volKg / (g / 1000);
+    if (ratio > 12) return null;                   // 体积重超实重 12 倍 = 明显不匹配
+  }
+  // 明显把毫米当厘米（三边都 ≥ 3 倍常见）→ 倾向判错
+  return { l: +l.toFixed(1), w: +w.toFixed(1), h: +h.toFixed(1), netWeightG: g != null && g > 0 ? g : null };
+}
+
+const SYS_ESTIMATE_DIMS =
+  '你是跨境电商包裹数据估算助手。根据商品标题与类目，估算该商品**未加外包装的本体三边尺寸**（单位 cm）与单件净重（g）。' +
+  '要求：1) 参照真实电商同类商品的常见规格，别凭空夸大；2) 三边按 长≥宽≥高 排列，轻小件通常是 5~40cm 量级；' +
+  '3) 单位严格用 cm 与 g，不要用 mm/kg，不要输出体积重；4) 若用户已给出净重则原样照抄该净重；' +
+  '5) 会给出 referenceDims 作为同类目的典型值 —— **默认沿用该值**，只有当标题里出现明确的尺寸/容量线索（如 60cm、2L、加大号）时才相应调整；' +
+  '6) 不要反问、不要解释。严格只输出 JSON：{"lengthCm":21,"widthCm":14,"heightCm":6,"netWeightG":120}';
+
+/**
+ * AI 估尺寸（失败返回 null，由规则表兜底）。
+ * refDims = 品类规则值，作为锚点写进提示词 —— 实测不给锚点时同一个转接头会给出
+ * 5×3×1 / 8×4×2 / 21×14×6 三种答案（方差极大），给了锚点后基本稳定在同类目量级。
+ */
+function runEstimateDims(
+  info: { title: string; breadcrumb?: string; netWeightG?: number | null; refDims?: { l: number; w: number; h: number } },
+  pool = DEFAULT_POOL,
+  overallMs = 15000
+) {
+  return raceProviders(
+    {
+      systemPrompt: SYS_ESTIMATE_DIMS,
+      prompt: JSON.stringify({
+        title: String(info.title || '').slice(0, 200),
+        category: String(info.breadcrumb || '').slice(0, 200),
+        knownNetWeightG: info.netWeightG ?? null,
+        referenceDims: info.refDims ? { lengthCm: info.refDims.l, widthCm: info.refDims.w, heightCm: info.refDims.h } : null,
+      }),
+      temperature: 0.2,
+      maxTokens: 200,
+      jsonMode: true,
+    },
+    (raw) => !!validDimsJson(parseJson(raw)),
+    { pool, overallMs }
+  );
+}
+
+export interface ShippingResolved {
+  /** 单件净重（g）—— 不含外包装 */
+  netWeightG: number;
+  /** 商品本体三边（cm）—— 不含外包装 */
+  dims: { l: number; w: number; h: number };
+  /** 体积重（kg，长×宽×高/5000），插件侧计费重要用 */
+  volumeWeightKg: number;
+  /** 各字段来源：miaoshou(妙手真值) / ai / rule */
+  source: { weight: string; dims: string };
+  /** 说人话的解释，便于日志排查 */
+  note: string;
+  aiError?: string;
+}
+
+/**
+ * 解析一个商品的包裹重量/尺寸：妙手真值 → AI 估算 → 类目规则表。
+ * wantAi=false 时跳过 AI（快路径，用于 /material?dims=0 或纯列表场景）。
+ */
+async function resolveShipping(input: {
+  title: string;
+  breadcrumb?: string;
+  weightG?: any;
+  dims?: { l?: any; w?: any; h?: any };
+  wantAi?: boolean;
+  budgetMs?: number;
+}): Promise<ShippingResolved> {
+  const title = String(input.title || '');
+  const breadcrumb = String(input.breadcrumb || '');
+
+  let mWeight = numOf(input.weightG);
+  if (mWeight != null && mWeight <= 0) mWeight = null;
+  const mD = [numOf(input.dims?.l), numOf(input.dims?.w), numOf(input.dims?.h)];
+  const miaoshouDims = mD.every((v) => v != null && v > 0) ? { l: mD[0]!, w: mD[1]!, h: mD[2]! } : null;
+
+  let netWeightG = mWeight;
+  let dims = miaoshouDims ? { l: miaoshouDims.l, w: miaoshouDims.w, h: miaoshouDims.h } : null;
+  const source = { weight: mWeight != null ? 'miaoshou' : 'none', dims: miaoshouDims ? 'miaoshou' : 'none' };
+  let aiError = '';
+  const notes: string[] = [];
+
+  // 规则值先算好：既是兜底，也用作 AI 结果的**保守校验基准**
+  const rd = ruleDims(title, breadcrumb, netWeightG);
+  const vol = (d: { l: number; w: number; h: number }) => d.l * d.w * d.h;
+
+  // 2) AI 估算（只在缺项时调用，省时间）
+  if (input.wantAi && (!dims || netWeightG == null)) {
+    try {
+      const r = await runEstimateDims(
+        { title, breadcrumb, netWeightG, refDims: rd.dims },
+        DEFAULT_POOL,
+        input.budgetMs || 15000
+      );
+      const j = r.text ? validDimsJson(parseJson(r.text)) : null;
+      if (j) {
+        if (!dims) {
+          const aiDims = { l: j.l, w: j.w, h: j.h };
+          // ★ 以品类规则值为锚做**双向**限幅（实测 AI 方差极大）：
+          //   偏小 → 体积重偏小 → 运费低估 → 净收益虚高（最危险）；
+          //   偏大 → 净收益被过度压低 → 好货被误判成不赚钱。
+          //   超出 [0.35×, 3×] 区间就退回规则值。
+          const rv = vol(rd.dims) || 1;
+          const ratio = vol(aiDims) / rv;
+          if (ratio >= 0.35 && ratio <= 3) {
+            dims = aiDims;
+            source.dims = 'ai';
+            notes.push('尺寸由 AI 估算');
+          } else {
+            dims = { ...rd.dims };
+            source.dims = 'rule';
+            notes.push(
+              `AI 估值 ${aiDims.l}×${aiDims.w}×${aiDims.h} 偏离品类规则「${rd.note}」过多(${ratio.toFixed(1)}×)，改用规则值`
+            );
+          }
+        }
+        if (netWeightG == null && j.netWeightG != null) { netWeightG = j.netWeightG; source.weight = 'ai'; notes.push('净重由 AI 估算'); }
+      } else {
+        aiError = r.errors.join('； ') || '所有平台均未返回合格结果';
+      }
+    } catch (e: any) {
+      aiError = e?.message || String(e);
+    }
+  }
+
+  // 3) 规则兜底（保证绝不留空）
+  if (!dims) { dims = { ...rd.dims }; source.dims = 'rule'; notes.push(`尺寸按品类规则「${rd.note}」取值`); }
+  if (netWeightG == null) { netWeightG = rd.netWeightG; source.weight = 'rule'; notes.push(`净重按品类规则「${rd.note}」取值`); }
+
+  const volumeWeightKg = +((dims.l * dims.w * dims.h) / 5000).toFixed(3);
+  const out: ShippingResolved = {
+    netWeightG: +Number(netWeightG).toFixed(1),
+    dims,
+    volumeWeightKg,
+    source,
+    note: notes.join('；') || '妙手侧真实值，无需估算',
+  };
+  if (aiError) out.aiError = aiError;
+  return out;
+}
+
 /** 净化标题（中文） */
 function runCleanTitle(title: string, pool = DEFAULT_POOL, overallMs = DEFAULT_OVERALL_MS) {
   return raceProviders(
@@ -460,6 +699,19 @@ router.post('/ai', async (req, res) => {
         });
       }
 
+      // ---------- 6) 估算包裹重量/尺寸（尺寸缺项时给净收益用；规则表兜底） ----------
+      case 'estimate-dims': {
+        const r = await resolveShipping({
+          title: String(body.title || '').slice(0, 200),
+          breadcrumb: String(body.breadcrumb || '').slice(0, 200),
+          weightG: body.netWeightG,
+          dims: { l: body.lengthCm, w: body.widthCm, h: body.heightCm },
+          wantAi: body.ai !== false,
+          budgetMs: Number(body.budgetMs) || 15000,
+        });
+        return res.json({ success: true, shipping: r, engine: r.source.dims === 'ai' || r.source.weight === 'ai' ? 'ai' : 'rule' });
+      }
+
       default:
         return res.status(400).json({ success: false, message: '未知 task：' + task });
     }
@@ -535,7 +787,7 @@ router.get('/material', async (req, res) => {
     return res.status(400).json({ success: false, message: 'detailId 应为纯数字' });
   }
 
-  const ck = [qDetailId || ('t:' + qThumb) || ('n:' + qTitle), wantAi ? 1 : 0, site, maxWords, target, withDesc ? 1 : 0].join(':');
+  const ck = [qDetailId || ('t:' + qThumb) || ('n:' + qTitle), wantAi ? 1 : 0, site, maxWords, target, withDesc ? 1 : 0, String(req.query.dims ?? '1')].join(':');
   const hit = _materialCache.get(ck);
   if (hit && Date.now() - hit.ts < MATERIAL_TTL_MS) {
     return res.json(Object.assign({}, hit.data, {
@@ -589,11 +841,14 @@ router.get('/material', async (req, res) => {
 
     const detailId = String(item.collectBoxDetailId);
     const shopId = String(item?.collectBoxDetailShop?.shopId || req.query.shopId || '');
-    const cid = String(item?.cid || req.query.cid || '');
-    if (!shopId || !cid) {
+    // 妙手列表里**个别商品没有 cid**（实测 839 条里存在）。详情接口接受 cid=0 并正常返回
+    // （实测 cid=1 会报 Category not found，cid=0 不校验类目），所以缺 cid 时用 0 兜底，
+    // 而不是直接 404 让插件退回 DOM —— 退回 DOM 就拿不到补齐的重量尺寸了。
+    const cid = String(item?.cid || req.query.cid || '0');
+    if (!shopId) {
       return res.status(404).json({
         success: false,
-        message: `列表项缺少 shopId/cid（detailId=${detailId}）`,
+        message: `列表项缺少 shopId（detailId=${detailId}）`,
       });
     }
 
@@ -667,6 +922,45 @@ router.get('/material', async (req, res) => {
       source: d.source || '',
     };
 
+    // ---- 2.5) 重量/尺寸解析（★ 净收益准不准全看这里） ----
+    //   计费重 = max(实重, 长×宽×高/5000)；尺寸为空 → 体积重 0 → 运费低估 → 净收益虚高。
+    //   妙手侧三边尺寸时有时无（AK 接口/1688 页面/DB 历史都补不上缺件，已逐一验证），
+    //   所以这里按「妙手真值 → AI 估算 → 类目规则表」补齐，保证绝不留空。
+    //   ?dims=0 可关掉（快路径，只做规则兜底不调 AI）。
+    const wantDims = String(req.query.dims ?? '1') !== '0';
+    const shipBase: any = skuRows.find((r: any) => r.weightG != null || r.dims.l != null) || null;
+    let shipping: ShippingResolved | null = null;
+    try {
+      shipping = await resolveShipping({
+        title: product.title,
+        breadcrumb: product.breadcrumb,
+        weightG: shipBase ? shipBase.weightG : null,
+        dims: shipBase ? shipBase.dims : { l: null, w: null, h: null },
+        wantAi: wantAi && wantDims,
+        budgetMs: Math.max(4000, Math.min(Number(req.query.dimsBudget) || 15000, 20000)),
+      });
+      // 逐 SKU：自己那一行有真值就用真值，缺项继承整单解析结果
+      for (const r of skuRows as any[]) {
+        const ownW = r.weightG != null;
+        const ownD = r.dims && r.dims.l != null && r.dims.w != null && r.dims.h != null;
+        const merged = {
+          netWeightG: ownW ? r.weightG : shipping.netWeightG,
+          dims: ownD ? { l: r.dims.l, w: r.dims.w, h: r.dims.h } : shipping.dims,
+          source: {
+            weight: ownW ? 'miaoshou' : shipping.source.weight,
+            dims: ownD ? 'miaoshou' : shipping.source.dims,
+          },
+        };
+        r.shipping = Object.assign({}, merged, {
+          volumeWeightKg: +((merged.dims.l * merged.dims.w * merged.dims.h) / 5000).toFixed(3),
+          note: ownW && ownD ? '妙手 SKU 真值' : shipping.note,
+        });
+      }
+      (product as any).shipping = shipping;
+    } catch (e: any) {
+      console.error('[publisher/material] 重量尺寸解析失败:', e?.message || e);
+    }
+
     // ---- 3) AI：净化标题 / 译标题 / 挑热搜词（三路并发，任一失败不影响其它） ----
     // ★ 预算必须收紧：实测三路并发时，只要有一路（多半是热搜词）全平台失败，
     //   raceProviders 会一直重试到 overallMs 上限 —— 曾把整体拖到 33.8s。
@@ -720,6 +1014,9 @@ router.get('/material', async (req, res) => {
         listMatched: !!item,
         matchedBy,
         aiEngine: ai.engine,
+        shipping: shipping
+          ? { netWeightG: shipping.netWeightG, dims: shipping.dims, volumeWeightKg: shipping.volumeWeightKg, source: shipping.source, note: shipping.note }
+          : null,
       },
     };
     materialCachePut(ck, data);
