@@ -42,6 +42,9 @@
  * 全部失败返回 { success:false, message }，插件侧再回退本地规则（永不抛错中断主流程）。
  */
 import { Router } from 'express';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { llmGenerate, getLlmProviders, detectProviderType } from './aiService.js';
 import type { LlmProvider } from './aiService.js';
 import {
@@ -51,6 +54,12 @@ import {
   searchMercadoCollectBoxAll,
 } from './miaoshou.js';
 import { getTrendsKeywords } from './trends.js';
+
+// ESM 下的 __dirname（server/ 是 ESM，项目里 db.ts / trends.ts 同款写法）。
+// 注意：绝对不要直接用裸露的 __dirname —— tsx/esbuild 会据此判定本文件为 CJS，
+// 与顶层 await 冲突后抛 ERR_AMBIGUOUS_MODULE_SYNTAX 把进程带崩。
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const router = Router();
 
@@ -76,19 +85,27 @@ function pkey(p: { name?: string; model?: string }): string {
   return `${p.name || '?'}:${p.model}`;
 }
 
-/** 选一批平台：按「上次失败时间」升序（健康的在前），在健康窗口内轮转起点，把请求摊开 */
-function pickProviders(pool: number): LlmProvider[] {
+/**
+ * 全部 chat 平台，按「上次失败时间」升序排成一条**候选队列**（健康的在前，冷却中的沉底），
+ * 并把本请求的轮转起点前移 —— 避免每个请求都从同几个平台开始。
+ *
+ * 注意这里返回的是整条队列（不是一批）：新的滚动抢答会在窗口腾出一个位就补下一个。
+ * 旧做法「每轮只取 pool 个」遇到「前 8 个恰好同时限额」就整轮全灭，实测会白等到 33s 后失败。
+ */
+function providerQueue(): LlmProvider[] {
   const all = chatProviders();
   if (!all.length) return [];
   const sorted = all.slice().sort((a, b) => (_badUntil.get(pkey(a)) || 0) - (_badUntil.get(pkey(b)) || 0));
-  const win = sorted.slice(0, Math.min(sorted.length, pool * 2)); // 健康窗口
-  const start = (_rr++) % win.length;
-  return win.slice(start).concat(win.slice(0, start)).slice(0, pool);
+  const start = (_rr++) % sorted.length;
+  return sorted.slice(start).concat(sorted.slice(0, start));
 }
 
 /** 错误消息 → 冷却时长（0 = 不冷却） */
 function cooldownMs(msg: string): number {
   const m = msg || '';
+  // 日额度打满：实测 openrouter 免费档回 "Rate limit exceeded: free-models-per-day，
+  // Add 10 credits..." —— 90 秒后重试必然还是失败，必须按长冷却处理，否则每轮都白等它。
+  if (/per[-_ ]?day|free-models-per-day|daily|今日额度|今天的额度/i.test(m)) return BAD_COOLDOWN_LONG_MS;
   // 永久不可用：免费档不给用 / 模型已下架，重试没意义
   if (/403|404|unavailable|not available|only available|invalid model|no permission|model not found/i.test(m)) return BAD_COOLDOWN_LONG_MS;
   // 临时故障：限额、返空、超时、网关错误
@@ -114,10 +131,37 @@ function looksLikeChatter(t: string): boolean {
   return false;
 }
 
-function validTitleText(t: string): boolean {
-  if (!t || t.length < 4 || t.length > 120) return false;
+/** 取「核心词元」：中文 2-gram + 英文/数字词(小写)。用于判断结果是否与原文同源 */
+function coreTokens(s: string): Set<string> {
+  const out = new Set<string>();
+  const txt = String(s || '');
+  for (const cn of (txt.match(/[\u4e00-\u9fa5]{2,}/g) || [])) {
+    for (let i = 0; i + 2 <= cn.length; i++) out.add(cn.slice(i, i + 2));
+  }
+  for (const w of (txt.match(/[A-Za-z0-9][A-Za-z0-9-]+/g) || [])) out.add(w.toLowerCase());
+  return out;
+}
+
+/**
+ * 标题合格判定。
+ * ⚠️ 实测坑：模型有时只回一个词（真拿到过 text="Type"），若只判「长度 ≥4」会把它当合格，
+ * 于是标题被写成 "Type"。所以除长度外，还必须与原文有词元交集（截断/跑偏一律不合格）。
+ */
+function validTitleText(t: string, source?: string): boolean {
+  if (!t || t.length < 6 || t.length > 120) return false;
   if (/[。.]$/.test(t)) return false;
   if (looksLikeChatter(t)) return false;
+  if (source) {
+    const src = String(source);
+    // 相比原文严重截断（不足原文 25% 且不足 12 字）→ 不合格
+    if (t.length < 12 && t.length < src.length * 0.25) return false;
+    const a = coreTokens(src), b = coreTokens(t);
+    if (a.size && b.size) {
+      let hit = 0;
+      for (const x of b) if (a.has(x)) hit++;
+      if (hit === 0) return false;   // 与原文毫无交集 = 截断/跑偏
+    }
+  }
   return true;
 }
 
@@ -167,78 +211,69 @@ function extractPicks(raw: string, allow: string[], cap: number): { picks: strin
   return { picks: [], wellFormed: false };
 }
 
-/** 单轮并发抢答：同时打 list 里所有平台，谁先给出合格结果用谁 */
-function raceOnce(
-  callOpts: LLMOpts,
-  accept: (raw: string) => boolean,
-  list: LlmProvider[],
-  budgetMs: number,
-  errors: string[]
-): Promise<{ text: string; used: string }> {
-  return new Promise((resolve) => {
-    let done = false;
-    let pending = list.length;
-    const timer = setTimeout(() => finish('', ''), budgetMs);
-    function finish(text: string, used: string) {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      resolve({ text, used });
-    }
-    for (const p of list) {
-      const label = pkey(p);
-      (async () => {
-        try {
-          const raw = await llmGenerate(callOpts, p);
-          if (accept(raw)) { _badUntil.delete(label); finish(raw, label); }
-          else {
-            errors.push(`${label} 结果不合格`);
-            _badUntil.set(label, Date.now() + BAD_COOLDOWN_MS); // 会聊天的模型下次还会聊天，先冷一冷
-          }
-        } catch (e: any) {
-          const msg = e?.message || String(e);
-          errors.push(`${label} ${msg}`);
-          const cd = cooldownMs(msg);
-          if (cd > 0) _badUntil.set(label, Date.now() + cd);
-        } finally {
-          if (--pending === 0) finish('', '');
-        }
-      })().catch(() => { /* 兜底：绝不让单平台异常冒成 unhandled rejection 把进程带崩 */ });
-    }
-  });
-}
-
 /**
- * 多平台并发抢答（可多轮）：同时打 pool 个平台，谁先给出**合格**结果就用谁；
- * 一轮全灭（整批免费平台同时限额）就换一批再来一轮。
+ * 滚动窗口并发抢答：始终维持 pool 个平台在飞，谁先给出**合格**结果就用谁；
+ * 每有一个平台失败就立刻从候选队列补下一个 —— 而不是「等整批死光再换一批」。
+ *
+ * 为什么改：旧版一轮只覆盖 pool(8) 个，实测遇到「前 8 个恰好同时限额」时
+ * 整轮全灭、白等到 33s 才失败（free 额度是整批共享的，很容易一起挂）。
+ * 滚动补位让一次请求内可以摸到队列里更多平台，同时不增加单请求耗时上限。
  */
 async function raceProviders(
   opts: LLMOpts,
   accept: (raw: string) => boolean,
-  opt?: { pool?: number; overallMs?: number; waves?: number }
+  opt?: { pool?: number; overallMs?: number }
 ): Promise<{ text: string; used: string; errors: string[] }> {
-  const pool = Math.max(1, Math.min(opt?.pool || DEFAULT_POOL, 10));
+  const pool = Math.max(1, Math.min(opt?.pool || DEFAULT_POOL, 12));
   const overallMs = opt?.overallMs || DEFAULT_OVERALL_MS;
-  const waves = Math.max(1, Math.min(opt?.waves || DEFAULT_WAVES, 4));
   const errors: string[] = [];
-  const tried = new Set<string>();
+  const queue = providerQueue();
+  if (!queue.length) return { text: '', used: '', errors: ['无可用 chat 类 LLM 平台'] };
   const deadline = Date.now() + overallMs;
 
   const callOpts: LLMOpts = Object.assign({}, opts, {
     timeoutMs: Math.min(opts.timeoutMs || PER_PROVIDER_TIMEOUT_MS, PER_PROVIDER_TIMEOUT_MS),
   });
 
-  for (let w = 0; w < waves; w++) {
-    const list = pickProviders(pool).filter((p) => !tried.has(pkey(p)));
-    if (!list.length) break;
-    list.forEach((p) => tried.add(pkey(p)));
-    const remain = deadline - Date.now();
-    if (remain < 3000) break;
-    const r = await raceOnce(callOpts, accept, list, Math.min(remain, 18000), errors);
-    if (r.text) return { text: r.text, used: r.used, errors };
-  }
-  if (!tried.size) errors.push('无可用 chat 类 LLM 平台');
-  return { text: '', used: '', errors };
+  return await new Promise((resolve) => {
+    let done = false;
+    let inflight = 0;
+    let qi = 0;
+    const timer = setTimeout(() => finish('', ''), overallMs + 200);
+    function finish(text: string, used: string) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ text, used, errors });
+    }
+    function pump() {
+      if (done) return;
+      while (inflight < pool && qi < queue.length && Date.now() < deadline - 1500) {
+        const p = queue[qi++];
+        const label = pkey(p);
+        inflight++;
+        (async () => {
+          try {
+            const raw = await llmGenerate(callOpts, p);
+            if (accept(raw)) { _badUntil.delete(label); finish(raw, label); return; }
+            // 结果不合格（反问/截断/废话）：同一模型下次多半还这样，先冷一冷
+            errors.push(`${label} 结果不合格`);
+            _badUntil.set(label, Date.now() + BAD_COOLDOWN_MS);
+          } catch (e: any) {
+            const msg = e?.message || String(e);
+            errors.push(`${label} ${msg}`);
+            const cd = cooldownMs(msg);
+            if (cd > 0) _badUntil.set(label, Date.now() + cd);
+          } finally {
+            inflight--;
+            if (!done) pump();   // 腾出位就补下一个平台
+          }
+        })().catch(() => { inflight--; if (!done) pump(); /* 兜底：绝不让单平台异常冒成 unhandled rejection */ });
+      }
+      if (!done && inflight === 0) finish('', '');   // 队列摸完且没有在飞的 → 真没戏
+    }
+    pump();
+  });
 }
 
 /** 把 raceProviders 结果变成统一响应体 */
@@ -300,7 +335,7 @@ const SYS_DECIDE_VARIATION =
 function runCleanTitle(title: string, pool = DEFAULT_POOL, overallMs = DEFAULT_OVERALL_MS) {
   return raceProviders(
     { systemPrompt: SYS_CLEAN_TITLE, prompt: '原标题: ' + String(title || '').slice(0, 500), temperature: 0.2, maxTokens: 200 },
-    (raw) => validTitleText(tidy(raw)),
+    (raw) => validTitleText(tidy(raw), title),
     { pool, overallMs }
   );
 }
@@ -481,17 +516,26 @@ function numOf(v: any): number | null {
  *   且详情**不返回** globalPrice（这里也不硬编码假设，先取列表权威值，详情值仅兜底）。
  */
 router.get('/material', async (req, res) => {
-  const detailId = String(req.query.detailId || '').trim();
-  if (!detailId || !/^\d+$/.test(detailId)) {
-    return res.status(400).json({ success: false, message: '缺少或非法 detailId（应为纯数字）' });
-  }
   const wantAi = String(req.query.ai ?? '1') !== '0';
   const site = String(req.query.site || 'MLM').toUpperCase();
   const maxWords = Math.max(1, Math.min(Number(req.query.maxWords) || 2, 3));
   const target = String(req.query.target || 'en').toLowerCase();
   const withDesc = String(req.query.desc ?? '0') === '1';
 
-  const ck = [detailId, wantAi ? 1 : 0, site, maxWords, target, withDesc ? 1 : 0].join(':');
+  // ★ 三种定位方式（插件不知道 detailId 时也不用爬 DOM 猜）：
+  //   detailId 精确 / thumb 缩略图 URL / title(+itemNum) 标题
+  const qDetailId = String(req.query.detailId || '').trim();
+  const qThumb = String(req.query.thumb || '').trim();
+  const qTitle = String(req.query.title || '').trim();
+  const qItemNum = String(req.query.itemNum || '').trim();
+  if (!qDetailId && !qThumb && !qTitle) {
+    return res.status(400).json({ success: false, message: '需要 detailId / thumb / title 三者之一' });
+  }
+  if (qDetailId && !/^\d+$/.test(qDetailId)) {
+    return res.status(400).json({ success: false, message: 'detailId 应为纯数字' });
+  }
+
+  const ck = [qDetailId || ('t:' + qThumb) || ('n:' + qTitle), wantAi ? 1 : 0, site, maxWords, target, withDesc ? 1 : 0].join(':');
   const hit = _materialCache.get(ck);
   if (hit && Date.now() - hit.ts < MATERIAL_TTL_MS) {
     return res.json(Object.assign({}, hit.data, {
@@ -501,21 +545,100 @@ router.get('/material', async (req, res) => {
 
   const t0 = Date.now();
   try {
-    // ---- 1) 列表项：补 shopId / cid / 货源价 / 净收益（插件不必知道这些） ----
+    // ---- 1) 定位列表项：detailId 精确 → 缩略图 URL → 标题(+货号) ----
+    //  列表项同时给出 shopId / cid / 货源价 / 净收益（插件不必知道这些）
     const list = await ensureBoxList();
-    const item: any = list.find((x: any) => String(x.collectBoxDetailId) === detailId);
+    const normThumb = (u: string) => String(u || '').split('?')[0].trim().toLowerCase();
+    let item: any = null;
+    let matchedBy = '';
+    let ambiguous: any[] = [];
+
+    if (qDetailId) {
+      item = list.find((x: any) => String(x.collectBoxDetailId) === qDetailId) || null;
+      if (item) matchedBy = 'detailId';
+    }
+    if (!item && qThumb) {
+      const t = normThumb(qThumb);
+      const hits = list.filter((x: any) => normThumb(x.thumbnail) === t);
+      if (hits.length === 1) { item = hits[0]; matchedBy = 'thumb'; }
+      else if (hits.length > 1) { ambiguous = hits; matchedBy = 'thumb'; }
+    }
+    if (!item && !ambiguous.length && qTitle) {
+      const hits = list.filter((x: any) =>
+        String(x.title || '').trim() === qTitle && (!qItemNum || String(x.itemNum || '') === qItemNum));
+      if (hits.length === 1) { item = hits[0]; matchedBy = 'title'; }
+      else if (hits.length > 1) { ambiguous = hits; matchedBy = 'title'; }
+    }
+
+    if (ambiguous.length) {
+      // 反查撞车（同名/同图）→ 明确报错让插件退回 DOM 模式，绝不猜着填错商品
+      return res.status(409).json({
+        success: false,
+        message: `按 ${matchedBy} 匹配到 ${ambiguous.length} 个商品，无法唯一确定`,
+        candidates: ambiguous.slice(0, 5).map((x: any) => ({
+          detailId: x.collectBoxDetailId, title: x.title, itemNum: x.itemNum, thumbnail: x.thumbnail,
+        })),
+      });
+    }
+    if (!item) {
+      return res.status(404).json({
+        success: false,
+        message: '未在采集箱列表里匹配到该商品（可能已发布/移除，或不在当前「未发布」列表）',
+      });
+    }
+
+    const detailId = String(item.collectBoxDetailId);
     const shopId = String(item?.collectBoxDetailShop?.shopId || req.query.shopId || '');
     const cid = String(item?.cid || req.query.cid || '');
     if (!shopId || !cid) {
       return res.status(404).json({
         success: false,
-        message: `未在采集箱列表里找到 detailId=${detailId} 的 shopId/cid（可能已被发布/移除，或不在「未发布」状态）`,
+        message: `列表项缺少 shopId/cid（detailId=${detailId}）`,
       });
     }
 
     // ---- 2) 详情：妙手开放平台结构化全字段（AK 直连，进程内调用） ----
     const detail = await getMercadoCollectBoxDetail(detailId, shopId, cid);
     const d: any = (detail && (detail as any).siteCollectItemInfo) || {};
+
+    /**
+     * 把妙手的 skuMap（按 skuKey 的字典）拍平成有序数组，字段名统一：
+     *   { skuKey, key(可读标签), stock, costCny, weightG, dims:{l,w,h}, imgUrls }
+     * 目的：插件拿到就能直接用，不必再懂妙手的原始结构（weight 是字符串、单位可能是 kg…）。
+     */
+    const skuRows = (() => {
+      const map: Record<string, any> = d?.skuMap || {};
+      const sale: any[] = Array.isArray(d?.saleAttributes) ? d.saleAttributes : [];
+      const label: Record<string, string[]> = {};
+      // 妙手两边 skuKey 写法不一致（skuMap 里是 ";6bcf58ba;"，saleAttributes 里是 "6bcf58ba"）→ 归一化后匹配
+      const skuKeyNorm = (k: any) => String(k || '').replace(/[^0-9a-zA-Z]/g, '').toLowerCase();
+      for (const attr of sale) {
+        for (const v of (attr?.values || [])) {
+          const k = skuKeyNorm(v?.skuKey);
+          if (!k) continue;
+          (label[k] = label[k] || []).push(String(v?.name || ''));
+        }
+      }
+      const rows: any[] = [];
+      for (const [skuKey, s] of Object.entries(map)) {
+        if (!s || (s as any).isDelete) continue;
+        let weightG = numOf((s as any).weight);
+        if (weightG != null && String((s as any).weightUnit || 'g').toLowerCase() === 'kg') {
+          weightG = +(weightG * 1000).toFixed(1);
+        }
+        const xyz = [(s as any).length, (s as any).width, (s as any).height].map((x) => numOf(x));
+        rows.push({
+          skuKey,
+          key: (label[skuKeyNorm(skuKey)] || []).join(' ') || String((s as any).itemNum || '') || skuKey,
+          stock: numOf((s as any).stock),
+          costCny: numOf((s as any).originPrice),
+          weightG,
+          dims: { l: xyz[0], w: xyz[1], h: xyz[2] },
+          imgUrls: (s as any).imgUrls || [],
+        });
+      }
+      return rows;
+    })();
 
     const product = {
       title: d.title || item?.title || '',
@@ -538,6 +661,8 @@ router.get('/material', async (req, res) => {
       attributes: d.attributes || [],
       saleAttributes: d.saleAttributes || [],
       skuMap: d.skuMap || {},
+      /** 规范化后的 SKU 行（有序数组，插件直接用，不必懂妙手原始结构） */
+      skuRows,
       pricingMode: d.pricingMode || item?.collectBoxDetailShop?.pricingMode || '',
       source: d.source || '',
     };
@@ -585,6 +710,7 @@ router.get('/material', async (req, res) => {
       detailId,
       shopId,
       cid,
+      matchedBy,
       product,
       ai,
       descTranslated: descTranslated || undefined,
@@ -592,6 +718,7 @@ router.get('/material', async (req, res) => {
         elapsedMs: Date.now() - t0,
         cached: false,
         listMatched: !!item,
+        matchedBy,
         aiEngine: ai.engine,
       },
     };
@@ -601,6 +728,62 @@ router.get('/material', async (req, res) => {
     console.error(`[publisher/material] detailId=${detailId} 失败:`, e?.message || e);
     return res.json({ success: false, message: e?.message || String(e), elapsedMs: Date.now() - t0 });
   }
+});
+
+// ============ 已处理记录（跨设备一致） ============
+/**
+ * 插件原来把「已处理」记在 chrome.storage.local —— 换台电脑/换浏览器就丢，
+ * 结果重复处理已发布的商品。挪到服务端，任何设备读同一份。
+ * 文件：data/publisher-processed.json  { items: ["<shopId>:<detailId>", ...] }
+ */
+const PROCESSED_FILE = path.join(__dirname, '..', 'data', 'publisher-processed.json');
+const PROCESSED_MAX = 20000;
+let _processedItems: string[] = [];
+
+(function loadProcessed() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(PROCESSED_FILE, 'utf8'));
+    if (raw && Array.isArray(raw.items)) {
+      _processedItems = raw.items.filter((x: any) => typeof x === 'string');
+    }
+  } catch { /* 首次运行：文件不存在，留空 */ }
+})();
+
+function saveProcessed() {
+  try {
+    fs.mkdirSync(path.dirname(PROCESSED_FILE), { recursive: true });
+    if (_processedItems.length > PROCESSED_MAX) _processedItems = _processedItems.slice(-PROCESSED_MAX);
+    fs.writeFileSync(PROCESSED_FILE, JSON.stringify({ items: _processedItems, ts: Date.now() }, null, 2));
+  } catch (e: any) {
+    console.error('[publisher/processed] 写入失败:', e?.message || e);
+  }
+}
+
+/** 拉全量已处理 key（插件启动时一次，用于跳过已处理商品） */
+router.get('/processed', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.json({ success: true, count: _processedItems.length, items: _processedItems });
+});
+
+/** 标记已处理（插件每次成功/跳过后追加）；body.reset=true 可清空重来（测试用） */
+router.post('/processed', (req, res) => {
+  const body = req.body || {};
+  if (body.reset === true) {
+    _processedItems = [];
+    saveProcessed();
+    return res.json({ success: true, reset: true, count: 0 });
+  }
+  const keys = Array.isArray(body.keys) ? body.keys : (body.key ? [body.key] : []);
+  if (!keys.length) return res.status(400).json({ success: false, message: '缺少 key / keys' });
+  const set = new Set(_processedItems);
+  let added = 0;
+  for (const k of keys) {
+    const s = String(k || '').trim();
+    if (s && !set.has(s)) { set.add(s); added++; }
+  }
+  _processedItems = Array.from(set);
+  if (added) saveProcessed();
+  res.json({ success: true, added, count: _processedItems.length });
 });
 
 export default router;
