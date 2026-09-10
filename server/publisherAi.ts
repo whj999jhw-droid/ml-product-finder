@@ -19,9 +19,11 @@
  *     task=decide-variation { skuInfo }                      → { json }
  *   GET  /api/ml/publisher/material?detailId=&site=&ai=1   → 商品素材聚合包（★ 见下）
  *     &dims=0 关掉重量尺寸补齐（只做规则兜底，快路径）；&dimsBudget=15000 控制 AI 估算预算
- *     &vision=0 关掉「视觉读参数图」；&visionBudget=18000 控制扫图预算
+ *     &ocr=0 关掉「本地 OCR 读参数图」；&ocrBudget=12000 控制 OCR 扫图预算
+ *     &vision=1 大模型全量扫图 / &vision=0 完全关 / 缺省 = 只在 OCR 无果时兜底 2 张（省额度）
  *   ★ 返回里 product.shipping / product.skuRows[].shipping = 解析好的包裹重量尺寸
- *     （四层：妙手真值 → 视觉读参数图 → AI 估算 → 类目规则表；见 resolveShipping）
+ *     （五层：妙手真值 → **本地 OCR** → 大模型读图 → AI 估算 → 类目规则表；见 resolveShipping）
+ *   ★ 任意一边不足 5cm 会被抬到 5cm（minSideCm / clampedByMinSide 标记）
  *
  * ★ /material —— 「商品数据不用爬 DOM，服务器直连妙手开放平台拿」
  *   插件原来靠读弹框 DOM「猜」标题/属性/SKU/进价，页面一改版就失效。
@@ -47,7 +49,9 @@
  */
 import { Router } from 'express';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
+import { execFile } from 'child_process';
 import { fileURLToPath } from 'url';
 import { llmGenerate, getLlmProviders, detectProviderType } from './aiService.js';
 import type { LlmProvider } from './aiService.js';
@@ -437,6 +441,228 @@ function validDimsJson(j: any) {
   return { l: +l.toFixed(1), w: +w.toFixed(1), h: +h.toFixed(1), netWeightG: g != null && g > 0 ? g : null };
 }
 
+// ============ 本地 OCR 读参数图（零额度、最快的一层） ============
+// 2026-09-10 实测：服务器已装 tesseract 5.3.4 + chi_sim/eng 语言包。
+// 同一张 1688「产品参数」图（790×1223），tesseract 直接读出 `0.8cm / 2.5cm / 1.2cm`，
+// 与视觉大模型（glm-4.6v）结果**完全一致**，但单张只要 **0.8s 且零额度消耗**。
+// 所以取数顺序是：妙手真值 → **本地 OCR** → 视觉大模型（兜底） → AI 文本估算 → 品类规则。
+// ★ 别把 OCR 层去掉：大模型额度有限（用户明确要求尽量少用），OCR 才是主力。
+const OCR_LANG = process.env.MLF_OCR_LANG || 'chi_sim+eng';
+const OCR_TMP_DIR = path.join(os.tmpdir(), 'mlf-ocr');
+
+/** 单边下限（cm）—— ML 最小包装规格：包裹任意一边不得小于 5cm */
+const DIM_MIN_CM = 5;
+
+let _tessOk: boolean | null = null;
+/** tesseract 是否可用（探测一次后缓存，避免每张图都白跑一次） */
+function tesseractReady(): Promise<boolean> {
+  if (_tessOk != null) return Promise.resolve(_tessOk);
+  return new Promise((resolve) => {
+    execFile('tesseract', ['--version'], { timeout: 6000 }, (err) => {
+      _tessOk = !err;
+      resolve(_tessOk as boolean);
+    });
+  });
+}
+
+/** 全角→半角 + 统一乘号/冒号，便于正则匹配（OCR 常把 × 读成 x/*、把全角冒号原样带出） */
+function normOcrText(s: string): string {
+  return String(s || '')
+    .replace(/[\uFF01-\uFF5E]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+    .replace(/[×✕✖＊]/g, '*')
+    .replace(/[ \t\u00a0]+/g, ' ');
+}
+
+/** 「数字+单位」→ cm。只认明确的长度单位；裸数字一律不认（否则会把属性里的「长度 0.2M」当三边） */
+function ocrToCm(n: number, unit: string): number | null {
+  const u = String(unit || '').toLowerCase();
+  if (/^(cm|厘米|公分)$/.test(u)) return n;
+  if (/^(mm|毫米)$/.test(u)) return n / 10;
+  return null;
+}
+
+/**
+ * 从 OCR 文本里解析尺寸/重量。
+ * 只认带明确长度单位（cm/厘米/mm）的数值：实测该商品的参数图输出为
+ *   `0.8cm / 2.5cm / 1.2cm / 0.3cm` 四个值 → 取最大的 3 个（2.5×1.2×0.8），
+ *   与人工看图、与大模型给出的答案都一致。
+ * 「箱规」（44*39*44，400pcs）是整箱数据，必须排除，否则包裹尺寸会大 10 倍。
+ */
+export function parseDimsFromOcrText(rawText: string) {
+  const text = normOcrText(rawText);
+  if (!text || text.length < 6) return null;
+
+  // 逐行过滤掉整箱/装箱数据
+  const lines = text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const kept = lines.filter((ln) => !/(箱规|整箱|装箱|外箱|入数|一箱|pcs|只\/箱|个\/箱|装量)/i.test(ln));
+  const single = kept.join('\n');
+  if (!single) return null;
+
+  // 1) 优先找显式三边组合：15*7.4*1.3cm / 15x7.4x1.3 cm
+  let dims: { l: number; w: number; h: number } | null = null;
+  const m3 = single.match(/(\d+(?:\.\d+)?)\s*\*\s*(\d+(?:\.\d+)?)\s*\*\s*(\d+(?:\.\d+)?)\s*(cm|厘米|公分|mm|毫米)/i);
+  if (m3) {
+    const k = /^(mm|毫米)$/i.test(m3[4]) ? 0.1 : 1;
+    const arr = [parseFloat(m3[1]) * k, parseFloat(m3[2]) * k, parseFloat(m3[3]) * k].sort((a, b) => b - a);
+    dims = { l: arr[0], w: arr[1], h: arr[2] };
+  } else {
+    // 2) 收集所有「数字+cm/厘米/mm」，取最大的 3 个
+    const all: number[] = [];
+    const re = /(\d+(?:\.\d+)?)\s*(cm|厘米|公分|mm|毫米)/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(single))) {
+      const cm = ocrToCm(parseFloat(m[1]), m[2]);
+      if (cm != null && cm > 0) all.push(cm);
+    }
+    if (all.length >= 3) {
+      const arr = all.sort((a, b) => b - a).slice(0, 3);
+      dims = { l: arr[0], w: arr[1], h: arr[2] };
+    }
+  }
+
+  // 尺寸合理性（注意：**不设下限**，下限由 DIM_MIN_CM 统一抬）
+  if (dims) {
+    if (dims.l > 80 || dims.l < 0.3) dims = null;
+    else if (dims.l * dims.w * dims.h > 150_000) dims = null;      // 体积 >150L 不是轻小件
+    else dims = { l: +dims.l.toFixed(1), w: +dims.w.toFixed(1), h: +dims.h.toFixed(1) };
+  }
+
+  // 3) 重量（净重/毛重分开收；带包装的进 packWeightG）
+  let weightG: number | null = null;
+  let packWeightG: number | null = null;
+  const wre = /(带包装[^0-9\n]{0,8}|含包装[^0-9\n]{0,8}|毛重[^0-9\n]{0,8}|净重[^0-9\n]{0,8}|裸[^0-9\n]{0,6}|重量[^0-9\n]{0,8})?\s*(\d+(?:\.\d+)?)\s*(kg|千克|g|克)(?![a-z])/gi;
+  let wm: RegExpExecArray | null;
+  while ((wm = wre.exec(single))) {
+    const label = (wm[1] || '').trim();
+    let g = parseFloat(wm[2]);
+    if (/^(kg|千克)$/i.test(wm[3])) g *= 1000;
+    if (!(g > 0) || g > 200_000) continue;
+    if (/包装|毛重/.test(label)) packWeightG = Math.max(packWeightG || 0, g);
+    else weightG = Math.max(weightG || 0, g);
+  }
+
+  if (!dims && weightG == null && packWeightG == null) return null;
+  return {
+    dims,
+    packDims: null as { l: number; w: number; h: number } | null,
+    weightG,
+    packWeightG,
+    raw: single.replace(/\s*\n\s*/g, ' | ').slice(0, 200),
+    engine: 'ocr' as const,
+  };
+}
+
+/** 单张图 OCR：下载 → 临时文件 → tesseract → 文本。任何失败返回 null（由上层继续兜底） */
+async function ocrOneImage(url: string, timeoutMs = 12000): Promise<string | null> {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), Math.max(3000, timeoutMs));
+  let file = '';
+  try {
+    const r = await fetch(url, { signal: ac.signal });
+    if (!r.ok) return null;
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.length < 1000 || buf.length > 12 * 1024 * 1024) return null;
+    fs.mkdirSync(OCR_TMP_DIR, { recursive: true });
+    file = path.join(OCR_TMP_DIR, `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.jpg`);
+    fs.writeFileSync(file, buf);
+    const text = await new Promise<string>((resolve) => {
+      execFile(
+        'tesseract',
+        [file, 'stdout', '-l', OCR_LANG, '--psm', '3'],
+        { timeout: 20000, maxBuffer: 4 * 1024 * 1024 },
+        (err, stdout) => resolve(err ? '' : String(stdout || ''))
+      );
+    });
+    return text.trim() || null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+    if (file) { try { fs.unlinkSync(file); } catch { /* ignore */ } }
+  }
+}
+
+/**
+ * 扫货源图 OCR 找尺寸/重量。选图策略：探宽高 → 按「竖长」降序（参数图/详情图）→ 候选最多 24 张。
+ * OCR 单张 0.8s，比大模型（2~4s + 额度）便宜得多，所以候选放宽、并发 6。
+ */
+async function extractDimsFromImagesByOcr(urls: string[], budgetMs = 12000) {
+  if (!(await tesseractReady())) return { result: null as any, errors: ['服务器未安装 tesseract，OCR 层跳过'] };
+  const uniq = Array.from(new Set(
+    (urls || []).map((u) => String(u || '').trim()).filter((u) => /^https?:\/\//i.test(u))
+  ));
+  if (!uniq.length) return { result: null as any, errors: ['没有可 OCR 的货源图'] };
+
+  const cacheKey = 'ocr:' + uniq.slice(0, 4).map((u) => u.split('?')[0]).join('|') + '#' + uniq.length;
+  const hit = _visionCache.get(cacheKey);
+  if (hit) {
+    const ttl = hit.val ? VISION_POS_TTL_MS : VISION_NEG_TTL_MS;
+    if (Date.now() - hit.ts < ttl) {
+      return { result: hit.val, cached: true, errors: hit.val ? [] : ['（缓存）此前 OCR 过，参数图里没有尺寸'] };
+    }
+  }
+
+  const probed: { url: string; w: number; h: number }[] = [];
+  const unknown: string[] = [];        // 探测失败的图：只影响排序，**绝不能因此丢图**
+  let pi = 0;
+  const probeWorker = async () => {
+    while (pi < uniq.length) {
+      const u = uniq[pi++];
+      const s = await probeImageSize(u);
+      if (s && s.w >= 300) probed.push({ url: u, w: s.w, h: s.h });
+      else unknown.push(u);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(8, uniq.length) }, () => probeWorker()));
+  // ★ 千万别「按长宽比排序后截断候选」——实测该商品 40 张图里有 30+ 张比参数图更「长」，
+  //   取前 32 张正好把第 27 张（**唯一印着尺寸的参数图**）挤掉了，表现为「OCR 全扫也没命中」。
+  //   正确做法：按「越像参数图越靠前」排序后**全部扫**（OCR 单张 0.8s、并发 8，40 张 ≈ 6s），
+  //   而且拿到尺寸就立即停 —— 正常商品几秒内结束。
+  probed.sort((a, b) => (b.h / b.w) - (a.h / a.w));
+  const cand = [...probed.map((x) => x.url), ...unknown].slice(0, 48);
+  if (!cand.length) return { result: null as any, errors: ['图片探测失败，无可 OCR 的图'] };
+
+  const deadline = Date.now() + budgetMs;
+  let idx = 0;
+  let scanned = 0;
+  let found: any = null;   // 强命中：拿到**尺寸**，立即停扫
+  let weak: any = null;    // 弱命中：只有重量（妙手一般已有重量，价值低）——扫完再退回使用
+  const seenText = new Set<string>();
+  const worker = async () => {
+    while (!found && Date.now() < deadline) {
+      const i = idx++;
+      if (i >= cand.length) return;
+      scanned++;
+      const txt = await ocrOneImage(cand[i], Math.min(15000, Math.max(4000, deadline - Date.now())));
+      if (!txt) continue;
+      const k = txt.replace(/\s+/g, '').slice(0, 120);
+      if (seenText.has(k)) continue;                     // 分隔条/重复图，跳过
+      seenText.add(k);
+      const pick = parseDimsFromOcrText(txt);
+      if (!pick) continue;
+      if (pick.dims || pick.packDims) found = Object.assign(pick, { img: cand[i] });
+      else if (!weak) weak = Object.assign(pick, { img: cand[i] });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(8, cand.length) }, () => worker()));
+
+  const result = found || weak || null;
+  _visionCache.set(cacheKey, { ts: Date.now(), val: result });
+  return {
+    result,
+    errors: result ? [] : [`OCR 扫了 ${scanned} 张图，未发现印着尺寸/重量的参数图`],
+  };
+}
+
+/** 单边下限抬升：任意一边不得小于 DIM_MIN_CM（cm）。返回是否发生了抬升 */
+function clampMinSide(d: { l: number; w: number; h: number }) {
+  const nl = Math.max(DIM_MIN_CM, d.l);
+  const nw = Math.max(DIM_MIN_CM, d.w);
+  const nh = Math.max(DIM_MIN_CM, d.h);
+  const changed = nl !== d.l || nw !== d.w || nh !== d.h;
+  return { dims: { l: +nl.toFixed(1), w: +nw.toFixed(1), h: +nh.toFixed(1) }, changed };
+}
+
 const SYS_ESTIMATE_DIMS =
   '你是跨境电商包裹数据估算助手。根据商品标题与类目，估算该商品**未加外包装的本体三边尺寸**（单位 cm）与单件净重（g）。' +
   '要求：1) 参照真实电商同类商品的常见规格，别凭空夸大；2) 三边按 长≥宽≥高 排列，轻小件通常是 5~40cm 量级；' +
@@ -686,7 +912,7 @@ const _visionCache = new Map<string, { ts: number; val: any }>();
 const VISION_POS_TTL_MS = 24 * 60 * 60 * 1000;
 const VISION_NEG_TTL_MS = 30 * 60 * 1000;
 
-async function extractDimsFromImages(urls: string[], budgetMs = 22000) {
+async function extractDimsFromImages(urls: string[], budgetMs = 22000, maxImages = 10) {
   const provs = healthyVisionProviders();
   const raw = (urls || []).map((u) => String(u || '').trim())
     .filter((u) => /^https?:\/\//i.test(u) && !/\.500x500\./i.test(u));
@@ -700,7 +926,7 @@ async function extractDimsFromImages(urls: string[], budgetMs = 22000) {
   if (!provs.length) return { result: null as any, errors: ['池内无视觉模型（如 glm-4.6v）'] };
   if (!uniq.length) return { result: null as any, errors: ['没有可扫的货源图'] };
 
-  const cacheKey = uniq.slice(0, 4).map((u) => u.split('?')[0]).join('|') + '#' + uniq.length;
+  const cacheKey = uniq.slice(0, 4).map((u) => u.split('?')[0]).join('|') + '#' + uniq.length + '#m' + maxImages;
   const cached = _visionCache.get(cacheKey);
   if (cached) {
     const ttl = cached.val ? VISION_POS_TTL_MS : VISION_NEG_TTL_MS;
@@ -725,13 +951,14 @@ async function extractDimsFromImages(urls: string[], budgetMs = 22000) {
   let tall = probed.filter((x) => x.h >= 400 && x.h / x.w >= 1.35);
   if (tall.length < 2) tall = probed.filter((x) => x.h >= 300 && x.h / x.w >= 0.9);
   tall.sort((a, b) => (b.h / b.w) - (a.h / a.w));
-  const cand = (tall.length ? tall.map((x) => x.url) : uniq).slice(0, 10);
+  const cand = (tall.length ? tall.map((x) => x.url) : uniq).slice(0, maxImages);
 
   const deadline = Date.now() + budgetMs;
   let idx = 0;
   let found: any = null;
   let scanned = 0;
   let okCalls = 0;
+  let weak: any = null;    // 弱命中：只有重量、没尺寸 → 不终止扫描，扫完再退回使用
   // 并发 4：关掉 glm 的思考后单张只要 2~4s，4 路并发既快又不容易撞限流
   // （曾经 6 路并发被限流 → 结果时好时坏）。
   const concurrency = Math.min(4, cand.length);
@@ -743,15 +970,20 @@ async function extractDimsFromImages(urls: string[], budgetMs = 22000) {
       const j = await visionReadRace(cand[i], deadline - Date.now());
       if (j) okCalls++;
       const pick = pickVisionDims(j);
-      if (pick) found = Object.assign(pick, { img: cand[i] });
+      if (!pick) continue;
+      // ★ 只有拿到尺寸才算命中：只要有重量就停扫的话，会停在主图上，漏掉后面的参数图
+      //   （OCR 层踩过同一个坑，实测第一条命中是 no-brand 图上的「2g」）。
+      if (pick.dims || pick.packDims) found = Object.assign(pick, { img: cand[i] });
+      else if (!weak) weak = Object.assign(pick, { img: cand[i] });
     }
   };
   await Promise.all(Array.from({ length: concurrency }, () => worker()));
-  if (found) _visionCache.set(cacheKey, { ts: Date.now(), val: found });
+  const result = found || weak || null;
+  if (result) _visionCache.set(cacheKey, { ts: Date.now(), val: result });
   else if (okCalls > 0) _visionCache.set(cacheKey, { ts: Date.now(), val: null }); // 模型答了但图里没尺寸 → 短存负面
   return {
-    result: found,
-    errors: found ? [] : [`探了 ${probed.length} 张、扫了 ${scanned} 张竖长图（成功应答 ${okCalls} 次），未发现印着尺寸/重量的参数图`],
+    result,
+    errors: result ? [] : [`探了 ${probed.length} 张、扫了 ${scanned} 张竖长图（成功应答 ${okCalls} 次），未发现印着尺寸/重量的参数图`],
   };
 }
 
@@ -762,12 +994,21 @@ export interface ShippingResolved {
   dims: { l: number; w: number; h: number };
   /** 体积重（kg，长×宽×高/5000），插件侧计费重要用 */
   volumeWeightKg: number;
-  /** 各字段来源：miaoshou(妙手真值) / vision(参数图识别) / vision-pack(参数图识别,含包装) / ai / rule */
+  /**
+   * 各字段来源：
+   *   miaoshou(妙手真值) / ocr(本地OCR读参数图) / ocr-pack(OCR，图上写的是包装尺寸)
+   *   / vision(大模型读图) / vision-pack(大模型读图,含包装) / ai(AI估算) / rule(品类规则)
+   */
   source: { weight: string; dims: string };
   /** 说人话的解释，便于日志排查 */
   note: string;
+  /** 单边下限（cm）—— 任意一边不得小于该值 */
+  minSideCm?: number;
+  /** 是否因单边下限被抬过 */
+  clampedByMinSide?: boolean;
   aiError?: string;
   visionError?: string;
+  ocrError?: string;
 }
 
 /**
@@ -779,11 +1020,21 @@ async function resolveShipping(input: {
   breadcrumb?: string;
   weightG?: any;
   dims?: { l?: any; w?: any; h?: any };
-  /** 货源图 URL 列表（妙手 sourceImgUrls）—— 视觉读图用 */
+  /** 货源图 URL 列表（妙手 sourceImgUrls）—— 读图取尺寸用 */
   images?: string[];
   wantAi?: boolean;
   budgetMs?: number;
   visionBudgetMs?: number;
+  /** 本地 OCR 层（零额度）：默认开；ocrEnabled=false 关掉 */
+  ocrEnabled?: boolean;
+  ocrBudgetMs?: number;
+  /**
+   * 视觉大模型层（消耗额度）：
+   *   'off'  = 完全不调大模型；
+   *   'lite' = 默认，只在 OCR 无果时小范围兜底（最多 2 张图）；
+   *   'full' = 原来的全量扫（最多 10 张）。
+   */
+  visionMode?: 'off' | 'lite' | 'full';
 }): Promise<ShippingResolved> {
   const title = String(input.title || '');
   const breadcrumb = String(input.breadcrumb || '');
@@ -798,17 +1049,54 @@ async function resolveShipping(input: {
   const source = { weight: mWeight != null ? 'miaoshou' : 'none', dims: miaoshouDims ? 'miaoshou' : 'none' };
   let aiError = '';
   let visionError = '';
+  let ocrError = '';
   const notes: string[] = [];
 
   // 规则值先算好：既是兜底，也用作 AI 结果的**保守校验基准**
   const rd = ruleDims(title, breadcrumb, netWeightG);
   const vol = (d: { l: number; w: number; h: number }) => d.l * d.w * d.h;
 
-  // 2) 视觉读图（最接近真值：货源图里的「产品参数图」常直接印着尺寸标注）
-  //    —— 比 AI 凭标题猜准得多，也不受「标题没写尺寸」限制。实测单张 ≈6s、并发 5、首个命中即返回。
-  if (input.wantAi && Array.isArray(input.images) && input.images.length && (!dims || netWeightG == null)) {
+  // 2) 本地 OCR 读参数图（**主力层**：零额度、单张 0.8s）
+  //    妙手保留的 40 张货源图里含「产品参数图」，图上直接印着尺寸（实测 type-c 转接头读出 2.5×1.2×0.8cm）。
+  //    tesseract 是本地二进制，不消耗任何大模型额度 —— 用户明确要求「能不用大模型就别用」。
+  if (
+    input.wantAi && input.ocrEnabled !== false &&
+    Array.isArray(input.images) && input.images.length && (!dims || netWeightG == null)
+  ) {
     try {
-      const v = await extractDimsFromImages(input.images, input.visionBudgetMs || 22000);
+      const o = await extractDimsFromImagesByOcr(input.images, input.ocrBudgetMs || 12000);
+      const or: any = o.result;
+      if (or) {
+        const od = or.dims || or.packDims;
+        if (!dims && od) {
+          dims = { l: od.l, w: od.w, h: od.h };
+          // 图上写「包装尺寸」时标记 ocr-pack —— 插件据此**不再叠加包装增量**
+          source.dims = or.dims ? 'ocr' : 'ocr-pack';
+          notes.push(`尺寸由参数图 OCR(${or.dims ? '本体' : '包装'} ${od.l}×${od.w}×${od.h})`);
+        }
+        if (netWeightG == null) {
+          const ow = or.weightG != null ? or.weightG : or.packWeightG;
+          if (ow != null) { netWeightG = ow; source.weight = 'ocr'; notes.push(`净重由参数图 OCR(${ow}g)`); }
+        }
+      } else {
+        ocrError = (o.errors || []).join('； ');
+      }
+    } catch (e: any) {
+      ocrError = e?.message || String(e);
+    }
+  }
+
+  // 3) 视觉大模型读图（**兜底：消耗额度，默认只在 OCR 无果时小范围试**）
+  //    OCR 只认文字标注；若尺寸是「图形化尺寸线」则读不出，这时才让大模型上（最多 2 张图）。
+  const vmode: 'off' | 'lite' | 'full' = input.visionMode || 'lite';
+  if (
+    vmode !== 'off' && input.wantAi &&
+    Array.isArray(input.images) && input.images.length && (!dims || netWeightG == null)
+  ) {
+    try {
+      const maxImg = vmode === 'full' ? 10 : 2;
+      const budget = vmode === 'full' ? (input.visionBudgetMs || 22000) : 9000;
+      const v = await extractDimsFromImages(input.images, budget, maxImg);
       const vr: any = v.result;
       if (vr) {
         const vd = vr.dims || vr.packDims;
@@ -877,6 +1165,15 @@ async function resolveShipping(input: {
   if (!dims) { dims = { ...rd.dims }; source.dims = 'rule'; notes.push(`尺寸按品类规则「${rd.note}」取值`); }
   if (netWeightG == null) { netWeightG = rd.netWeightG; source.weight = 'rule'; notes.push(`净重按品类规则「${rd.note}」取值`); }
 
+  // 5) 单边下限：包裹任意一边不得小于 DIM_MIN_CM（用户要求 / ML 最小包装规格）
+  //    ⚠️ 必须在算体积重之前抬 —— 否则体积重偏小 → 运费低估 → 净收益虚高。
+  //    实测转接头本体 2.5×1.2×0.8 → 抬成 5×5×5（体积重 0.48g → 25g），这是**保守方向**。
+  const clamped = clampMinSide(dims);
+  if (clamped.changed) {
+    notes.push(`单边不足 ${DIM_MIN_CM}cm 已抬到下限（${dims.l}×${dims.w}×${dims.h} → ${clamped.dims.l}×${clamped.dims.w}×${clamped.dims.h}）`);
+    dims = clamped.dims;
+  }
+
   const volumeWeightKg = +((dims.l * dims.w * dims.h) / 5000).toFixed(3);
   const out: ShippingResolved = {
     netWeightG: +Number(netWeightG).toFixed(1),
@@ -884,9 +1181,12 @@ async function resolveShipping(input: {
     volumeWeightKg,
     source,
     note: notes.join('；') || '妙手侧真实值，无需估算',
+    minSideCm: DIM_MIN_CM,
+    clampedByMinSide: clamped.changed,
   };
   if (aiError) out.aiError = aiError;
   if (visionError) out.visionError = visionError;
+  if (ocrError) out.ocrError = ocrError;
   return out;
 }
 
@@ -1033,22 +1333,46 @@ router.post('/ai', async (req, res) => {
       }
 
       // ---------- 7) 视觉读货源图，直接识别尺寸/重量（参数图上印着的真值） ----------
+      // ---------- 7) 读货源图取尺寸/重量（**先本地 OCR，零额度**；OCR 无果才用大模型兜底） ----------
       case 'vision-dims': {
+        // ★ 别再截断到 20：实测该商品 40 张图里参数图排第 27，截断前 20 张直接把真值砍掉了
+        //   （表现为「明明能读出尺寸却拿不到」）。OCR 层自己会控制扫描顺序与预算。
         const images: string[] = (Array.isArray(body.images) ? body.images : Array.isArray(body.sourceImgUrls) ? body.sourceImgUrls : [])
-          .map((u: any) => String(u || '').trim()).filter(Boolean).slice(0, 20);
+          .map((u: any) => String(u || '').trim()).filter(Boolean).slice(0, 80);
         if (!images.length) return res.status(400).json({ success: false, message: '请提供 images[]（货源图 URL）' });
+
+        const pack = (pick: any, engine: string) => {
+          const d = pick.dims || pick.packDims;
+          const cl = d ? clampMinSide({ l: d.l, w: d.w, h: d.h }) : null;
+          return {
+            success: true,
+            shipping: {
+              netWeightG: pick.packWeightG != null ? pick.packWeightG : (pick.weightG != null ? pick.weightG : null),
+              dims: cl ? cl.dims : null,
+              isPackDims: !pick.dims && !!pick.packDims,
+              minSideCm: DIM_MIN_CM,
+              clampedByMinSide: cl ? cl.changed : false,
+              rawText: pick.raw,
+            },
+            scannedBy: engine,
+            matchedImg: pick.img,
+          };
+        };
+
+        // 7a) 本地 OCR（零额度、单张 0.8s）
+        if (String(body.ocr ?? '1') !== '0') {
+          const o = await extractDimsFromImagesByOcr(images, Math.max(4000, Math.min(Number(body.ocrBudgetMs) || 12000, 25000)));
+          if (o.result) return res.json({ ...pack(o.result, 'ocr'), engine: 'ocr', note: '本地 OCR，未消耗大模型额度' });
+        }
+        // 7b) 大模型兜底（消耗额度，可 body.vision=false 关掉）
+        if (body.vision === false || String(body.vision) === '0') {
+          return res.json({ success: false, message: 'OCR 未识别到尺寸，且已关闭大模型兜底' });
+        }
         const v = await extractDimsFromImages(images, Math.max(6000, Math.min(Number(body.budgetMs) || 22000, 30000)));
+        if (v.result) return res.json({ ...pack(v.result, v.result.model || 'vision'), engine: 'vision' });
         return res.json({
-          success: !!v.result,
-          shipping: v.result ? {
-            netWeightG: v.result.packWeightG || v.result.weightG || null,
-            dims: v.result.dims || v.result.packDims || null,
-            isPackDims: !v.result.dims && !!v.result.packDims,
-            rawText: v.result.raw,
-          } : undefined,
-          scannedBy: v.result ? (v.result.model || 'vision') : undefined,
-          matchedImg: v.result ? v.result.img : undefined,
-          message: v.result ? undefined : v.errors.join('； '),
+          success: false,
+          message: v.errors.join('； '),
         });
       }
 
@@ -1127,7 +1451,7 @@ router.get('/material', async (req, res) => {
     return res.status(400).json({ success: false, message: 'detailId 应为纯数字' });
   }
 
-  const ck = [qDetailId || ('t:' + qThumb) || ('n:' + qTitle), wantAi ? 1 : 0, site, maxWords, target, withDesc ? 1 : 0, String(req.query.dims ?? '1'), String(req.query.vision ?? '1')].join(':');
+  const ck = [qDetailId || ('t:' + qThumb) || ('n:' + qTitle), wantAi ? 1 : 0, site, maxWords, target, withDesc ? 1 : 0, String(req.query.dims ?? '1'), String(req.query.vision ?? 'lite'), String(req.query.ocr ?? '1')].join(':');
   const hit = _materialCache.get(ck);
   if (hit && Date.now() - hit.ts < MATERIAL_TTL_MS) {
     return res.json(Object.assign({}, hit.data, {
@@ -1268,8 +1592,12 @@ router.get('/material', async (req, res) => {
     //   所以这里按「妙手真值 → AI 估算 → 类目规则表」补齐，保证绝不留空。
     //   ?dims=0 可关掉（快路径，只做规则兜底不调 AI）。
     const wantDims = String(req.query.dims ?? '1') !== '0';
-    // ?vision=0 关掉「视觉读参数图」（默认开：只在妙手真值缺项时才真的扫图）
-    const wantVision = String(req.query.vision ?? '1') !== '0';
+    // 本地 OCR 层（**零额度**）：默认开，?ocr=0 关掉
+    const wantOcr = String(req.query.ocr ?? '1') !== '0';
+    // 视觉大模型层（消耗额度）：?vision=1 全量扫 / ?vision=0 完全关 / 缺省 = 只在 OCR 无果时兜底 2 张
+    const vRaw = String(req.query.vision ?? '').toLowerCase();
+    const visionMode: 'off' | 'lite' | 'full' =
+      vRaw === '0' || vRaw === 'off' ? 'off' : vRaw === '1' || vRaw === 'full' ? 'full' : 'lite';
     const shipBase: any = skuRows.find((r: any) => r.weightG != null || r.dims.l != null) || null;
     let shipping: ShippingResolved | null = null;
     try {
@@ -1278,10 +1606,13 @@ router.get('/material', async (req, res) => {
         breadcrumb: product.breadcrumb,
         weightG: shipBase ? shipBase.weightG : null,
         dims: shipBase ? shipBase.dims : { l: null, w: null, h: null },
-        images: wantVision ? (product.sourceImgUrls as string[]) : [],
+        images: (wantOcr || visionMode !== 'off') ? (product.sourceImgUrls as string[]) : [],
         wantAi: wantAi && wantDims,
         budgetMs: Math.max(4000, Math.min(Number(req.query.dimsBudget) || 15000, 20000)),
         visionBudgetMs: Math.max(6000, Math.min(Number(req.query.visionBudget) || 22000, 30000)),
+        ocrEnabled: wantOcr,
+        ocrBudgetMs: Math.max(4000, Math.min(Number(req.query.ocrBudget) || 12000, 25000)),
+        visionMode,
       });
       // 逐 SKU：自己那一行有真值就用真值，缺项继承整单解析结果
       for (const r of skuRows as any[]) {
