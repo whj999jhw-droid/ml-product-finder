@@ -1495,6 +1495,107 @@ function normThumb(u: any): string {
 }
 
 /**
+ * 从任意文本里抽 1688 货源 offer id（妙手侧 sourceItemId 就是它）。
+ *
+ * 【为什么这是最可靠的定位键】插件在列表行 DOM 里能读到的**确定性**信息只有货源链接
+ * （页面直接显示 `http://detail.1688.com/offer/624021091916.html`）。而妙手开放平台的
+ * 采集箱列表接口支持 `sourceItemIdKeyword` —— 实测 1 次请求即精确命中唯一商品，
+ * 既不像标题那样会撞车、也不像缩略图那样被 CDN 改写。
+ */
+function offerIdOf(s: any): string {
+  const m = String(s ?? '').match(/(?:offer\/|offerId=|[?&]id=|sourceItemId[=":\s]*)(\d{6,20})/);
+  return m ? m[1] : '';
+}
+
+/** 解析 notesFull 里的「键：值」行（1688 原始中文属性，如「型号：GS04」） */
+function parseNoteKv(s: any): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of String(s ?? '').split(/[\r\n]+/)) {
+    const m = line.match(/^\s*([^：:]{1,24})\s*[：:]\s*(.+?)\s*$/);
+    if (m && m[1] && m[2]) out[m[1].trim()] = m[2].trim();
+  }
+  return out;
+}
+
+/**
+ * 算出「必填但当前为空」的类目属性，并尽量给一个建议值。
+ *
+ * 数据源（都是妙手详情接口真实返回的，已实测）：
+ *   · `productAttributeRules`：57 条属性规则，每条带 `tags:{required,catalogRequired}`、
+ *     `valueType`、可选值 `values:[{id,name,displayName}]`
+ *   · `siteCollectItemInfo.attributes`：当前已填的属性值（形如 `[{name:'Brand',values:[{name:'DJ'}]}]`）
+ *
+ * 建议值优先级（宁可留空，也不瞎填一个错品牌 —— 填错会被 ML 类目校验拒收）：
+ *   1) 1688 中文属性行命中（notesFull 的「型号：GS04」↔ 属性显示名「型号」），且值必须在候选里；
+ *   2) 唯一候选 → 直接用；
+ *   3) 候选里能在标题/属性文本中命中的那个。
+ */
+function buildRequiredAttrs(detail: any): any[] {
+  // ★ 结构陷阱（实测踩过）：`productAttributeRules` 与 `siteCollectItemInfo` 是**并列**的根字段，
+  //   规则不在 siteCollectItemInfo 里。这里两种形状都兼容，避免以后又有人把 siteCollectItemInfo 传进来。
+  const root = detail || {};
+  const d = root.siteCollectItemInfo || root.product || root;
+  const rules: any[] = Array.isArray(root.productAttributeRules) ? root.productAttributeRules
+    : Array.isArray(root.product?.productAttributeRules) ? root.product.productAttributeRules
+    : Array.isArray(d.productAttributeRules) ? d.productAttributeRules : [];
+  if (!rules.length) return [];
+  const curVals: Record<string, string> = {};
+  for (const a of (Array.isArray(d?.attributes) ? d.attributes : [])) {
+    const nm = String(a?.name || '').toLowerCase();
+    const v = (Array.isArray(a?.values) ? a.values : [])
+      .map((x: any) => String(x?.name ?? x?.displayName ?? '')).filter(Boolean);
+    if (nm && v.length) curVals[nm] = v.join(',');
+  }
+  const kv = parseNoteKv(d?.notesFull || d?.notes || '');
+  const hay = (String(d?.title || '') + ' ' + String(d?.notesFull || '')).toLowerCase();
+  const out: any[] = [];
+  for (const r of rules) {
+    const tags = r?.tags || {};
+    if (String(tags.required) !== '1' && String(tags.catalogRequired) !== '1') continue;
+    const name = String(r?.name || r?.id || '');
+    const displayName = String(r?.displayName || name);
+    if (curVals[name.toLowerCase()]) continue; // 已有值 → 不用管
+    const opts: string[] = (Array.isArray(r.values) ? r.values : [])
+      .map((v: any) => String(v?.displayName || v?.name || '')).filter(Boolean);
+    let suggest: string | null = null;
+    let suggestBy = '';
+    // 归一化：去掉空格与常见连接符，使「Micro USB」↔「Micro-USB」能对上（实测这类写法差异很常见）
+    const nz = (s: any) => String(s ?? '').toLowerCase().replace(/[\s\-_+/、,，]/g, '');
+    // ★ 先找「键名完全等于属性显示名」的行；没有的话，只有**唯一**一个候选键才敢用。
+    //   为什么这么保守：1688 的中文属性里「接口形式」和「接口」会同时命中「输入接口/输出接口」，
+    //   而这两个属性语义相反（一个进一个出）。宁可留空让用户点一下，也绝不猜错 ——
+    //   猜错会被 ML 类目校验拒收，或者直接上架一个参数错误的商品。
+    const kvKeys = Object.keys(kv).filter((k) => {
+      const kk = nz(k);
+      const dn = nz(displayName);
+      return !!kk && !!dn && (kk === dn || kk.includes(dn) || dn.includes(kk));
+    });
+    const exactKey = kvKeys.find((k) => nz(k) === nz(displayName));
+    const useKeys = exactKey ? [exactKey] : (kvKeys.length === 1 ? kvKeys : []);
+    for (const k of useKeys) {
+      const v = kv[k];
+      if (!v) continue;
+      const hit = opts.find((o) => nz(o) === nz(v)) ||
+                  opts.find((o) => nz(o).includes(nz(v)) || nz(v).includes(nz(o)));
+      if (opts.length && hit) { suggest = hit; suggestBy = '1688属性'; break; }
+      if (!opts.length) { suggest = v; suggestBy = '1688属性'; break; }
+    }
+    if (!suggest && opts.length === 1) { suggest = opts[0]; suggestBy = '唯一候选'; }
+    if (!suggest && opts.length > 1 && hay) {
+      const hit = opts.find((o) => o.length >= 2 && hay.includes(nz(o)));
+      if (hit) { suggest = hit; suggestBy = '文本命中'; }
+    }
+    out.push({
+      id: String(r?.id || ''), name, displayName,
+      valueType: String(r?.valueType || 'string'),
+      current: '', suggest, suggestBy,
+      options: opts.slice(0, 30),
+    });
+  }
+  return out;
+}
+
+/**
  * GET /material?detailId=xxx[&site=MLM][&ai=1][&maxWords=2][&target=en]
  *
  * 返回：
@@ -1521,15 +1622,20 @@ router.get('/material', async (req, res) => {
   const qShopId = String(req.query.shopId || '').trim();
   const thumbCands = splitCands(req.query.thumb);
   const titleCands = splitCands(req.query.title);
+  // ★ 第 4 种定位方式：1688 货源 offer id（插件从列表行的「货源链接」里读，最确定）
+  //   既支持直接传 offer id，也支持直接传整条链接（这里统一抽成 id）
+  const srcIdCands: string[] = Array.from(new Set(
+    splitCands(req.query.srcId).map((s) => offerIdOf(s) || (/^\d{6,20}$/.test(s) ? s : '')).filter(Boolean)
+  ));
   const qItemNum = String(req.query.itemNum || '').trim();
-  if (!qDetailId && !thumbCands.length && !titleCands.length) {
-    return res.status(400).json({ success: false, message: '需要 detailId / thumb / title 三者之一' });
+  if (!qDetailId && !thumbCands.length && !titleCands.length && !srcIdCands.length) {
+    return res.status(400).json({ success: false, message: '需要 detailId / srcId / thumb / title 之一' });
   }
   if (qDetailId && !/^\d+$/.test(qDetailId)) {
     return res.status(400).json({ success: false, message: 'detailId 应为纯数字' });
   }
 
-  const ck = [qDetailId || (thumbCands[0] ? 't:' + thumbCands[0] : '') || (titleCands[0] ? 'n:' + titleCands[0] : ''), wantAi ? 1 : 0, site, maxWords, target, withDesc ? 1 : 0, String(req.query.dims ?? '1'), String(req.query.vision ?? 'lite'), String(req.query.ocr ?? '1')].join(':');
+  const ck = [qDetailId || (srcIdCands[0] ? 's:' + srcIdCands[0] : '') || (thumbCands[0] ? 't:' + thumbCands[0] : '') || (titleCands[0] ? 'n:' + titleCands[0] : ''), wantAi ? 1 : 0, site, maxWords, target, withDesc ? 1 : 0, String(req.query.dims ?? '1'), String(req.query.vision ?? 'lite'), String(req.query.ocr ?? '1')].join(':');
   const hit = _materialCache.get(ck);
   if (hit && Date.now() - hit.ts < MATERIAL_TTL_MS) {
     return res.json(Object.assign({}, hit.data, {
@@ -1596,9 +1702,31 @@ router.get('/material', async (req, res) => {
         if (m2.item || m2.amb.length) { m = m2; scope = 'all'; }
       }
     }
-    const item: any = m.item;
-    const matchedBy = m.by;
-    const ambiguous = m.amb;
+    let item: any = m.item;
+    let matchedBy = m.by;
+    let ambiguous = m.amb;
+
+    // ---- 1.5) 兜底定位：1688 货源 offer id 定向搜索（确定性最高的一路）----
+    //   只在前面几路都没命中时才走，代价是 1~2 次接口调用（妙手有 QPS 限制，串行且带间隔）。
+    if (!item && !ambiguous.length && srcIdCands.length) {
+      outer:
+      for (const sid of srcIdCands) {
+        for (const st of ['notPublished', 'published'] as const) {
+          try {
+            const r = await searchMercadoCollectBoxAll({
+              status: st, filterCidSite: 'CBT', sourceItemIdKeyword: sid, pageSize: 50,
+            });
+            const hits = (r.detailList || []) as any[];
+            if (hits.length === 1) { item = hits[0]; matchedBy = 'srcId'; scope = st; break outer; }
+            if (hits.length > 1) { ambiguous = hits; matchedBy = 'srcId'; break outer; }
+          } catch (e: any) {
+            // 定向搜索失败（超时/限流）就当这一路没命中，不能因此让整个请求失败
+            console.error('[publisher/material] srcId 定向搜索失败:', sid, e?.message || e);
+          }
+          await new Promise((r2) => setTimeout(r2, 300));
+        }
+      }
+    }
 
     if (ambiguous.length) {
       // 反查撞车（同名/同图）→ 明确报错让插件退回 DOM 模式，绝不猜着填错商品
@@ -1617,9 +1745,10 @@ router.get('/material', async (req, res) => {
     if (!item && !canDirect) {
       return res.status(404).json({
         success: false,
-        message: '妙手开放平台未匹配到该商品：标题候选 ' + titleCands.length + ' 个、缩略图候选 ' +
-          thumbCands.length + ' 个；未发布 ' + notPubSize + ' 条' + (allSize ? ' / 全部 ' + allSize + ' 条' : '') + ' 均未命中',
-        tried: { titles: titleCands.slice(0, 8), thumbs: thumbCands.slice(0, 3), scope, notPubSize, allSize },
+        message: '妙手开放平台未匹配到该商品：货源ID ' + srcIdCands.length + ' 个、标题候选 ' + titleCands.length +
+          ' 个、缩略图候选 ' + thumbCands.length + ' 个；未发布 ' + notPubSize +
+          ' 条' + (allSize ? ' / 已发布 ' + allSize + ' 条' : '') + ' 均未命中',
+        tried: { srcIds: srcIdCands.slice(0, 3), titles: titleCands.slice(0, 8), thumbs: thumbCands.slice(0, 3), scope, notPubSize, allSize },
       });
     }
 
@@ -1704,6 +1833,12 @@ router.get('/material', async (req, res) => {
       skuRows,
       pricingMode: d.pricingMode || item?.collectBoxDetailShop?.pricingMode || '',
       source: d.source || '',
+      /**
+       * ★ 必填项（类目属性）：从 productAttributeRules 算出「required/catalogRequired 且当前为空」的属性，
+       * 并尽量给建议值。插件拿它把弹框里带 * 的空必填项补上 —— 不补的话 ML 类目校验会直接拒收。
+       * 空数组 = 该商品必填项都齐了。
+       */
+      requiredAttrs: buildRequiredAttrs(detail),
     };
 
     // ---- 2.5) 重量/尺寸解析（★ 净收益准不准全看这里） ----
@@ -1812,6 +1947,9 @@ router.get('/material', async (req, res) => {
         listScope: scope,
         notPubSize,
         allSize,
+        /** 必填但当前为空的类目属性个数（0 = 齐了）；插件据此决定是否停下来等人工补 */
+        requiredEmpty: (product as any).requiredAttrs ? (product as any).requiredAttrs.length : 0,
+        srcCands: srcIdCands.length,
         aiEngine: ai.engine,
         shipping: shipping
           ? { netWeightG: shipping.netWeightG, dims: shipping.dims, volumeWeightKg: shipping.volumeWeightKg, source: shipping.source, note: shipping.note }
