@@ -855,7 +855,7 @@ export function getCandidates(opts?: {
   const order = opts?.orderBy || 'score_total DESC, created_at DESC';
   const limit = opts?.limit ?? 50;
   const offset = opts?.offset ?? 0;
-  const rows = db.prepare(
+  let rows = db.prepare(
     `SELECT * FROM candidates ${whereSql} ORDER BY ${order} LIMIT @limit OFFSET @offset`
   ).all({ ...params, limit, offset });
 
