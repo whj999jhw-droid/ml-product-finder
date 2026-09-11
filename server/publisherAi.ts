@@ -1404,19 +1404,94 @@ function materialCachePut(key: string, data: any) {
   }
 }
 
-/** 保证采集箱列表在缓存里（material 要用它补 shopId/cid/货源价/净收益） */
+/**
+ * 保证采集箱列表在缓存里（material 要用它补 shopId/cid/货源价/净收益）
+ *
+ * ★ 这里**不再直接用 getCachedBoxList() 的 10s 缓存**：插件连续处理商品时每隔十几秒
+ *   就要重新翻 2 页（837 条 / pageSize 500），很容易把妙手的 accountApiQpsRateLimit 打出来。
+ *   素材定位对列表新鲜度要求不高（详情接口是实时的，列表只补 shopId/cid/价格），
+ *   所以单独缓存 3 分钟。
+ */
+let _matBoxList: any[] | null = null;
+let _matBoxTs = 0;
+const MAT_BOX_TTL_MS = 3 * 60 * 1000;
 async function ensureBoxList(): Promise<any[]> {
-  const cached = getCachedBoxList();
-  if (cached && cached.length) return cached as any[];
+  if (_matBoxList && Date.now() - _matBoxTs < MAT_BOX_TTL_MS) return _matBoxList;
   const r = await searchMercadoCollectBoxAll({ status: 'notPublished', filterCidSite: 'CBT', pageSize: 500 });
   const items = (r.detailList || []) as any[];
-  if (items.length) setCachedBoxList(items as any);
+  if (items.length) { setCachedBoxList(items as any); _matBoxList = items; _matBoxTs = Date.now(); }
+  return items;
+}
+
+/**
+ * 「已发布」状态的采集箱列表 —— 只在「未发布」未命中时兜底调用。
+ *
+ * 【为什么需要】插件在页面上能看到任意状态的商品，但老逻辑只从「未发布」列表反查，
+ * 于是「已发布」的商品一律 404 → 整包素材（标题英译 / 净收益 / 重量尺寸补齐）全丢，
+ * 用户看到的现象就是「服务端素材未取到」。
+ * 【实测】未发布 837 条 / 已发布 684 条 / 页面共 839 条 —— 三个数不相等，
+ * 说明确实有商品「在页面上能看到但不在未发布列表里」。
+ * 【为什么不用 status:'' 拉全量】实测会触发妙手 `accountApiQpsRateLimit: 账户接口每秒请求频率超限`，
+ * 连续翻页必挂，所以只做一次 published 兜底。
+ * 【为什么单独缓存 5 分钟】全量翻页比未发布列表贵，不能每次请求都拉。
+ */
+let _allBoxList: any[] | null = null;
+let _allBoxTs = 0;
+const ALL_BOX_TTL_MS = 5 * 60 * 1000;
+async function ensureBoxListAll(): Promise<any[]> {
+  if (_allBoxList && Date.now() - _allBoxTs < ALL_BOX_TTL_MS) return _allBoxList;
+  const r = await searchMercadoCollectBoxAll({ status: 'published', filterCidSite: 'CBT', pageSize: 500 });
+  const items = (r.detailList || []) as any[];
+  if (items.length) { _allBoxList = items; _allBoxTs = Date.now(); }
   return items;
 }
 
 function numOf(v: any): number | null {
   const n = parseFloat(String(v ?? '').replace(/[^\d.]/g, ''));
   return isNaN(n) ? null : n;
+}
+
+/**
+ * 多候选参数拆分：支持「a||b||c」或重复传参（req.query 同名会给数组）。
+ *
+ * 【为什么要多候选】插件在浏览器 DOM 里读到的「标题」只是一段文本，
+ * 列表行里还混着货源链接、备注、SKU 名等长文本，插件很难 100% 猜准哪条是标题。
+ * 与其让插件猜一个、错了就整体 404，不如把候选**全部传上来**，服务端逐个精确匹配，
+ * 命中一个即可。
+ */
+function splitCands(v: any): string[] {
+  const arr = Array.isArray(v) ? v : [v];
+  const out: string[] = [];
+  for (const s of arr) {
+    for (const part of String(s ?? '').split('||')) {
+      const t = part.trim();
+      if (t) out.push(t);
+    }
+  }
+  return Array.from(new Set(out));
+}
+
+/** 标题归一化：全角→半角、去全角空格与所有空白、去尾部标点、小写。
+ *  妙手开放平台返回的 title 与页面显示常差一个尾部空格/标点或全角字符，一字符之差就匹配不上。 */
+function normTitle(s: any): string {
+  return String(s ?? '')
+    .replace(/[\uFF01-\uFF5E]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+    .replace(/\u3000/g, '')
+    .replace(/\s+/g, '')
+    .replace(/[·•\-—_，,。.、;；:：!！?？'"“”‘’]+$/g, '')
+    .toLowerCase();
+}
+
+/** 缩略图归一化：去 query、去 CDN 尺寸后缀、去扩展名。
+ *  页面 img.src 常被 CDN 改写（加 ?x-oss-process / _50x50.jpg / !q50.jpg 等），
+ *  与开放平台返回的原始 thumbnail 字面不同，直接比较必然失败。 */
+function normThumb(u: any): string {
+  let s = String(u ?? '').split('?')[0].trim().toLowerCase();
+  if (!s) return '';
+  s = s.replace(/!\w+\.\w+$/, '');          // 阿里 CDN：xxx.jpg!q50.jpg
+  s = s.replace(/_\d+x\d+(?:\.\w+)?$/, ''); // 阿里 CDN：xxx_50x50.jpg
+  s = s.replace(/\.(jpg|jpeg|png|webp|gif)$/, '');
+  return s;
 }
 
 /**
@@ -1440,18 +1515,21 @@ router.get('/material', async (req, res) => {
 
   // ★ 三种定位方式（插件不知道 detailId 时也不用爬 DOM 猜）：
   //   detailId 精确 / thumb 缩略图 URL / title(+itemNum) 标题
+  //   ★ thumb/title 都支持**多候选**（用 || 分隔）：插件在 DOM 里读不准哪个才是标题，
+  //     把候选全传上来由服务端逐个精确匹配，命中一个即可。
   const qDetailId = String(req.query.detailId || '').trim();
-  const qThumb = String(req.query.thumb || '').trim();
-  const qTitle = String(req.query.title || '').trim();
+  const qShopId = String(req.query.shopId || '').trim();
+  const thumbCands = splitCands(req.query.thumb);
+  const titleCands = splitCands(req.query.title);
   const qItemNum = String(req.query.itemNum || '').trim();
-  if (!qDetailId && !qThumb && !qTitle) {
+  if (!qDetailId && !thumbCands.length && !titleCands.length) {
     return res.status(400).json({ success: false, message: '需要 detailId / thumb / title 三者之一' });
   }
   if (qDetailId && !/^\d+$/.test(qDetailId)) {
     return res.status(400).json({ success: false, message: 'detailId 应为纯数字' });
   }
 
-  const ck = [qDetailId || ('t:' + qThumb) || ('n:' + qTitle), wantAi ? 1 : 0, site, maxWords, target, withDesc ? 1 : 0, String(req.query.dims ?? '1'), String(req.query.vision ?? 'lite'), String(req.query.ocr ?? '1')].join(':');
+  const ck = [qDetailId || (thumbCands[0] ? 't:' + thumbCands[0] : '') || (titleCands[0] ? 'n:' + titleCands[0] : ''), wantAi ? 1 : 0, site, maxWords, target, withDesc ? 1 : 0, String(req.query.dims ?? '1'), String(req.query.vision ?? 'lite'), String(req.query.ocr ?? '1')].join(':');
   const hit = _materialCache.get(ck);
   if (hit && Date.now() - hit.ts < MATERIAL_TTL_MS) {
     return res.json(Object.assign({}, hit.data, {
@@ -1461,30 +1539,66 @@ router.get('/material', async (req, res) => {
 
   const t0 = Date.now();
   try {
-    // ---- 1) 定位列表项：detailId 精确 → 缩略图 URL → 标题(+货号) ----
+    // ---- 1) 定位列表项：detailId 精确 → 缩略图 → 标题(+货号) ----
     //  列表项同时给出 shopId / cid / 货源价 / 净收益（插件不必知道这些）
-    const list = await ensureBoxList();
-    const normThumb = (u: string) => String(u || '').split('?')[0].trim().toLowerCase();
-    let item: any = null;
-    let matchedBy = '';
-    let ambiguous: any[] = [];
+    //
+    //  ★ 三级兜底（都是实测踩出来的，别改回去）：
+    //    a) 多候选逐个试 —— 插件在列表行 DOM 里读到的「标题」可能不是标题（行里还有
+    //       货源链接/备注等长文本），所以候选全传上来，命中一个即可；
+    //    b) 归一化比较 —— 页面 img.src 会被 CDN 改写（_50x50.jpg?x-oss-process…），
+    //       标题也可能差一个全角字符/空格/尾部标点，字面完全相等比较必然失败；
+    //    c) 「未发布」未命中 → 再拉**全部状态**试一次 —— 商品可能已发布/发布中，
+    //       老逻辑只查未发布，已发布商品直接 404、整包素材全丢。
+    const mkMatcher = (ls: any[]) => {
+      if (qDetailId) {
+        const it = ls.find((x: any) => String(x.collectBoxDetailId) === qDetailId);
+        if (it) return { item: it, by: 'detailId', amb: [] as any[] };
+      }
+      for (const c of thumbCands) {
+        const t = normThumb(c);
+        if (!t) continue;
+        const hits = ls.filter((x: any) => normThumb(x.thumbnail) === t);
+        if (hits.length === 1) return { item: hits[0], by: 'thumb', amb: [] as any[] };
+        if (hits.length > 1) return { item: null, by: 'thumb', amb: hits };
+      }
+      for (const c of titleCands) {
+        const n = normTitle(c);
+        if (!n) continue;
+        const hits = ls.filter((x: any) => normTitle(x.title) === n &&
+          (!qItemNum || String(x.itemNum || '') === qItemNum));
+        if (hits.length === 1) return { item: hits[0], by: 'title', amb: [] as any[] };
+        if (hits.length > 1) return { item: null, by: 'title', amb: hits };
+      }
+      // 兜底：候选与列表标题互为子串（妙手页面把标题拆成多个 span 时，插件读到的常是片段），
+      // 要求长度 ≥ 8 且**唯一命中**，避免「转接头」这种短词撞一堆商品。
+      for (const c of titleCands) {
+        const n = normTitle(c);
+        if (n.length < 8) continue;
+        const hits = ls.filter((x: any) => {
+          const t = normTitle(x.title);
+          return !!t && (t.includes(n) || n.includes(t));
+        });
+        if (hits.length === 1) return { item: hits[0], by: 'title-fuzzy', amb: [] as any[] };
+      }
+      return { item: null, by: '', amb: [] as any[] };
+    };
 
-    if (qDetailId) {
-      item = list.find((x: any) => String(x.collectBoxDetailId) === qDetailId) || null;
-      if (item) matchedBy = 'detailId';
+    const notPubList = await ensureBoxList();
+    const notPubSize = notPubList.length;
+    let m = mkMatcher(notPubList);
+    let scope = 'notPublished';
+    let allSize = 0;
+    if (!m.item && !m.amb.length) {
+      const allList = await ensureBoxListAll().catch(() => [] as any[]);
+      allSize = allList.length;
+      if (allList.length) {
+        const m2 = mkMatcher(allList);
+        if (m2.item || m2.amb.length) { m = m2; scope = 'all'; }
+      }
     }
-    if (!item && qThumb) {
-      const t = normThumb(qThumb);
-      const hits = list.filter((x: any) => normThumb(x.thumbnail) === t);
-      if (hits.length === 1) { item = hits[0]; matchedBy = 'thumb'; }
-      else if (hits.length > 1) { ambiguous = hits; matchedBy = 'thumb'; }
-    }
-    if (!item && !ambiguous.length && qTitle) {
-      const hits = list.filter((x: any) =>
-        String(x.title || '').trim() === qTitle && (!qItemNum || String(x.itemNum || '') === qItemNum));
-      if (hits.length === 1) { item = hits[0]; matchedBy = 'title'; }
-      else if (hits.length > 1) { ambiguous = hits; matchedBy = 'title'; }
-    }
+    const item: any = m.item;
+    const matchedBy = m.by;
+    const ambiguous = m.amb;
 
     if (ambiguous.length) {
       // 反查撞车（同名/同图）→ 明确报错让插件退回 DOM 模式，绝不猜着填错商品
@@ -1496,15 +1610,21 @@ router.get('/material', async (req, res) => {
         })),
       });
     }
-    if (!item) {
+
+    // detailId 拿到了但列表里没这条（例如已发布后移出采集箱）→ 仍可直查详情：
+    // 标题/图片/属性/SKU 都在，只是货源价与净收益缺（那两个只有列表接口给）。
+    const canDirect = !!(qDetailId && qShopId);
+    if (!item && !canDirect) {
       return res.status(404).json({
         success: false,
-        message: '未在采集箱列表里匹配到该商品（可能已发布/移除，或不在当前「未发布」列表）',
+        message: '妙手开放平台未匹配到该商品：标题候选 ' + titleCands.length + ' 个、缩略图候选 ' +
+          thumbCands.length + ' 个；未发布 ' + notPubSize + ' 条' + (allSize ? ' / 全部 ' + allSize + ' 条' : '') + ' 均未命中',
+        tried: { titles: titleCands.slice(0, 8), thumbs: thumbCands.slice(0, 3), scope, notPubSize, allSize },
       });
     }
 
-    const detailId = String(item.collectBoxDetailId);
-    const shopId = String(item?.collectBoxDetailShop?.shopId || req.query.shopId || '');
+    const detailId = String(item ? item.collectBoxDetailId : qDetailId);
+    const shopId = String(item?.collectBoxDetailShop?.shopId || qShopId || '');
     // 妙手列表里**个别商品没有 cid**（实测 839 条里存在）。详情接口接受 cid=0 并正常返回
     // （实测 cid=1 会报 Category not found，cid=0 不校验类目），所以缺 cid 时用 0 兜底，
     // 而不是直接 404 让插件退回 DOM —— 退回 DOM 就拿不到补齐的重量尺寸了。
@@ -1512,7 +1632,7 @@ router.get('/material', async (req, res) => {
     if (!shopId) {
       return res.status(404).json({
         success: false,
-        message: `列表项缺少 shopId（detailId=${detailId}）`,
+        message: '已定位商品但缺 shopId（detailId=' + detailId + '）—— 插件请带上 shopId，或确保该商品在采集箱列表里',
       });
     }
 
@@ -1688,6 +1808,10 @@ router.get('/material', async (req, res) => {
         cached: false,
         listMatched: !!item,
         matchedBy,
+        /** 命中的列表范围：notPublished=未发布列表 / all=已发布列表（兜底那一路） */
+        listScope: scope,
+        notPubSize,
+        allSize,
         aiEngine: ai.engine,
         shipping: shipping
           ? { netWeightG: shipping.netWeightG, dims: shipping.dims, volumeWeightKg: shipping.volumeWeightKg, source: shipping.source, note: shipping.note }
@@ -1697,7 +1821,9 @@ router.get('/material', async (req, res) => {
     materialCachePut(ck, data);
     return res.json(data);
   } catch (e: any) {
-    console.error(`[publisher/material] detailId=${detailId} 失败:`, e?.message || e);
+    // ★ 这里**不能**引用 try 内的 detailId：它用 const 声明，若异常发生在定位阶段之前，
+    //   catch 里读取会直接 TDZ ReferenceError，把原本可读的错误盖成 "Cannot access before initialization"。
+    console.error('[publisher/material] 失败:', e?.message || e);
     return res.json({ success: false, message: e?.message || String(e), elapsedMs: Date.now() - t0 });
   }
 });
