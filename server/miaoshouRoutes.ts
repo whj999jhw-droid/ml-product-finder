@@ -19,6 +19,12 @@ import {
 } from './miaoshou.js';
 import { createListing, hasCJK, ListingDraft } from './listing.js';
 import { translateToEnglish } from './aiService.js';
+import {
+  checkBannedWords,
+  sanitizeTitle,
+  IP_BLACKLIST,
+  SPORTS_BLACKLIST,
+} from './bannedWords.js';
 import { getStoreRaw, getAllStores } from './stores.js';
 import {
   BACKUP_DIR,
@@ -523,6 +529,42 @@ miaoshouRouter.post('/publish', async (req, res) => {
           title: siteTitleMap[siteId] || title,
         };
       });
+
+      // ---- 发布前侵权预检 ----
+      // 背景：CBT 商品上架后 API 既不能改属性也不能下架（实测 400 Cannot modify CBT item），
+      // 侵权品只能等 ML 删除并累积违规记录。因此必须在发布这一步拦死。
+      const precheckText = [
+        title,
+        ...(skusForDraft || []).map((s: any) => `${s?.name || ''} ${s?.value || ''}`),
+        detailInfo?.attributes ? JSON.stringify(detailInfo.attributes) : '',
+      ].join(' ');
+      const precheck = checkBannedWords(precheckText, target.sites[0]);
+      if (!precheck.ok && precheck.brandHits.length) {
+        const hardHits = precheck.brandHits.filter(
+          (h) => IP_BLACKLIST.includes(h) || SPORTS_BLACKLIST.includes(h)
+        );
+        if (hardHits.length) {
+          // 影视/动漫/体育 IP 类：卖的就是 IP 本身，改标题也没用 → 直接拒绝发布
+          for (const s of target.sites) {
+            results.push({
+              detailId: itemRef.detailId,
+              storeId: target.storeId,
+              storeNick,
+              site: s,
+              success: false,
+              error: `侵权拦截：命中影视/动漫/体育 IP 词（${hardHits.join(', ')}），该类商品上架后无法修改且必被 ML 删除，已拒绝发布`,
+            });
+          }
+          continue;
+        }
+        // 品牌词（通用商品误写品牌名，如数据线 Model=Apple）：自动清洗后继续发布
+        const cleaned = sanitizeTitle(title);
+        console.log(
+          `[Miaoshou Publish] ${itemRef.detailId} 命中品牌词(${precheck.brandHits.join(', ')})，` +
+            `标题已清洗: ${title.slice(0, 40)} -> ${cleaned.slice(0, 40)}`
+        );
+        title = cleaned;
+      }
 
       // 主站点 listing price（draft.price 用于单站点回退）
       const mainSiteId = target.sites[0];
