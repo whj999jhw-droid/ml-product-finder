@@ -3196,7 +3196,7 @@ app.post('/api/ml/llm-config/test', async (req, res) => {
         });
         continue;
       }
-      const reachability = await probeLlmReachability(baseUrl, 8000, p.model);
+      const reachability = await probeLlmReachability(baseUrl, 8000, p.model, p.type);
       const capability = reachability.capability || detectProviderType(baseUrl, p.model);
       if (!reachability.ok) {
         perProvider.push({
@@ -3225,9 +3225,9 @@ app.post('/api/ml/llm-config/test', async (req, res) => {
           success: true,
           message: `连接成功 [${capability}]`,
           sample: diag.sample,
-          url: reachability.url,
+          url: diag.url || reachability.url,
         });
-          if (!firstSuccess) firstSuccess = { sample: diag.sample, url: reachability.url };
+          if (!firstSuccess) firstSuccess = { sample: diag.sample, url: diag.url || reachability.url };
         } else {
           perProvider.push({
             name: p.name || '未命名平台',
@@ -3237,7 +3237,7 @@ app.post('/api/ml/llm-config/test', async (req, res) => {
             reachable: true,
             success: false,
             message: diag.error || '测试失败',
-            url: reachability.url,
+            url: diag.url || reachability.url,
           });
         }
       } catch (err: any) {

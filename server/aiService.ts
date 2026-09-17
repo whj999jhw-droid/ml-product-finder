@@ -57,6 +57,59 @@ function normalizeBaseUrl(url: string): string {
 }
 
 /**
+ * 已知的「具体接口」结尾。命中即说明用户已经把地址填到了某个 endpoint，
+ * **必须原样请求，不再追加任何后缀**。
+ */
+const KNOWN_ENDPOINT_TAILS = [
+  '/chat/completions',
+  '/completions',
+  '/responses',
+  '/messages',
+  '/embeddings',
+  '/rerank',
+  '/images/generations',
+  '/images/edits',
+  '/videos/generations',
+  '/video/generations',
+  '/generations/tasks', // 覆盖 /contents/generations/tasks、/v1/generations/tasks
+  '/audio/speech',
+  '/audio/transcriptions',
+  '/layout_parsing',
+  '/ocr',
+];
+
+/** 取 URL 的 path（小写、去尾斜杠）。非标准 URL 时退化为「去掉协议+host」后的部分。 */
+function urlPathOf(url: string): string {
+  const u = normalizeBaseUrl(url);
+  try {
+    return new URL(u).pathname.replace(/\/+$/, '').toLowerCase();
+  } catch {
+    return u.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, '').replace(/\/+$/, '').toLowerCase();
+  }
+}
+
+/** 结尾是版本号（/v1 /v3 /v4 /v1beta /radeon/api/v1 …）→ 视为 base，仍需补具体接口路径。 */
+function endsWithApiVersion(path: string): boolean {
+  return /\/v\d+[a-z0-9-]*$/.test(path);
+}
+
+/**
+ * 用户填的 baseUrl 是否「已经指向某个具体接口端点」。
+ *
+ * ⭐ 铁律（用户 2026-09-17 明确要求）：**测试与调用都以用户填写的内容为准**。
+ * 只有「裸域名 / 空路径」或「版本号结尾（/v1、/api/v3）」才补默认后缀；
+ * 其余凡是带具体资源路径的（如 /api/v3/contents/generations/tasks）一律原样请求——
+ * 反面教材：火山视频/3D 任务端点被拼成 `.../tasks/chat/completions` → 404 InvalidAction。
+ */
+export function isFullEndpointUrl(url: string): boolean {
+  const path = urlPathOf(url);
+  if (!path) return false; // 裸域名 → 需要补路径
+  if (KNOWN_ENDPOINT_TAILS.some((t) => path.endsWith(t))) return true;
+  if (endsWithApiVersion(path)) return false; // /v1 /api/v3 … → 视为 base
+  return true; // 其它具体路径 → 用户明确指定了端点，原样使用
+}
+
+/**
  * 根据 baseUrl 解析视频生成接口的真实 URL。
  * 不同厂商的视频接口路径并不统一：
  *  - 七牛云 AI GC（api.qnaigc.com）：任务式接口 POST /v1/videos（再轮询 /v1/videos/:id）
@@ -64,13 +117,15 @@ function normalizeBaseUrl(url: string): string {
  */
 function videoEndpointUrl(baseUrl: string): string {
   const base = normalizeBaseUrl(baseUrl);
+  // 用户已经填到具体 endpoint（如 .../api/v3/contents/generations/tasks）→ 原样使用
+  if (isFullEndpointUrl(base)) return base;
   try {
     const host = new URL(base).host;
     // 七牛云 AI GC 与 agnes 均为任务式视频接口：POST /v1/videos（再轮询 /v1/videos/:id）
     if (host === 'api.qnaigc.com' || host === 'apihub.agnes-ai.com') return `${base}/videos`;
     // 火山方舟(Ark) 视频生成：任务式接口 POST /api/v3/contents/generations/tasks
     if (host.includes('volces.com')) {
-      return base.includes('/contents/generations/tasks') ? base : `${base}/contents/generations/tasks`;
+      return `${base}/contents/generations/tasks`;
     }
   } catch {
     /* ignore */
@@ -82,15 +137,11 @@ function videoEndpointUrl(baseUrl: string): string {
 /**
  * 根据 baseUrl 解析图片生成接口的真实 URL。
  * 七牛云 AI GC：POST /v1/images/generations；其余按 OpenAI 兼容 /images/generations。
+ * 用户已填到具体 endpoint 时原样使用。
  */
 function imageEndpointUrl(baseUrl: string): string {
   const base = normalizeBaseUrl(baseUrl);
-  try {
-    const host = new URL(base).host;
-    if (host === 'api.qnaigc.com') return `${base}/images/generations`;
-  } catch {
-    /* ignore */
-  }
+  if (isFullEndpointUrl(base)) return base;
   return `${base}/images/generations`;
 }
 
@@ -373,18 +424,20 @@ interface LLMOptions {
  * 例如：
  *   - https://api.openai.com/v1           → https://api.openai.com/v1/chat/completions
  *   - https://ark.cn-beijing.volces.com/api/v3 → https://ark.cn-beijing.volces.com/api/v3/chat/completions
+ *   - https://xxx/v1/chat/completions     → 原样（用户已填到 endpoint）
+ *   - https://ark.../api/v3/contents/generations/tasks → 原样（不加后缀！）
  */
 function chatCompletionsUrl(baseUrl: string): string {
-  const normalized = (baseUrl || '').trim().replace(/\/+$/, '');
-  // 已经是完整 chat completions 端点
-  if (normalized.toLowerCase().endsWith('/chat/completions')) {
+  const normalized = normalizeBaseUrl(baseUrl);
+  // 用户已经填到具体 endpoint：原样使用，绝不追加后缀
+  if (isFullEndpointUrl(normalized)) {
     return normalized;
   }
-  // 已包含 /v1 /v2 /v3 /v4 等版本路径：直接追加 chat/completions
-  if (/\/v\d+$/i.test(normalized)) {
+  // base 以版本号结尾（/v1、/api/v3）：补 chat/completions
+  if (endsWithApiVersion(urlPathOf(normalized))) {
     return `${normalized}/chat/completions`;
   }
-  // 默认按 OpenAI 规范补 /v1
+  // 裸域名：默认按 OpenAI 规范补 /v1
   return `${normalized}/v1/chat/completions`;
 }
 
@@ -423,8 +476,9 @@ export function detectProviderType(baseUrl: string, model?: string): LlmCapabili
   const m = (model || '').toLowerCase();
 
   // URL path 优先级最高（用户明确把专用 endpoint 填进来）
-  if (u.includes('/images/generations')) return 'image';
-  if (u.includes('/videos/generations') || u.includes('/video/generations')) return 'video';
+  if (u.includes('/images/generations') || u.includes('/images/edits')) return 'image';
+  // 生成式任务端点：/contents/generations/tasks（火山方舟 视频/3D 统一任务接口）、/videos/generations …
+  if (u.includes('/videos/generations') || u.includes('/video/generations') || u.includes('/generations/tasks')) return 'video';
   if (u.includes('/layout_parsing') || u.includes('/ocr')) return 'ocr';
   if (u.includes('/embeddings')) return 'embedding';
   if (u.includes('/audio/speech') || u.includes('/audio/transcriptions')) return 'audio';
@@ -440,10 +494,13 @@ export function detectProviderType(baseUrl: string, model?: string): LlmCapabili
   return 'chat';
 }
 
-/** 火山方舟 REST 的 chat 端点：baseUrl 通常已带 /api/v3，补 /chat/completions 即可。 */
+/**
+ * 火山方舟 REST 的 chat 端点：baseUrl 通常已带 /api/v3，补 /chat/completions 即可。
+ * ⚠️ 若用户填的是任务式端点（/api/v3/contents/generations/tasks 等），**原样请求不加后缀**。
+ */
 function volcanoRestChatUrl(baseUrl: string): string {
-  const normalized = (baseUrl || '').trim().replace(/\/+$/, '');
-  if (normalized.toLowerCase().endsWith('/chat/completions')) return normalized;
+  const normalized = normalizeBaseUrl(baseUrl);
+  if (isFullEndpointUrl(normalized)) return normalized;
   return `${normalized}/chat/completions`;
 }
 
@@ -1107,6 +1164,25 @@ async function probeEmbeddingProvider(provider: LlmProvider): Promise<{ success:
 }
 
 /**
+ * 解析「测试 / 调用」实际会请求的 URL（用于在「测试结果」里回显，方便核对地址有没有被改）。
+ * 一律以用户填写的 baseUrl 为准，只在裸域名 / 版本号结尾时才补默认后缀。
+ */
+export function resolveProbeUrl(baseUrl: string, model?: string, type?: string): string {
+  const capability = detectProviderType(baseUrl, model);
+  switch (capability) {
+    case 'image':
+      return imageEndpointUrl(baseUrl);
+    case 'video':
+      return videoEndpointUrl(baseUrl);
+    case 'embedding':
+    case 'ocr':
+      return normalizeBaseUrl(baseUrl);
+    default:
+      return type === 'volcano-rest' ? volcanoRestChatUrl(baseUrl) : chatCompletionsUrl(baseUrl);
+  }
+}
+
+/**
  * 诊断版翻译测试：返回原始响应，便于排查模型不返回 JSON 等问题。
  * 可传入指定 provider 进行单平台测试；不传则使用当前全部配置（failover 模式）。
  * 已按 provider 能力自动分流：chat 走 /chat/completions，image/video/ocr/embedding 用对应端点探测。
@@ -1119,23 +1195,27 @@ export async function testLlmTranslation(
   sample?: Record<string, string>;
   raw?: string;
   error?: string;
+  /** 实际请求的地址（回显给用户核对，证明没被追加后缀） */
+  url?: string;
 }> {
   const resolved = provider || getLlmConfig();
   if (!resolved) return { success: false, error: 'LLM 未配置' };
 
   const capability = detectProviderType(resolved.baseUrl, resolved.model);
+  const testedUrl = resolveProbeUrl(resolved.baseUrl, resolved.model, resolved.type);
+  const withUrl = <T extends { success: boolean }>(r: T) => ({ ...r, url: testedUrl });
 
   switch (capability) {
     case 'image':
-      return probeImageProvider(resolved);
+      return withUrl(await probeImageProvider(resolved));
     case 'video':
-      return probeVideoProvider(resolved);
+      return withUrl(await probeVideoProvider(resolved));
     case 'ocr':
-      return probeOcrProvider(resolved);
+      return withUrl(await probeOcrProvider(resolved));
     case 'embedding':
-      return probeEmbeddingProvider(resolved);
+      return withUrl(await probeEmbeddingProvider(resolved));
     case 'audio':
-      return { success: false, error: '音频类模型暂不支持在 ml-product-finder 中使用，如需使用请单独配置 chat 或 image 平台' };
+      return withUrl({ success: false, error: '音频类模型暂不支持在 ml-product-finder 中使用，如需使用请单独配置 chat 或 image 平台' });
     default:
       break;
   }
@@ -1162,11 +1242,11 @@ export async function testLlmTranslation(
     );
     const map = extractJsonObject(raw) as Record<string, string> | undefined;
     if (!map) {
-      return {
+      return withUrl({
         success: false,
         raw,
         error: `模型有响应，但无法解析为 JSON。请检查 model 名称是否正确，或换用更新/更强的模型。原始响应：${raw.slice(0, 500)}`,
-      };
+      });
     }
     const result: Record<string, string> = {};
     for (const k of keywords) {
@@ -1175,19 +1255,19 @@ export async function testLlmTranslation(
       }
     }
     if (Object.keys(result).length === 0) {
-      return {
+      return withUrl({
         success: false,
         raw,
         map,
         error: 'JSON 已解析，但未找到预期关键词的翻译。可能是 model 返回了错误的键名或空值。',
-      };
+      });
     }
-    return { success: true, sample: result, raw };
+    return withUrl({ success: true, sample: result, raw });
   } catch (err: any) {
     let error = err?.message || String(err);
     const code = err?.cause?.code || err?.code;
     if (code) error += ` (网络/错误码: ${code})`;
-    return { success: false, error, raw: err?.raw };
+    return withUrl({ success: false, error, raw: err?.raw });
   }
 }
 
@@ -1195,7 +1275,7 @@ export async function testLlmTranslation(
  * 简单探测后端能否访问到 LLM 服务地址（只看网络通不通，不看鉴权）。
  * 用于给前端更准确的诊断：是网络/代理/DNS 问题，还是 Key/Model 问题。
  */
-export async function probeLlmReachability(baseUrl: string, timeoutMs = 8000, model?: string): Promise<{
+export async function probeLlmReachability(baseUrl: string, timeoutMs = 8000, model?: string, type?: string): Promise<{
   ok: boolean;
   url: string;
   capability?: LlmCapability;
@@ -1203,15 +1283,8 @@ export async function probeLlmReachability(baseUrl: string, timeoutMs = 8000, mo
   error?: string;
 }> {
   const capability = detectProviderType(baseUrl, model);
-  // 专用端点（图片/视频/OCR/嵌入等）直接以其真实 URL 探测，不要拼 /chat/completions
-  const url =
-    capability === 'chat'
-      ? chatCompletionsUrl(baseUrl)
-      : capability === 'video'
-        ? videoEndpointUrl(baseUrl)
-        : capability === 'image'
-          ? imageEndpointUrl(baseUrl)
-          : normalizeBaseUrl(baseUrl);
+  // 一律按用户填写的地址解析：专用端点原样探测，只有裸域名/版本号结尾才补后缀。
+  const url = resolveProbeUrl(baseUrl, model, type);
   try {
     // 用 OPTIONS 探测端点：网络层可达即可，不需要鉴权。
     // 大多数厂商会返回 401/404，但 DNS/TCP 通了；若返回 2xx 也视为可达。

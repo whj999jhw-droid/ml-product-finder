@@ -625,6 +625,10 @@ function AiConfigPanel() {
             />
             <div className="text-xs text-gray-400 mt-1">
               填平台名后失焦会自动补全；若不准可手动修改。对话模型填 chat 入口；图片/视频/OCR 填专用入口。
+              <br />
+              测试与调用一律<b>按你填写的地址原样请求</b>：只有填到裸域名或 /v1、/api/v3 这类版本号结尾时，
+              才会自动补 <code>/chat/completions</code>；已经填到具体接口（如 <code>/v1/chat/completions</code>、
+              <code>/api/v3/contents/generations/tasks</code>）的地址不会被追加任何后缀。
             </div>
           </div>
           <div>
@@ -710,6 +714,11 @@ function AiConfigPanel() {
                     )}
                   </div>
                   <div className="text-gray-600 mt-1">{r.message || ''}</div>
+                  {r.url && (
+                    <div className="text-gray-500 mt-1 break-all">
+                      请求地址：<code className="text-[11px]">{r.url}</code>
+                    </div>
+                  )}
                   {r.sample && <div className="text-gray-500 mt-1">示例：{JSON.stringify(r.sample)}</div>}
                 </div>
               ))}
