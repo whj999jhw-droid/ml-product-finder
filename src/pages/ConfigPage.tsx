@@ -97,6 +97,18 @@ function loadPersistedTest(): { testResult: any; showTestResult: boolean; tested
 }
 const TYPE_LABELS: Record<string, string> = { openai: 'OpenAI 兼容', 'volcano-rest': '火山 REST', 'volcano-sdk': '火山 SDK' };
 
+// 置顶行持久化：保存「被置顶的平台 key（baseUrl|type）」的数组。
+// 置顶 = 排在列表/配置文件最前面，运行期 failover 与其它程序调用都按这个顺序取 AI。
+const LLM_PINNED_STORAGE_KEY = 'ml_ai_config_pinned';
+function loadPinnedKeys(): string[] {
+  try {
+    const arr = JSON.parse(localStorage.getItem(LLM_PINNED_STORAGE_KEY) || '[]');
+    return Array.isArray(arr) ? arr.filter((k: any) => typeof k === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 /** 根据平台名 + 模型名推断 endpoint（best-effort，已知平台自动补，未知不覆盖） */
 function inferEndpoint(name: string, models: string, type: string): string | null {
   const n = (name || '').toLowerCase();
@@ -185,6 +197,56 @@ function AiConfigPanel() {
 
   const rowKeyOf = (p: LlmProviderForm) => `${(p.baseUrl || '').trim()}|${p.type || 'openai'}`;
 
+  // ---- 置顶 / 手动排序：列表顺序 = 调用顺序（写入配置文件，其它程序按同一顺序调用）----
+  const [pinnedKeys, setPinnedKeys] = useState<string[]>(() => loadPinnedKeys());
+  const [sorting, setSorting] = useState(false);
+  useEffect(() => {
+    try {
+      localStorage.setItem(LLM_PINNED_STORAGE_KEY, JSON.stringify(pinnedKeys));
+    } catch { /* ignore */ }
+  }, [pinnedKeys]);
+
+  const isPinned = (p: LlmProviderForm) => pinnedKeys.includes(rowKeyOf(p));
+
+  /** 置顶/取消置顶（置顶 = 立刻移到第一位并保存配置文件） */
+  const handlePinRow = async (idx: number, pin: boolean) => {
+    const row = providers[idx];
+    if (!row) return;
+    const key = rowKeyOf(row);
+    if (!pin) {
+      // 取消置顶只去掉标记，位置不动（顺序仍以当前列表为准）
+      setPinnedKeys(pinnedKeys.filter((k) => k !== key));
+      return;
+    }
+    const next = [...providers];
+    next.splice(idx, 1);
+    next.unshift(row); // 置顶 = 移到第一位
+    setSorting(true);
+    try {
+      if (await doSave(next)) setPinnedKeys([key, ...pinnedKeys.filter((k) => k !== key)]);
+    } finally {
+      setSorting(false);
+    }
+  };
+
+  /** 上移 / 下移一位（全局顺序，跨分页也生效）；被手动挪动的置顶行会自动取消置顶 */
+  const handleMoveRow = async (idx: number, dir: -1 | 1) => {
+    const target = idx + dir;
+    if (idx < 0 || target < 0 || target >= providers.length) return;
+    const next = [...providers];
+    const [row] = next.splice(idx, 1);
+    next.splice(target, 0, row);
+    const movedKey = rowKeyOf(row);
+    setSorting(true);
+    try {
+      if (await doSave(next)) {
+        if (pinnedKeys.includes(movedKey)) setPinnedKeys(pinnedKeys.filter((k) => k !== movedKey));
+      }
+    } finally {
+      setSorting(false);
+    }
+  };
+
   const loadStatus = async () => {
     try {
       const res = await fetch('/api/ml/ai-config/status');
@@ -224,6 +286,8 @@ function AiConfigPanel() {
         }
       }
       setProviders(Array.from(byBase.values()));
+      // 清理已删除平台的置顶标记（顺序本身以配置文件为准，标记只用于显示与快捷置顶）
+      setPinnedKeys((prev) => prev.filter((k) => Array.from(byBase.values()).some((r) => rowKeyOf(r) === k)));
       setSavedKeys(new Set(raw.map((p: any) => `${(p.baseUrl || '').trim()}|${p.type || 'openai'}`)));
       setPage(1);
     } catch {
@@ -284,7 +348,7 @@ function AiConfigPanel() {
     closeDialog();
   };
 
-  const doSave = async (list: LlmProviderForm[]) => {
+  const doSave = async (list: LlmProviderForm[]): Promise<boolean> => {
     setSaving(true);
     try {
       const res = await fetch('/api/ml/llm-config', {
@@ -298,11 +362,14 @@ function AiConfigPanel() {
         setProviders(list);
         loadStatus();
         setTestResult(null);
+        return true;
       } else {
         MessagePlugin.error(data.message || '保存失败');
+        return false;
       }
     } catch (e: any) {
       MessagePlugin.error(e?.message || '网络错误');
+      return false;
     } finally {
       setSaving(false);
     }
@@ -405,6 +472,31 @@ function AiConfigPanel() {
   };
 
   const columns: PrimaryTableCol<LlmProviderForm>[] = [
+    {
+      colKey: 'order',
+      title: '排序',
+      width: 132,
+      cell: ({ row }) => {
+        const idx = providers.indexOf(row);
+        const pinned = isPinned(row);
+        return (
+          <div className="flex items-center gap-0.5">
+            <Button
+              size="small"
+              variant={pinned ? 'outline' : 'text'}
+              theme={pinned ? 'warning' : 'default'}
+              disabled={sorting}
+              title={pinned ? '取消置顶（位置不变）' : '置顶：移到第一位并写入配置文件'}
+              onClick={() => handlePinRow(idx, !pinned)}
+            >
+              {pinned ? '📌 已置顶' : '置顶'}
+            </Button>
+            <Button size="small" variant="text" disabled={sorting || idx <= 0} title="上移" onClick={() => handleMoveRow(idx, -1)}>↑</Button>
+            <Button size="small" variant="text" disabled={sorting || idx >= providers.length - 1} title="下移" onClick={() => handleMoveRow(idx, 1)}>↓</Button>
+          </div>
+        );
+      },
+    },
     { colKey: 'name', title: '平台名', width: 160, cell: ({ row }) => <span className="font-medium">{row.name}</span> },
     {
       colKey: 'baseUrl',
@@ -499,6 +591,9 @@ function AiConfigPanel() {
       <Card title={`LLM 平台（共 ${total} 个，多平台自动 failover）`} headerBordered>
         <div className="flex items-center justify-between mb-3">
           <div className="text-xs text-gray-500">
+            <b>列表顺序 = 调用顺序</b>（failover 从上到下）。点「置顶」把平台移到第一位，
+            「↑/↓」手动排序，改动会<b>立即写入配置文件</b>，其它程序/插件也按同一顺序调用 AI。
+            <br />
             图片/视频/OCR 模型请填写厂商对应的专用 endpoint，否则会被识别但测试 404。
           </div>
           <div className="flex items-center gap-2">
