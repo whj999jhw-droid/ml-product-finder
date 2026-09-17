@@ -1181,17 +1181,37 @@ miaoshouRouter.get('/video/candidates', async (req, res) => {
   if (!store) return res.status(404).json({ success: false, error: '店铺不存在' });
   try {
     const idx = await ensureIndex(storeId);
-    const { items, total, page, pageSize } = listItems(storeId, {
-      status: 'active',
-      q: (req.query.q as string) || '',
-      page: Number(req.query.page) || 1,
-      pageSize: Number(req.query.pageSize) || 20,
-    });
+    const qRaw = String(req.query.q || '').trim();
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const pageSize = Math.min(Math.max(Number(req.query.pageSize) || 20, 1), 200);
+    const linkFilter = String(req.query.link || 'any');
     const li = getLinkIndex();
     const vrecs = getVideoRecords();
-    const linkFilter = String(req.query.link || 'any');
-    const build = (rows: any[]) =>
-      rows.map((row) => {
+
+    // 一次取全量「真实在售」（status=active 已由索引按 ML 搜索接口的 status=active 判定，
+    // 不再用 CBT 商品自报的 status —— 后者常年是 active，会把已被暂停的商品也带出来）
+    const allRows = listItems(storeId, { status: 'active', page: 1, pageSize: 20000 }).items;
+
+    // 同款去重：同一件 1688 商品被重复上架时 SELLER_SKU 完全相同（实测
+    // CBT5243407174 / CBT4346668443 的 SKU 都是 639067677628_1014#Green Pliers），
+    // 生成视频也是同一支 → 列表只保留最新一条（allRows 已按 dateCreated 倒序），
+    // 其余条数记进 dupCount，前端显示「同款重复 N」而不是静默丢弃。
+    const firstByDup = new Map<string, string>();
+    const dupCount = new Map<string, number>();
+    const dupKeyOf = (row: any) => String(row?.dupKey || `id:${row?.id}`);
+    for (const row of allRows) {
+      const key = dupKeyOf(row);
+      if (firstByDup.has(key)) {
+        dupCount.set(key, (dupCount.get(key) || 1) + 1);
+        continue;
+      }
+      firstByDup.set(key, row.id);
+      dupCount.set(key, 1);
+    }
+    const dedupRows = allRows.filter((r) => firstByDup.get(dupKeyOf(r)) === r.id);
+    const mergedAway = allRows.length - dedupRows.length;
+
+    const decorate = (row: any) => {
       const ctx = itemVideoContext(storeId, row, li);
       const vrec = vrecs[`${storeId}|${ctx.recordKey}`] || vrecs[`${storeId}|${row.id}`];
       return {
@@ -1202,12 +1222,16 @@ miaoshouRouter.get('/video/candidates', async (req, res) => {
         currencyId: row.currencyId,
         status: row.status,
         soldQuantity: row.soldQuantity,
+        /** 卖家 SKU（取自 SELLER_SKU 属性；ML 商品没有 seller_custom_field） */
+        sellerSku: row.sellerSku || null,
         permalink: itemPermalink(row),
         miaoshouDetailId: ctx.detailId || null,
         recordKey: ctx.recordKey,
         hasBackup: ctx.hasBackup,
         expectedSource: ctx.expectedSource,
         detailLink: ctx.detailLink,
+        /** 同款重复链接数：>1 表示这件商品在美客多被重复上架（同一 SKU 多个 listing） */
+        dupCount: dupCount.get(dupKeyOf(row)) || 1,
         video: vrec
           ? {
               status: vrec.status,
@@ -1221,32 +1245,38 @@ miaoshouRouter.get('/video/candidates', async (req, res) => {
             }
           : null,
       };
-    });
+    };
 
-    // 来源统计 + 按来源筛选（source=能取到妙手/1688 源视频；ai=只能靠 AI 图生视频）
-    // ML 商品没有 SKU，源视频只能靠「妙手发布记录标题前缀」配对；未配到的只能走 AI 图生视频。
-    const all = listItems(storeId, {
-      status: 'active',
-      q: (req.query.q as string) || '',
-      page: 1,
-      pageSize: 20000,
-    }).items;
-    const allCtx = build(all as any[]);
+    // 全量（未搜索、未按来源筛选）→ 统计口径稳定，下拉框里的数字不随搜索跳变
+    const allCtx = dedupRows.map(decorate);
     const linkCounts = {
       source: allCtx.filter((o: any) => o.miaoshouDetailId).length,
       ai: allCtx.filter((o: any) => !o.miaoshouDetailId).length,
     };
-    let totalEff = total;
-    let out = build(items as any[]);
+
+    // 搜索：标题 / 商品ID / 卖家SKU / 妙手 detailId。
+    // 之所以在这里做而不是只靠 listItems：妙手 detailId 不在商品索引里，只在配对结果里。
+    const q = qRaw.toLowerCase();
+    let list: any[] = allCtx;
+    if (q) {
+      list = allCtx.filter(
+        (o: any) =>
+          o.title.toLowerCase().includes(q) ||
+          o.itemId.toLowerCase().includes(q) ||
+          String(o.sellerSku || '').toLowerCase().includes(q) ||
+          String(o.miaoshouDetailId || '').includes(q) ||
+          String(o.recordKey || '').toLowerCase().includes(q),
+      );
+    }
+
     if (linkFilter === 'source' || linkFilter === 'ai') {
-      const filtered = allCtx.filter((o: any) =>
+      list = list.filter((o: any) =>
         linkFilter === 'source' ? !!o.miaoshouDetailId : !o.miaoshouDetailId,
       );
-      totalEff = filtered.length;
-      const ps = Number(req.query.pageSize) || 20;
-      const pg = Number(req.query.page) || 1;
-      out = filtered.slice((pg - 1) * ps, pg * ps) as any;
     }
+
+    const totalEff = list.length;
+    const out = list.slice((page - 1) * pageSize, page * pageSize) as any[];
 
     // 可选：对当前页逐条查 ML Clips 真实审核状态（页面级，几十条，可接受）
     let clipError = '';
@@ -1282,6 +1312,9 @@ miaoshouRouter.get('/video/candidates', async (req, res) => {
       page,
       pageSize,
       linkCounts,
+      /** 去重前/去重后的在售条数（诊断用；mergedAway>0 说明存在重复上架） */
+      rawTotal: allRows.length,
+      mergedAway,
       clipError,
       /** 当前配置里可用于 AI 图生视频的平台（空数组=没有配视频模型，源视频缺失时必然失败） */
       aiProviders: listVideoProviders(),

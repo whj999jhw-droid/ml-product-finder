@@ -60,7 +60,11 @@ export interface StoreItemRisk {
 export interface StoreItemRow {
   id: string;
   title: string;
-  /** active / paused / closed / under_review / inactive / not_yet_active */
+  /**
+   * 真实售卖状态：由 `/users/{id}/items/search?status=` 过滤得出（active / paused）。
+   * ⚠️ 不能用 `/items?ids=` 返回的 status —— 实测它对本店 3000+ 件常年全是 active，
+   * 导致「已被美客多暂停」的商品仍在列表里显示（用户已反馈）。
+   */
   status: string;
   subStatus: string[];
   price: number;
@@ -77,9 +81,22 @@ export interface StoreItemRow {
   pictures: string[];
   /** 各站点的本地 item id（如 MLM5707581750），用于拼真实商品链接 */
   siteItemIds: string[];
+  /** ML 商品页链接（CBT 商品自带；批量接口拿不到 marketplace_items，只能靠它） */
+  mlPermalink?: string;
   dateCreated?: string;
   lastUpdated?: string;
   risk: StoreItemRisk;
+  /**
+   * CBT 商品自身返回的 status。
+   * ⚠️ CBT 子母商品模式下它常年是 active，**不能**当作「是否在售」依据，
+   * 真正的售卖状态看下面的 `status`（由搜索接口 status= 过滤得出）。
+   */
+  cbtStatus?: string;
+  /**
+   * 同款去重键：优先 SELLER_SKU（= 1688 商品ID_规格），缺失时退化为规范化标题前缀。
+   * 实测同一件 1688 商品被重复上架时 SELLER_SKU 完全相同，可精准识别重复 listing。
+   */
+  dupKey?: string;
   /** 关联到的妙手采集箱 detailId（用于找 1688 源视频；未关联为 undefined） */
   miaoshouDetailId?: string;
 }
@@ -233,7 +250,10 @@ const ITEM_TLD: Record<string, string> = {
 
 const BATCH_ATTRS =
   'id,title,status,sub_status,price,currency_id,available_quantity,sold_quantity,condition,' +
-  'listing_type_id,category_id,seller_custom_field,thumbnail,pictures,attributes,date_created,last_updated';
+  'listing_type_id,category_id,seller_custom_field,thumbnail,pictures,attributes,date_created,last_updated,' +
+  // marketplace_items 批量接口取不到（实测请求了也不返回），
+  // 所以商品真实链接改用 CBT 商品自带的 permalink 字段
+  'permalink';
 
 /** 并发池 */
 async function pool<T, R>(items: T[], limit: number, fn: (item: T, idx: number) => Promise<R>): Promise<R[]> {
@@ -272,16 +292,68 @@ async function fetchAllItemIds(store: Store): Promise<string[]> {
   return ids;
 }
 
-function toRow(store: Store, raw: any): StoreItemRow {
+/**
+ * 按售卖状态拉全量 item id 集合。
+ * `/users/{id}/items/search?status=active|paused` 是 ML 判定的**真实售卖状态**
+ * （会把已被平台暂停/下架的商品排除出 active），这是 `/items?ids=` 拿不到的。
+ */
+async function fetchIdSetByStatus(store: Store, status: string): Promise<Set<string>> {
+  const set = new Set<string>();
+  // ⚠️ 必须用 search_type=scan + scroll_id 翻页：
+  //    ML 的普通分页有 `offset + limit ≤ 1000` 硬限制，本店 3000+ 件，
+  //    直接 offset 翻到 1000 就会 400 `Invalid limit and offset values`。
+  // 实测（瑞桥万汇）：全量 scan 3799 件 = scan(status=active) 3796 + scan(status=paused) 3，
+  //    两个集合互不相交、并集等于全集 → 这套口径可以放心用来判「是否还在卖」。
+  let scrollId = '';
+  for (let page = 0; page < 200; page++) {
+    const qs = scrollId
+      ? `status=${status}&search_type=scan&scroll_id=${encodeURIComponent(scrollId)}&limit=100`
+      : `status=${status}&search_type=scan&limit=100`;
+    const d: any = await storeApiGet(store, `/users/${store.mlUserId}/items/search?${qs}`, 2);
+    const rs: string[] = d?.results || [];
+    for (const id of rs) set.add(id);
+    scrollId = d?.scroll_id || '';
+    if (!scrollId || !rs.length) break;
+  }
+  return set;
+}
+
+/** 同款去重键：SELLER_SKU 优先；缺失时用规范化标题前缀（NFKD+小写+非字母数字折叠） */
+export function makeDupKey(sellerSku: string | undefined, title: string): string {
+  const sku = String(sellerSku || '').trim().toLowerCase();
+  if (sku) return `sku:${sku}`;
+  const t = String(title || '')
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .slice(0, 30);
+  return t ? `ttl:${t}` : '';
+}
+
+function toRow(store: Store, raw: any, statusSets?: { active: Set<string>; paused: Set<string> }): StoreItemRow {
   const attrs: Array<{ id?: string; name?: string; value_name?: string }> = raw?.attributes || [];
   const attrVal = (id: string) =>
     attrs.find((a) => String(a?.id || '').toUpperCase() === id)?.value_name || undefined;
   const pictures = (raw?.pictures || []).map((p: any) => p?.secure_url || p?.url).filter(Boolean);
   const siteItemIds = (raw?.marketplace_items || []).map((m: any) => m?.item_id).filter(Boolean);
+  const id = String(raw?.id || '');
+  const title = String(raw?.title || '');
+  const rawStatus = String(raw?.status || '');
+  // ⚠️ SKU 藏在 attributes 的 SELLER_SKU 里，seller_custom_field 实测全为空！
+  // 之前只读 seller_custom_field → 页面按 SKU 搜索永远搜不到（用户已反馈「搜索没反应」）。
+  const sellerSku = attrVal('SELLER_SKU') || raw?.seller_custom_field || undefined;
+  // 用搜索接口的推算状态覆盖 CBT 自报状态（后者常年失真）
+  let status = rawStatus;
+  if (statusSets) {
+    if (statusSets.active.has(id)) status = 'active';
+    else if (statusSets.paused.has(id)) status = 'paused';
+  }
   return {
-    id: String(raw?.id || ''),
-    title: String(raw?.title || ''),
-    status: String(raw?.status || ''),
+    id,
+    title,
+    status,
+    cbtStatus: rawStatus,
     subStatus: Array.isArray(raw?.sub_status) ? raw.sub_status : [],
     price: Number(raw?.price) || 0,
     currencyId: String(raw?.currency_id || 'USD'),
@@ -290,15 +362,17 @@ function toRow(store: Store, raw: any): StoreItemRow {
     condition: raw?.condition,
     listingTypeId: raw?.listing_type_id,
     categoryId: raw?.category_id,
-    sellerSku: raw?.seller_custom_field || undefined,
+    sellerSku,
+    dupKey: makeDupKey(sellerSku, title),
     brand: attrVal('BRAND'),
     model: attrVal('MODEL'),
     thumbnail: String(raw?.thumbnail || pictures[0] || ''),
     pictures: pictures.slice(0, 10),
     siteItemIds,
+    mlPermalink: raw?.permalink || undefined,
     dateCreated: raw?.date_created,
     lastUpdated: raw?.last_updated,
-    risk: scanItemRisk(String(raw?.title || ''), attrs, store.site),
+    risk: scanItemRisk(title, attrs, store.site),
   };
 }
 
@@ -353,6 +427,18 @@ export async function buildIndex(
   cache.stores[storeId] = shell;
   try {
     const ids = await fetchAllItemIds(store);
+    // 真实售卖状态集合（active/paused）—— 决定视频生成列表「哪些商品还在卖」
+    let statusSets: { active: Set<string>; paused: Set<string> } | undefined;
+    try {
+      const [act, pau] = await Promise.all([
+        fetchIdSetByStatus(store, 'active'),
+        fetchIdSetByStatus(store, 'paused'),
+      ]);
+      statusSets = { active: act, paused: pau };
+      console.log(`[StoreItems] ${store.nickname} 售卖状态：active ${act.size} / paused ${pau.size}`);
+    } catch (e: any) {
+      console.warn(`[StoreItems] 售卖状态拉取失败（回退用 CBT 自报状态）: ${e?.message?.slice(0, 120)}`);
+    }
     shell.progress = { done: 0, total: ids.length };
     const batches: string[][] = [];
     for (let i = 0; i < ids.length; i += 20) batches.push(ids.slice(i, i + 20));
@@ -368,7 +454,7 @@ export async function buildIndex(
         );
         for (const entry of Array.isArray(resp) ? resp : []) {
           const body = entry?.body || entry;
-          if (body?.id) rows.push(toRow(store, body));
+          if (body?.id) rows.push(toRow(store, body, statusSets));
         }
       } catch (e: any) {
         console.warn(`[StoreItems] 批次拉取失败（${batch.length} 件）: ${e?.message?.slice(0, 120)}`);
@@ -445,7 +531,8 @@ export function listItems(storeId: string, f: ListFilter = {}): {
         r.id.toLowerCase().includes(q) ||
         (r.sellerSku || '').toLowerCase().includes(q) ||
         (r.brand || '').toLowerCase().includes(q) ||
-        (r.model || '').toLowerCase().includes(q),
+        (r.model || '').toLowerCase().includes(q) ||
+        (r.categoryId || '').toLowerCase() === q,
     );
   }
 
@@ -456,11 +543,14 @@ export function listItems(storeId: string, f: ListFilter = {}): {
 }
 
 /** 商品真实链接：CBT 父 ID 推不出站点域名，必须用 marketplace_items 里的本地 item id */
-export function itemPermalink(row: Pick<StoreItemRow, 'siteItemIds'>): string {
+export function itemPermalink(row: Pick<StoreItemRow, 'siteItemIds' | 'mlPermalink'>): string {
   const sid = (row.siteItemIds || [])[0];
-  if (!sid) return '';
-  const tld = ITEM_TLD[sid.slice(0, 3)] || 'com.mx';
-  return `https://www.mercadolibre.${tld}/p/${sid}`;
+  if (sid) {
+    const tld = ITEM_TLD[sid.slice(0, 3)] || 'com.mx';
+    return `https://www.mercadolibre.${tld}/p/${sid}`;
+  }
+  // 批量接口不返回 marketplace_items，退用 CBT 商品自带的 permalink
+  return row.mlPermalink || '';
 }
 
 // ============ 单件全字段详情 ============
@@ -512,7 +602,11 @@ export async function getItemFullDetail(storeId: string, itemId: string): Promis
     errors.push(`/description: ${e?.message?.slice(0, 120)}`);
   }
 
-  const row = raw ? toRow(store, { ...raw, marketplace_items: marketplaceItems }) : cached;
+  const row = raw ? toRow(store, { ...raw, marketplace_items: marketplaceItems }, {
+    // 详情页也要用真实售卖状态，而不是 CBT 自报的 active
+    active: new Set(cached?.status === 'active' && cached ? [String(raw?.id || itemId)] : []),
+    paused: new Set(cached?.status && cached.status !== 'active' ? [String(raw?.id || itemId)] : []),
+  }) : cached;
   const risk = row?.risk || scanItemRisk('', [], store.site);
 
   const suggested = row

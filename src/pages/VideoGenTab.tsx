@@ -80,6 +80,10 @@ interface Candidate {
   hasBackup: boolean;
   expectedSource: 'backup' | 'source' | 'ai';
   detailLink?: 'record' | 'title' | 'none';
+  /** 卖家 SKU（来自 SELLER_SKU 属性；ML 商品没有 seller_custom_field） */
+  sellerSku?: string | null;
+  /** 同款重复链接数：>1 表示这件商品在美客多被重复上架，列表只展示其中一条 */
+  dupCount?: number;
   video: CandidateVideo | null;
   clip?: ClipInfo;
 }
@@ -198,6 +202,7 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
   const [items, setItems] = useState<Candidate[]>([]);
   const [total, setTotal] = useState(0);
   const [linkCounts, setLinkCounts] = useState<{ source: number; ai: number } | null>(null);
+  const [mergedAway, setMergedAway] = useState(0);
   const [building, setBuilding] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [aiProviders, setAiProviders] = useState<Array<{ name: string; model: string; platform: string }>>([]);
@@ -239,6 +244,7 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
         setItems(d.items || []);
         setTotal(d.total || 0);
         setLinkCounts(d.linkCounts || null);
+        setMergedAway(Number(d.mergedAway) || 0);
         setBuilding(!!d.building);
         setProgress(d.progress || { done: 0, total: 0 });
         setAiProviders(d.aiProviders || []);
@@ -462,6 +468,21 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
             <Tag size="small" variant="light" theme="primary" title={SOURCE_HINT[row.expectedSource]}>
               预期来源：{SOURCE_LABEL[row.expectedSource]}
             </Tag>
+            {(row.dupCount || 1) > 1 && (
+              <Tag
+                size="small"
+                variant="light"
+                theme="danger"
+                title={`同一件商品（SKU 相同）在美客多有 ${row.dupCount} 条重复链接，列表只展示最新一条；其余重复链接请到美客多后台处理`}
+              >
+                同款重复 {row.dupCount}
+              </Tag>
+            )}
+            {row.sellerSku && (
+              <span className="text-[11px] text-gray-400" title={`卖家 SKU：${row.sellerSku}`}>
+                SKU {row.sellerSku}
+              </span>
+            )}
             <span className="text-[11px] text-gray-400">
               {row.currencyId} {row.price} · 已售 {row.soldQuantity}
             </span>
@@ -574,13 +595,21 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
         />
         <Input
           value={query}
-          onChange={(v) => setQuery(String(v))}
+          onChange={(v) => {
+            const nv = String(v);
+            setQuery(nv);
+            // 清空输入框即恢复全量列表，不用再点一次「搜索」
+            if (!nv.trim() && qApplied) {
+              setQApplied('');
+              setPage(1);
+            }
+          }}
           onEnter={() => {
             setQApplied(query.trim());
             setPage(1);
           }}
-          placeholder="搜索标题 / 商品ID"
-          style={{ width: 190 }}
+          placeholder="搜索 标题 / 商品ID / SKU / 妙手ID"
+          style={{ width: 230 }}
           size="small"
           clearable
         />
@@ -639,6 +668,27 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
         </span>
       </div>
 
+      {/* 搜索生效提示 */}
+      {!!qApplied && (
+        <div className="mb-2 text-xs px-3 py-1.5 rounded border border-blue-200 bg-blue-50 text-blue-700 flex items-center gap-2">
+          <span>
+            正在按「<strong>{qApplied}</strong>」过滤：命中 <strong>{total}</strong> 件
+            （标题 / 商品ID / SKU / 妙手 detailId 都能搜）
+          </span>
+          <Button
+            size="small"
+            variant="text"
+            onClick={() => {
+              setQuery('');
+              setQApplied('');
+              setPage(1);
+            }}
+          >
+            清除
+          </Button>
+        </div>
+      )}
+
       {/* 来源配对说明 */}
       {linkCounts && (
         <div className="mb-2 text-xs text-gray-500">
@@ -649,8 +699,13 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
           <Tag size="small" theme="warning" variant="light" className="mr-1">
             只能 AI 生成 {linkCounts.ai}
           </Tag>
+          {mergedAway > 0 && (
+            <Tag size="small" variant="light" className="mr-1" title="同一 SKU 的多条重复链接已合并，只保留最新一条">
+              已合并同款重复 {mergedAway} 条
+            </Tag>
+          )}
           <span className="text-gray-400">
-            配对依据是妙手发布记录的标题前缀（ML 商品没有 SKU）。数量偏低时点「同步妙手发布记录」再刷新。
+            配对依据是妙手发布记录的标题前缀（SKU 取自 SELLER_SKU 属性）。数量偏低时点「同步妙手发布记录」再刷新。
           </span>
         </div>
       )}
@@ -749,7 +804,31 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
 
       {!loading && total === 0 && storeId && (
         <div className="text-center py-10 text-gray-400 text-sm">
-          该店铺没有符合条件的在售商品（或索引尚未建好，请点「刷新」）
+          {qApplied ? (
+            <>
+              没有匹配「<span className="text-gray-600">{qApplied}</span>」的在售商品。
+              <br />
+              <span className="text-xs">
+                支持：标题关键词 / 美客多商品ID（CBT…）/ 卖家 SKU（如 623739534720）/ 妙手 detailId。
+                确认商品没被美客多暂停、且索引已建好。
+              </span>
+              <div className="mt-3">
+                <Button
+                  size="small"
+                  variant="outline"
+                  onClick={() => {
+                    setQuery('');
+                    setQApplied('');
+                    setPage(1);
+                  }}
+                >
+                  清除搜索条件
+                </Button>
+              </div>
+            </>
+          ) : (
+            '该店铺没有在售商品（或索引尚未建好，请点「刷新」）'
+          )}
         </div>
       )}
 

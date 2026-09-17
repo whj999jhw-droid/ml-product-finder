@@ -297,18 +297,28 @@ export function MiaoshouBoxPage() {
   // 自动轮询：每 30 秒静默刷新一次列表，同步妙手侧最新的图片/SKU/属性修改
   // 后端缓存 TTL 10 秒，所以 30 秒轮询最多看到 10-30 秒前的数据，无需用户手动点刷新
   // 跳过条件：正在加载 / 正在发布 / 浏览器标签页不可见（省流量）
+  // 用 ref 持有可变值，避免轮询定时器被无关状态变化反复重建
+  const pollStateRef = useRef({ loading, publishLoading, activeTab, videoRefreshingAll, hasVideo: false });
+  pollStateRef.current = {
+    loading,
+    publishLoading,
+    activeTab,
+    videoRefreshingAll,
+    hasVideo: videoList.length > 0,
+  };
   useEffect(() => {
     const timer = setInterval(() => {
       if (document.hidden) return;
-      if (loading || publishLoading) return;
+      const ps = pollStateRef.current;
+      if (ps.loading || ps.publishLoading) return;
       loadBox(); // 不传 force，走后端 10 秒缓存；过期则实时拉妙手
       // 停留在「已发布」tab 时顺带刷新视频审核状态（ML 审核是异步的，需要自动跟进）
-      if (activeTab === 'published' && videoList.length > 0 && !videoRefreshingAll) {
+      if (ps.activeTab === 'published' && ps.hasVideo && !ps.videoRefreshingAll) {
         loadVideoRecords();
       }
     }, 30 * 1000);
     return () => clearInterval(timer);
-  }, [loadBox, loadVideoRecords, loading, publishLoading, activeTab, videoList, videoRefreshingAll]);
+  }, [loadBox, loadVideoRecords]);
 
   // 某店铺是否已发布过某个采集箱商品（CBT 一店一品，重复发必然失败）
   const isPublished = (storeId: string, detailId: string) => {
@@ -329,7 +339,15 @@ export function MiaoshouBoxPage() {
     );
 
   // 「未发布」tab 数据源：妙手列表里「任一店铺都还没成功发布过」的商品
-  const unpublishedItems = items.filter((it) => !hasAnySuccess(it.collectBoxDetailId));
+  // ⚠️ 必须 useMemo：items.filter 每次渲染都产生**新数组引用**，
+  //    一旦被下面的 searchKw useEffect 当依赖，就会形成
+  //    「渲染 → 新数组 → effect 跑 → setFilteredItems(新数组) → 再渲染」的无限循环，
+  //    实测把主线程 100% 占满（6 秒里忙 6 秒），导致点侧边栏菜单 URL 变了但页面不切换。
+  const unpublishedItems = useMemo(
+    () => items.filter((it) => !hasAnySuccess(it.collectBoxDetailId)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [items, publishedRecords],
+  );
   // 「已发布」tab 数据源：直接以 publishedRecords 为准（含本系统上架 + 妙手侧已上传），
   // 按 detailId 聚合后 join 妙手列表补全缩略图/标题，最后按「上传时间倒序」排列。
   // 注意：不能从 items 里 filter —— 发布成功后 save_move_collect_task 会把商品从妙手
@@ -364,20 +382,37 @@ export function MiaoshouBoxPage() {
   // 搜索过滤（分页前过滤全部）—— 只过滤「未发布」tab 当前显示的数据源
   useEffect(() => {
     const source = unpublishedItems;
+    let next: MiaoshouBoxItem[];
     if (!searchKw.trim()) {
-      setFilteredItems(source);
+      next = source;
     } else {
       const kw = searchKw.toLowerCase();
-      setFilteredItems(
-        source.filter(
-          (it) =>
-            it.title.toLowerCase().includes(kw) ||
-            it.breadcrumb.toLowerCase().includes(kw) ||
-            it.collectBoxDetailId.includes(kw)
-        )
+      next = source.filter(
+        (it) =>
+          it.title.toLowerCase().includes(kw) ||
+          it.breadcrumb.toLowerCase().includes(kw) ||
+          it.collectBoxDetailId.includes(kw) ||
+          (it.itemNum || '').toLowerCase().includes(kw)
       );
     }
-    setCurrent(1); // 搜索后回第1页
+    // 只有真的变了才 setState —— 双保险，避免任何「同内容新引用」再次引发渲染循环
+    setFilteredItems((prev) => {
+      if (prev === next) return prev;
+      if (prev.length === next.length) {
+        let same = true;
+        for (let i = 0; i < prev.length; i++) {
+          const a = prev[i];
+          const b = next[i];
+          if (a !== b && a?.collectBoxDetailId !== b?.collectBoxDetailId) {
+            same = false;
+            break;
+          }
+        }
+        if (same) return prev;
+      }
+      return next;
+    });
+    setCurrent((c) => (c === 1 ? c : 1)); // 搜索后回第1页
   }, [searchKw, unpublishedItems]);
 
   // 当前页数据
