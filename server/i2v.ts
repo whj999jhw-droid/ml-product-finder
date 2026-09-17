@@ -16,6 +16,7 @@
  * （限额/无权限/余额不足/模型不存在），避免批量任务里每件商品都白等一轮。
  */
 
+import { buildProductVideoPrompt } from './videoPrompt.js';
 import fs from 'fs';
 import path from 'path';
 import { execFile } from 'child_process';
@@ -299,13 +300,18 @@ export interface GenerateVideoOptions {
   /** 目标时长（秒），默认 10（ML Clips 下限） */
   durationSec?: number;
   prompt?: string;
+  /**
+   * 商品标题 —— 用于生成贴合品类的动作指令。
+   * 不传时调用方应当显式传 prompt，否则退化为通用展示动作（各商品雷同）。
+   */
+  title?: string;
   /** 本次运行内已熔断的平台（批量任务复用，避免重复白等） */
   disabledPlatforms?: Set<string>;
 }
 
-const DEFAULT_PROMPT =
-  '商品展示短视频：镜头极缓慢推近并轻微环绕，产品本体保持完全不变（外观、颜色、文字、Logo 一律不动），' +
-  '背景光影与反光自然流动，整体干净明亮。画面里不要出现任何文字、水印、价格或联系方式。';
+// 商品化 prompt 迁移到 server/videoPrompt.ts（按品类出动作 + 无文字硬约束）。
+// 这里保留兜底文案，供未传 title 也未传 prompt 的场景使用。
+const DEFAULT_PROMPT = buildProductVideoPrompt();
 
 /** 把平台报错翻译成「下一步该做什么」 */
 export function hintForError(err: string): string {
@@ -334,7 +340,7 @@ export function listVideoProviders(): Array<{ name: string; model: string; platf
 export async function generateVideoFromImage(opts: GenerateVideoOptions): Promise<I2VOutcome> {
   const attempts: I2VOutcome['attempts'] = [];
   const durationSec = Math.max(5, Math.min(opts.durationSec || 10, 12));
-  const prompt = opts.prompt || DEFAULT_PROMPT;
+  const prompt = opts.prompt || buildProductVideoPrompt({ title: opts.title });
   const disabled = opts.disabledPlatforms || new Set<string>();
 
   const providers = getLlmProviders().filter(

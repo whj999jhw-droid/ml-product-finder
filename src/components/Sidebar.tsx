@@ -1,7 +1,7 @@
 import { Button, Tooltip } from 'tdesign-react';
 import { AddIcon, DeleteIcon, NotificationIcon, ToolsIcon } from 'tdesign-icons-react';
 import { confirmDialog } from '../utils/dialog';
-import { Bot, Inbox, ShoppingBag, Flame } from 'lucide-react';
+import { Bot, Inbox, ShoppingBag, Flame, Film } from 'lucide-react';
 import { APP_CONFIG } from '../config';
 import { Session, Agent } from '../types';
 import { ICON_MAP } from '../utils/iconMap';
@@ -21,6 +21,7 @@ interface SidebarProps {
   isCandidatesPage?: boolean;
   isConfigPage?: boolean;
   isMiaoshouBoxPage?: boolean;
+  isAutoVideoPage?: boolean;
   isMobile?: boolean;
   sidebarOpen: boolean;
   agents: Agent[];
@@ -37,6 +38,7 @@ interface SidebarProps {
   onOpenCandidates?: () => void;
   onOpenConfig?: () => void;
   onOpenMiaoshouBox?: () => void;
+  onOpenAutoVideo?: () => void;
 }
 
 export function Sidebar({
@@ -54,6 +56,7 @@ export function Sidebar({
   isCandidatesPage,
   isConfigPage,
   isMiaoshouBoxPage,
+  isAutoVideoPage,
   isMobile,
   sidebarOpen,
   agents,
@@ -70,6 +73,7 @@ export function Sidebar({
   onOpenCandidates,
   onOpenConfig,
   onOpenMiaoshouBox,
+  onOpenAutoVideo,
 }: SidebarProps) {
   return (
     <aside 
@@ -170,6 +174,15 @@ export function Sidebar({
           theme={isConfigPage ? 'primary' : 'default'}
         >
           配置中心
+        </Button>
+        <Button
+          icon={<Film size={16} />}
+          onClick={onOpenAutoVideo}
+          block
+          variant={isAutoVideoPage ? 'outline' : 'text'}
+          theme={isAutoVideoPage ? 'primary' : 'default'}
+        >
+          自动视频
         </Button>
         <Button 
           icon={<Flame size={16} />}

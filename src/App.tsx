@@ -24,6 +24,7 @@ import { ProductManagerPage } from './pages/ProductManagerPage';
 import { CandidatesPage } from './pages/CandidatesPage';
 import { MiaoshouBoxPage } from './pages/MiaoshouBoxPage';
 import { ConfigPage } from './pages/ConfigPage';
+import { AutoVideoPage } from './pages/AutoVideoPage';
 
 function App() {
   return (
@@ -42,6 +43,7 @@ function App() {
       <Route path="/candidates" element={<AppContent />} />
       <Route path="/config" element={<AppContent />} />
       <Route path="/miaoshou-box" element={<AppContent />} />
+      <Route path="/auto-video" element={<AppContent />} />
     </Routes>
   );
 }
@@ -62,6 +64,7 @@ function AppContent() {
   const isCandidatesPage = location.pathname === '/candidates';
   const isConfigPage = location.pathname === '/config';
   const isMiaoshouBoxPage = location.pathname === '/miaoshou-box';
+  const isAutoVideoPage = location.pathname === '/auto-video';
 
   // Hooks
   const { theme, toggleTheme } = useTheme();
@@ -198,6 +201,10 @@ function AppContent() {
     navigate('/miaoshou-box');
   }, [navigate]);
 
+  const handleOpenAutoVideo = useCallback(() => {
+    navigate('/auto-video');
+  }, [navigate]);
+
   // 移动端检测：≤767px 视为手机，侧边栏切换为抽屉模式
   const [isMobile, setIsMobile] = useState<boolean>(
     typeof window !== 'undefined' &&
@@ -250,6 +257,7 @@ function AppContent() {
         isCandidatesPage={isCandidatesPage}
         isConfigPage={isConfigPage}
         isMiaoshouBoxPage={isMiaoshouBoxPage}
+        isAutoVideoPage={isAutoVideoPage}
         sidebarOpen={sidebarOpen}
         agents={agents}
         getAgent={getAgent}
@@ -265,6 +273,7 @@ function AppContent() {
         onOpenCandidates={handleOpenCandidates}
         onOpenConfig={handleOpenConfig}
         onOpenMiaoshouBox={handleOpenMiaoshouBox}
+        onOpenAutoVideo={handleOpenAutoVideo}
       />
 
       {/* 主内容区 */}
@@ -286,6 +295,7 @@ function AppContent() {
           isCandidatesPage={isCandidatesPage}
           isConfigPage={isConfigPage}
           isMiaoshouBoxPage={isMiaoshouBoxPage}
+          isAutoVideoPage={isAutoVideoPage}
           sidebarOpen={sidebarOpen}
           theme={theme}
           currentSession={currentSession}
@@ -326,6 +336,8 @@ function AppContent() {
           <MiaoshouBoxPage />
         ) : isConfigPage ? (
           <ConfigPage />
+        ) : isAutoVideoPage ? (
+          <AutoVideoPage />
         ) : (
           <ChatPage
             currentSession={currentSession}

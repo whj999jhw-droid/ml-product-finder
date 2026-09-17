@@ -17,6 +17,7 @@
  * - 禁止静态图、水印、联系方式、价格信息
  */
 
+import { buildProductVideoPrompt, describeCategory, llmMotionForProduct } from './videoPrompt.js';
 import fs from 'fs';
 import path from 'path';
 import { execFile } from 'child_process';
@@ -387,8 +388,12 @@ export interface VideoRecord {
   width?: number;
   height?: number;
   sites: string[];
-  /** uploading=正在处理；uploaded=已提交 ML；failed=上传失败（可重试） */
-  status: 'uploading' | 'uploaded' | 'failed';
+  /**
+   * uploading=正在处理；uploaded=已提交 ML；failed=上传失败（可重试）；
+   * generated=本地备份已就绪但**还没上传 ML**（定时流水线拆成「生成」「上传」两条
+   * 独立限流链路后引入：每小时生成 N 条、每小时上传 M 条，M<N 时会有积压）
+   */
+  status: 'uploading' | 'uploaded' | 'failed' | 'generated';
   clipUuid?: string;
   /** 本次上传响应里的 clip_uuid（与状态查询的 clipUuid 不同可证明 ML 未去重） */
   lastUploadedClipUuid?: string;
@@ -396,7 +401,7 @@ export interface VideoRecord {
   lastUploadedSiteIds?: string[];
   /** 各站点审核状态：MLM → UNDER_REVIEW / AVAILABLE / REJECTED ... */
   siteStatuses: Record<string, string>;
-  stage?: 'auth' | 'check' | 'download' | 'convert' | 'backup' | 'upload' | 'done';
+  stage?: 'auth' | 'check' | 'download' | 'convert' | 'backup' | 'upload' | 'done' | 'generated';
   error?: string;
   createdAt: number;
   uploadedAt?: number;
@@ -548,6 +553,19 @@ export async function processAndUploadVideo(opts: {
   miaoshouDetailId?: string;
   /** 本次运行内已熔断的 AI 视频平台（批量任务复用） */
   disabledAiPlatforms?: Set<string>;
+  /**
+   * 阶段拆分（定时任务用）：
+   *  - 'generate' 只产出并落本地备份，**不调 ML 上传**
+   *  - 'upload'   只从本地备份上传 ML；没有备份就失败（不再下载/不重新 AI 生成）
+   *  - 'both'     生成后立刻上传（默认，兼容旧的单次按键行为）
+   */
+  mode?: 'generate' | 'upload' | 'both';
+  /**
+   * AI 图生视频的动作指令模式：
+   *  - 'auto' 先用 LLM 按标题写场景描述，失败降级到品类规则（推荐）
+   *  - 'rule' 只用本地品类规则（零成本、零延迟）
+   */
+  aiPromptMode?: 'auto' | 'rule';
 }): Promise<VideoPipelineResult> {
   const {
     detailId,
@@ -563,7 +581,13 @@ export async function processAndUploadVideo(opts: {
     enableAiFallback = true,
     miaoshouDetailId,
     disabledAiPlatforms,
+    mode = 'both',
+    aiPromptMode = 'auto',
   } = opts;
+
+  // 阶段拆分：能否「现场生成」/ 是否需要「上传 ML」
+  const canProduce = mode !== 'upload';
+  const doUpload = mode !== 'generate';
 
   const now = () => Date.now();
   const key = vrKey(storeId, detailId);
@@ -659,7 +683,7 @@ export async function processAndUploadVideo(opts: {
   let outPath = backupPath;
   const tried: string[] = [];
 
-  if (reuseBackup && hasBackup) {
+  if (hasBackup && (reuseBackup || !canProduce)) {
     rec.stage = 'backup';
     rec.status = 'uploading';
     rec.sourceKind = 'backup';
@@ -668,6 +692,14 @@ export async function processAndUploadVideo(opts: {
     saveVideoRecord(rec);
     outPath = foundBackup;
     console.log(`[VideoClips] ${detailId} 复用服务器备份 ${path.basename(foundBackup)}`);
+  } else if (!canProduce) {
+    // upload 模式：本地没有视频就到此为止，不再消耗额度去下载/AI 生成
+    rec.status = 'failed';
+    rec.error = '本地还没有生成好的视频（upload 模式不重新生成，先跑 generate 阶段）';
+    rec.stage = 'prepare';
+    rec.updatedAt = now();
+    saveVideoRecord(rec);
+    return { success: false, stage: 'prepare', error: rec.error, record: rec };
   } else {
     let produced = false;
     const rawPath = path.join(TMP_DIR, `${detailId}_raw.mp4`);
@@ -723,11 +755,26 @@ export async function processAndUploadVideo(opts: {
       console.log(`[VideoClips] ${detailId} 无源视频，改用 AI 图生视频（主图 ${mainImageUrl.slice(0, 60)}）`);
       const aiRaw = path.join(TMP_DIR, `${detailId}_ai_raw.mp4`);
       const aiOut = path.join(TMP_DIR, `${detailId}_ai_clips.mp4`);
+      // 商品化动作指令：让视频「和这件商品有关」且具备购买吸引力。
+      // LLM 失败会静默降级到品类规则，不阻塞整条流水线。
+      let llmMotion = '';
+      if (title && aiPromptMode === 'auto') {
+        llmMotion = await llmMotionForProduct(title);
+        if (llmMotion) console.log(`[VideoClips] ${detailId} AI 动作指令（LLM）：${llmMotion.slice(0, 70)}…`);
+      }
+      const aiPrompt = buildProductVideoPrompt({ title, llmMotion });
+      if (!llmMotion) {
+        console.log(
+          `[VideoClips] ${detailId} AI 动作指令（品类=${describeCategory(title)}）：${aiPrompt.slice(0, 70)}…`,
+        );
+      }
       const ai = await generateVideoFromImage({
         imageUrl: mainImageUrl,
         outPath: aiRaw,
         durationSec: 10,
         disabledPlatforms: disabledAiPlatforms,
+        title,
+        prompt: aiPrompt,
       });
       if (ai.ok) {
         const norm = await normalizeAiClip(aiRaw, aiOut, {
@@ -788,6 +835,20 @@ export async function processAndUploadVideo(opts: {
     rec.updatedAt = now();
     saveVideoRecord(rec);
     return { success: false, stage: 'prepare', error: rec.error, record: rec };
+  }
+
+  // ===== 阶段边界：generate 模式在这里收尾（落盘到 data/video-backups/，不调 ML）=====
+  if (!doUpload) {
+    rec.status = 'generated';
+    rec.stage = 'generated';
+    rec.error = undefined;
+    rec.updatedAt = now();
+    saveVideoRecord(rec);
+    console.log(
+      `[VideoClips] ${detailId}@${storeId.slice(0, 8)} 视频已生成待上传 ` +
+        `${rec.backupFile} (${Math.round((rec.backupSize || 0) / 1024)}KB, source=${rec.sourceKind})`,
+    );
+    return { success: true, stage: 'generated', record: rec };
   }
 
   // 2. 上传 ML Clips

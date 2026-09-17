@@ -1141,7 +1141,7 @@ interface ItemVideoContext {
   expectedSource: 'source' | 'backup' | 'ai';
 }
 
-function itemVideoContext(storeId: string, row: any, li: ItemLinkIndex): ItemVideoContext {
+export function itemVideoContext(storeId: string, row: any, li: ItemLinkIndex): ItemVideoContext {
   let detailId: string | undefined = li.byItem.get(`${storeId}|${row.id}`);
   let detailLink: ItemVideoContext['detailLink'] = detailId ? 'record' : 'none';
   if (!detailId) {
@@ -1381,9 +1381,17 @@ miaoshouRouter.get('/video/candidates', async (req, res) => {
  * 为一件 ML 商品生成/上传视频（内部函数，单件接口与批量任务共用）。
  * 视频来源顺序：妙手/1688 源视频 → 服务器备份 → AI 图生视频（商品主图）。
  */
-async function runItemVideo(
+export async function runItemVideo(
   ctx: ItemVideoContext,
-  opts: { sites?: string[]; force?: boolean; shopId?: string; skipHasClip?: boolean; disabledAi?: Set<string> },
+  opts: {
+    sites?: string[];
+    force?: boolean;
+    shopId?: string;
+    skipHasClip?: boolean;
+    disabledAi?: Set<string>;
+    /** 阶段拆分：generate=只生成本地备份；upload=只上传已有备份；both=连贯执行 */
+    mode?: 'generate' | 'upload' | 'both';
+  },
 ): Promise<{ ok: boolean; skipped?: boolean; skipReason?: string; stage?: string; error?: string; sourceKind?: string; clipUuid?: string; siteStatuses?: Record<string, string> }> {
   const sites = (opts.sites && opts.sites.length ? opts.sites : ['MLM']).filter(Boolean);
 
@@ -1441,6 +1449,7 @@ async function runItemVideo(
     force: !!opts.force,
     miaoshouDetailId: ctx.detailId,
     disabledAiPlatforms: opts.disabledAi,
+    mode: opts.mode || 'both',
   });
 
   const rec = result.record;
@@ -1455,7 +1464,7 @@ async function runItemVideo(
 }
 
 /** 解析一件商品（含索引未命中时兜底实时取详情） */
-async function resolveContext(storeId: string, itemId: string): Promise<ItemVideoContext | null> {
+export async function resolveContext(storeId: string, itemId: string): Promise<ItemVideoContext | null> {
   const idx = getIndex(storeId);
   let row = idx?.items.find((r) => r.id === itemId);
   if (!row) {

@@ -36,6 +36,7 @@ import shippingRouter from './shippingRules.js';
 import { miaoshouRouter } from './miaoshouRoutes.js';
 import { productAdminRouter } from './productAdmin.js';
 import publisherAiRouter from './publisherAi.js';
+import { autoVideoRouter, initAutoVideo } from './autoVideo.js';
 import {
   isYouTubeConfigured,
   saveYouTubeClient,
@@ -3714,6 +3715,9 @@ app.use('/api/ml/product-admin', productAdminRouter);
 // 妙手自动发布助手（Chrome 插件）专用 AI 代跑：插件不持 key，统一用服务端已配好的 LLM
 app.use('/api/ml/publisher', publisherAiRouter);
 
+// 自动给全店商品批量生成+上传视频的定时流水线（后台「自动视频」页配置/监控）
+app.use('/api/ml/auto-video', autoVideoRouter);
+
 // ============= 静态文件服务 (Electron 模式) =============
 
 // 服务前端构建产物（生产 / Electron / 或经 cloudflared 等隧道以域名方式访问时）
@@ -3785,4 +3789,7 @@ initAutoRenew();
 
 // 启动订单轮询（间隔从 notify-config 读取，默认 30 分钟）
 startOrderPolling();
+
+// 启动自动视频流水线（若上次是 running 则接着跑；若配置了 enabled 则开机自启）
+initAutoVideo();
 });
