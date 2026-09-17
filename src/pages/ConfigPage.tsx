@@ -29,6 +29,12 @@ interface LlmProviderForm {
   models: string;
   /** 调用方式：openai 兼容 / 火山方舟 REST / 火山方舟 SDK */
   type?: 'openai' | 'volcano-rest' | 'volcano-sdk';
+  /**
+   * 表格渲染用的唯一 key（= baseUrl|type）。TDesign 的 rowKey 只接受字段名、不接受函数，
+   * 而同一个 baseUrl 允许配不同调用方式（例：/contents/generations/tasks 既是 volcano-rest 的 3D 生成，
+   * 也是 openai 的视频生成）——若直接用 baseUrl 当 key，React key 撞车会在重排序后留下幽灵行（刷新才消失）。
+   */
+  __key?: string;
 }
 
 const LLM_TYPE_OPTIONS: { label: string; value: LlmProviderForm['type'] }[] = [
@@ -197,6 +203,38 @@ function AiConfigPanel() {
 
   const rowKeyOf = (p: LlmProviderForm) => `${(p.baseUrl || '').trim()}|${p.type || 'openai'}`;
 
+  /**
+   * 归一化：同一「baseUrl + 调用方式」合并为一条（models 取并集），并挂上唯一 __key。
+   * 加载与保存都过这里，保证列表里永远不存在 key 重复的行。
+   */
+  const normalizeRows = (list: LlmProviderForm[]): { rows: LlmProviderForm[]; merged: number } => {
+    const byKey = new Map<string, LlmProviderForm>();
+    let merged = 0;
+    for (const p of list) {
+      const key = rowKeyOf(p);
+      const hit = byKey.get(key);
+      if (!hit) {
+        byKey.set(key, { ...p, __key: key });
+        continue;
+      }
+      merged += 1;
+      const models = new Set(
+        [...hit.models.split(/[,，]/), ...p.models.split(/[,，]/)].map((m) => m.trim()).filter(Boolean),
+      );
+      hit.models = Array.from(models).join(', ');
+      if (!hit.apiKey && p.apiKey) hit.apiKey = p.apiKey;
+      if (!hit.name && p.name) hit.name = p.name;
+    }
+    return { rows: Array.from(byKey.values()), merged };
+  };
+
+  /** 取某行在全局列表中的下标（对象引用优先、__key 兜底）；找不到返回 -1 */
+  const indexOfRow = (row: LlmProviderForm): number => {
+    const i = providers.indexOf(row);
+    if (i >= 0) return i;
+    return providers.findIndex((p) => !!row.__key && p.__key === row.__key);
+  };
+
   // ---- 置顶 / 手动排序：列表顺序 = 调用顺序（写入配置文件，其它程序按同一顺序调用）----
   const [pinnedKeys, setPinnedKeys] = useState<string[]>(() => loadPinnedKeys());
   const [sorting, setSorting] = useState(false);
@@ -211,7 +249,7 @@ function AiConfigPanel() {
   /** 置顶/取消置顶（置顶 = 立刻移到第一位并保存配置文件） */
   const handlePinRow = async (idx: number, pin: boolean) => {
     const row = providers[idx];
-    if (!row) return;
+    if (idx < 0 || !row) return;
     const key = rowKeyOf(row);
     if (!pin) {
       // 取消置顶只去掉标记，位置不动（顺序仍以当前列表为准）
@@ -263,31 +301,22 @@ function AiConfigPanel() {
       const res = await fetch('/api/ml/llm-config');
       const data = await res.json();
       const raw: any[] = data.providers || [];
-      // 合并「同一 baseUrl + type 的多个 model」为一条表单记录（models 用逗号拼接）
-      const byBase = new Map<string, LlmProviderForm>();
-      for (const p of raw) {
-        const base = (p.baseUrl || '').trim();
-        if (!base) continue;
-        const type = p.type || 'openai';
-        const key = `${base}|${type}`;
-        const existing = byBase.get(key);
-        if (existing) {
-          if (p.model && !existing.models.split(/[,，]/).map((m: string) => m.trim()).includes(p.model)) {
-            existing.models = `${existing.models}, ${p.model}`;
-          }
-        } else {
-          byBase.set(key, {
-            name: p.name || `平台 ${byBase.size + 1}`,
+      // 合并「同一 baseUrl + 调用方式 的多个 model」为一条表单记录（models 用逗号拼接），并挂唯一 __key
+      const { rows } = normalizeRows(
+        raw
+          .filter((p: any) => (p.baseUrl || '').trim())
+          .map((p: any) => ({
+            name: p.name || '',
             baseUrl: p.baseUrl || '',
             apiKey: '', // 出于安全不回显 Key；留空=复用已保存
             models: p.model || '',
-            type,
-          });
-        }
-      }
-      setProviders(Array.from(byBase.values()));
+            type: p.type || 'openai',
+          })),
+      );
+      const named = rows.map((r, i) => ({ ...r, name: r.name || `平台 ${i + 1}` }));
+      setProviders(named);
       // 清理已删除平台的置顶标记（顺序本身以配置文件为准，标记只用于显示与快捷置顶）
-      setPinnedKeys((prev) => prev.filter((k) => Array.from(byBase.values()).some((r) => rowKeyOf(r) === k)));
+      setPinnedKeys((prev) => prev.filter((k) => named.some((r) => rowKeyOf(r) === k)));
       setSavedKeys(new Set(raw.map((p: any) => `${(p.baseUrl || '').trim()}|${p.type || 'openai'}`)));
       setPage(1);
     } catch {
@@ -314,6 +343,7 @@ function AiConfigPanel() {
 
   const openEdit = (idx: number) => {
     const p = providers[idx];
+    if (idx < 0 || !p) return;
     setForm({ ...p });
     setEditingIndex(idx);
     setDialogVisible(true);
@@ -349,17 +379,22 @@ function AiConfigPanel() {
   };
 
   const doSave = async (list: LlmProviderForm[]): Promise<boolean> => {
+    // 归一化：合并重复行（同一 baseUrl+调用方式）并把 __key 补齐，避免 React key 撞车产生幽灵行
+    const { rows, merged } = normalizeRows(list);
+    if (merged > 0) {
+      MessagePlugin.info(`已自动合并 ${merged} 条重复平台（同一 baseUrl + 调用方式只保留一条，模型已合并）`);
+    }
     setSaving(true);
     try {
       const res = await fetch('/api/ml/llm-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ providers: list }),
+        body: JSON.stringify({ providers: rows }),
       });
       const data = await res.json();
       if (data.success) {
         MessagePlugin.success(data.message || 'AI 配置已保存');
-        setProviders(list);
+        setProviders(rows);
         loadStatus();
         setTestResult(null);
         return true;
@@ -417,7 +452,7 @@ function AiConfigPanel() {
 
   const handleTestRow = async (idx: number) => {
     const p = providers[idx];
-    if (!p) return;
+    if (idx < 0 || !p) return;
     const key = rowKeyOf(p);
     setRowTesting((prev) => ({ ...prev, [key]: true }));
     try {
@@ -439,6 +474,7 @@ function AiConfigPanel() {
 
   const handleDeleteProvider = (idx: number) => {
     const p = providers[idx];
+    if (idx < 0 || !p) return;
     const inst = DialogPlugin.confirm({
       header: '删除该 LLM 平台',
       body: `确定删除「${p.name || p.baseUrl}」及其下所有模型？删除后系统不再尝试该平台。`,
@@ -477,7 +513,7 @@ function AiConfigPanel() {
       title: '排序',
       width: 132,
       cell: ({ row }) => {
-        const idx = providers.indexOf(row);
+        const idx = indexOfRow(row);
         const pinned = isPinned(row);
         return (
           <div className="flex items-center gap-0.5">
@@ -546,7 +582,7 @@ function AiConfigPanel() {
         const allOk = entry?.data?.success;
         return (
           <div className="flex items-center gap-1">
-            <Button size="small" variant="text" loading={!!rowTesting[key]} onClick={() => handleTestRow(providers.indexOf(row))}>测试</Button>
+            <Button size="small" variant="text" loading={!!rowTesting[key]} onClick={() => handleTestRow(indexOfRow(row))}>测试</Button>
             <Button
               size="small"
               variant="text"
@@ -556,8 +592,8 @@ function AiConfigPanel() {
             >
               测试结果{entry && <span className="text-gray-400 ml-0.5">{new Date(entry.testedAt).toLocaleTimeString('zh-CN', { hour12: false })}</span>}
             </Button>
-            <Button size="small" variant="text" icon={<EditIcon />} onClick={() => openEdit(providers.indexOf(row))}>修改</Button>
-            <Button size="small" variant="text" theme="danger" icon={<DeleteIcon />} onClick={() => handleDeleteProvider(providers.indexOf(row))}>删除</Button>
+            <Button size="small" variant="text" icon={<EditIcon />} onClick={() => openEdit(indexOfRow(row))}>修改</Button>
+            <Button size="small" variant="text" theme="danger" icon={<DeleteIcon />} onClick={() => handleDeleteProvider(indexOfRow(row))}>删除</Button>
           </div>
         );
       },
@@ -607,7 +643,7 @@ function AiConfigPanel() {
           loading={loading}
           data={pagedProviders}
           columns={columns}
-          rowKey="baseUrl"
+          rowKey="__key"
           size="small"
           bordered
           hover
