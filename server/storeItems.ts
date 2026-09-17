@@ -16,6 +16,12 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { Store, getStoreRaw, storeApiGet } from './stores.js';
 import {
+  getItemSiteStatus,
+  getItemSiteStatusBatch,
+  clearStoreSiteCache,
+  type SiteState,
+} from './mlSiteStatus.js';
+import {
   hitsAnyRiskWord,
   ALL_RISK_WORDS,
   IP_BLACKLIST,
@@ -99,6 +105,24 @@ export interface StoreItemRow {
   dupKey?: string;
   /** 关联到的妙手采集箱 detailId（用于找 1688 源视频；未关联为 undefined） */
   miaoshouDetailId?: string;
+  /**
+   * ★ 站点级真实售卖状态（MLM/MLB/MLC/MCO → active|paused|inactive）。
+   * `status` 只反映 CBT 父商品在父账号搜索接口里的归属，
+   * 而买家看到的是**各站点本地 listing** —— 实测存在「父状态 active、4 个站点全部未激活」
+   * 的链接（用户反馈「两条重复链接里只有一条是激活的」就是这个原因）。
+   */
+  siteStatus?: Record<string, SiteState>;
+  activeSites?: string[];
+  pausedSites?: string[];
+  inactiveSites?: string[];
+  /** 至少一个站点在售 = 买家真能看到 */
+  onSale?: boolean;
+  /** 被美客多禁止的站点（sub_status 含 forbidden/blocked/suspended） */
+  blockedSites?: string[];
+  /** 审核中但未被禁的站点 */
+  reviewSites?: string[];
+  /** 中文原因，如「MLM 被美客多禁止」 */
+  reasons?: string[];
 }
 
 export interface StoreIndex {
@@ -118,6 +142,15 @@ export interface StoreIndex {
     riskIp: number;
     riskBrand: number;
     riskPlatform: number;
+    /** 站点级口径：至少一个站点在售 / 全部站点未激活（被平台下架、买家看不到） */
+    onSale: number;
+    offShelf: number;
+    /** 至少一个站点被美客多禁止（forbidden） */
+    blocked: number;
+    /** 全部站点都被禁止 —— 这类链接已经救不回来，应考虑下架重发 */
+    allBlocked?: number;
+    /** 同款重复链接（同一 SKU 多 listing）合并掉的条数 */
+    mergedAway?: number;
   };
 }
 
@@ -377,10 +410,31 @@ function toRow(store: Store, raw: any, statusSets?: { active: Set<string>; pause
 }
 
 function summarize(items: StoreItemRow[]): StoreIndex['counts'] {
-  const c = { total: items.length, active: 0, paused: 0, risk: 0, riskIp: 0, riskBrand: 0, riskPlatform: 0 };
+  const c = {
+    total: items.length,
+    active: 0,
+    paused: 0,
+    risk: 0,
+    riskIp: 0,
+    riskBrand: 0,
+    riskPlatform: 0,
+    onSale: 0,
+    offShelf: 0,
+    blocked: 0,
+    allBlocked: 0,
+  };
   for (const it of items) {
     if (it.status === 'active') c.active++;
     if (it.status !== 'active') c.paused++;
+    if (typeof it.onSale === 'boolean') {
+      if (it.onSale) c.onSale++;
+      else c.offShelf++;
+    }
+    const bs = it.blockedSites || [];
+    if (bs.length) c.blocked++;
+    if (bs.length && bs.length >= Math.max(1, (it.activeSites || []).length + (it.pausedSites || []).length + bs.length + (it.reviewSites || []).length)) {
+      c.allBlocked = (c.allBlocked || 0) + 1;
+    }
     if (it.risk.level !== 'none') {
       c.risk++;
       if (it.risk.level === 'ip') c.riskIp++;
@@ -439,7 +493,8 @@ export async function buildIndex(
     } catch (e: any) {
       console.warn(`[StoreItems] 售卖状态拉取失败（回退用 CBT 自报状态）: ${e?.message?.slice(0, 120)}`);
     }
-    shell.progress = { done: 0, total: ids.length };
+    // 两阶段：① 批量拉商品字段 ② 逐件拉站点级 listing 状态（阶段②件数 ≈ ids.length）
+    shell.progress = { done: 0, total: ids.length * 2 };
     const batches: string[][] = [];
     for (let i = 0; i < ids.length; i += 20) batches.push(ids.slice(i, i + 20));
 
@@ -460,9 +515,40 @@ export async function buildIndex(
         console.warn(`[StoreItems] 批次拉取失败（${batch.length} 件）: ${e?.message?.slice(0, 120)}`);
       }
       done += batch.length;
-      shell.progress = { done: Math.min(done, ids.length), total: ids.length };
+      shell.progress = { done: Math.min(done, ids.length), total: ids.length * 2 };
       onProgress?.(shell.progress.done, shell.progress.total);
     });
+
+    // ---- 阶段②：站点级真实状态（各站点本地 listing 是否在售）----
+    // 这一步要逐件调 /marketplace/items/{CBT}（该接口不支持批量），
+    // 结果按 6 小时缓存落盘，二次刷新基本不耗时。失败不影响索引主体。
+    try {
+      const siteIds = rows.map((r) => r.id);
+      const siteMap = await getItemSiteStatusBatch(store, siteIds, {
+        concurrency: 6,
+        onProgress: (d) => {
+          shell.progress = { done: ids.length + d, total: ids.length * 2 };
+          onProgress?.(shell.progress.done, shell.progress.total);
+        },
+      });
+      let withSite = 0;
+      for (const r of rows) {
+        const st = siteMap.get(r.id);
+        if (!st) continue;
+        withSite++;
+        r.siteStatus = st.sites;
+        r.activeSites = st.activeSites;
+        r.pausedSites = st.pausedSites;
+        r.inactiveSites = st.inactiveSites;
+        r.onSale = st.onSale;
+        r.blockedSites = st.blockedSites;
+        r.reviewSites = st.reviewSites;
+        r.reasons = st.reasons;
+      }
+      console.log(`[StoreItems] ${store.nickname} 站点级状态：${withSite}/${rows.length} 件有数据`);
+    } catch (e: any) {
+      console.warn(`[StoreItems] 站点级状态阶段失败（不影响索引）: ${String(e?.message || e).slice(0, 140)}`);
+    }
 
     // 保持与妙手列表一致：新上架的排前面
     rows.sort((a, b) => String(b.dateCreated || '').localeCompare(String(a.dateCreated || '')));
@@ -471,7 +557,10 @@ export async function buildIndex(
     shell.builtAt = Date.now();
     shell.building = false;
     shell.error = undefined;
-    console.log(`[StoreItems] ${store.nickname} 索引完成：${rows.length} 件（在售 ${shell.counts.active} / 风险 ${shell.counts.risk}）`);
+    console.log(
+      `[StoreItems] ${store.nickname} 索引完成：${rows.length} 件` +
+        `（父口径在售 ${shell.counts.active} / 站点级在售 ${shell.counts.onSale} / 全站未激活 ${shell.counts.offShelf} / 含禁售站点 ${shell.counts.blocked} / 含风险 ${shell.counts.risk}）`,
+    );
   } catch (e: any) {
     shell.building = false;
     shell.error = e?.message || String(e);
@@ -501,6 +590,18 @@ export interface ListFilter {
   pageSize?: number;
   /** 只保留有关联妙手 detailId 的（视频 tab 用不到，商品管理用不到，留作扩展） */
   onlyLinked?: boolean;
+  /**
+   * 站点级在售过滤：
+   *  - 'yes' 至少一个站点在售（买家真能看到）
+   *  - 'no'  全部站点未激活（被平台下架/审核不过，列表默认应隐藏）
+   */
+  onSale?: 'all' | 'yes' | 'no';
+  /**
+   * 禁售筛选：
+   *  - 'only'  只看有站点被美客多禁止（forbidden/blocked/suspended）的
+   *  - 'none'  排除有禁售站点的
+   */
+  blocked?: 'all' | 'only' | 'none';
 }
 
 export function listItems(storeId: string, f: ListFilter = {}): {
@@ -522,6 +623,10 @@ export function listItems(storeId: string, f: ListFilter = {}): {
     else rows = rows.filter((r) => r.risk.level === f.risk);
   }
   if (f.onlyLinked) rows = rows.filter((r) => !!r.miaoshouDetailId);
+  if (f.onSale === 'yes') rows = rows.filter((r) => r.onSale !== false);
+  else if (f.onSale === 'no') rows = rows.filter((r) => r.onSale === false);
+  if (f.blocked === 'only') rows = rows.filter((r) => (r.blockedSites || []).length > 0);
+  else if (f.blocked === 'none') rows = rows.filter((r) => !(r.blockedSites || []).length);
 
   const q = (f.q || '').trim().toLowerCase();
   if (q) {
@@ -557,6 +662,19 @@ export function itemPermalink(row: Pick<StoreItemRow, 'siteItemIds' | 'mlPermali
 
 export interface StoreItemFullDetail {
   row: StoreItemRow | null;
+  /** 站点级真实售卖状态（各站点本地 listing 是否在售） */
+  siteStatus?: {
+    sites: Record<string, SiteState>;
+    subStatuses: Record<string, string[]>;
+    siteItems: Array<{ siteId: string; itemId: string; userId: number; logisticType: string; state: SiteState; raw?: string; sub?: string[] }>;
+    activeSites: string[];
+    pausedSites: string[];
+    inactiveSites: string[];
+    onSale: boolean;
+    blockedSites: string[];
+    reviewSites: string[];
+    reasons: string[];
+  } | null;
   raw: any;
   description: string;
   marketplaceItems: any[];
@@ -602,6 +720,48 @@ export async function getItemFullDetail(storeId: string, itemId: string): Promis
     errors.push(`/description: ${e?.message?.slice(0, 120)}`);
   }
 
+  // 站点级状态：索引里有就直接用，没有就实时拉一次（详情页每次只看一件，代价可接受）
+  let siteStatus = cached?.siteStatus
+    ? {
+        sites: cached.siteStatus,
+        siteItems: (marketplaceItems || []).map((m: any) => ({
+          siteId: String(m?.site_id || ''),
+          itemId: String(m?.item_id || ''),
+          userId: Number(m?.user_id) || 0,
+          logisticType: String(m?.logistic_type || ''),
+          state: (cached.siteStatus || {})[String(m?.site_id || '')] || 'unknown',
+        })),
+        subStatuses: {},
+        activeSites: cached.activeSites || [],
+        pausedSites: cached.pausedSites || [],
+        inactiveSites: cached.inactiveSites || [],
+        onSale: cached.onSale !== false,
+        blockedSites: cached.blockedSites || [],
+        reviewSites: cached.reviewSites || [],
+        reasons: cached.reasons || [],
+        subStatuses: {},
+      }
+    : null;
+  try {
+    const fresh = await getItemSiteStatus(store, itemId, true);
+    if (fresh) {
+      siteStatus = {
+        sites: fresh.sites,
+        subStatuses: fresh.subStatuses,
+        siteItems: fresh.siteItems,
+        activeSites: fresh.activeSites,
+        pausedSites: fresh.pausedSites,
+        inactiveSites: fresh.inactiveSites,
+        onSale: fresh.onSale,
+        blockedSites: fresh.blockedSites,
+        reviewSites: fresh.reviewSites,
+        reasons: fresh.reasons,
+      };
+    }
+  } catch {
+    /* 站点状态取不到不影响详情展示 */
+  }
+
   const row = raw ? toRow(store, { ...raw, marketplace_items: marketplaceItems }, {
     // 详情页也要用真实售卖状态，而不是 CBT 自报的 active
     active: new Set(cached?.status === 'active' && cached ? [String(raw?.id || itemId)] : []),
@@ -621,6 +781,7 @@ export async function getItemFullDetail(storeId: string, itemId: string): Promis
     permalink: row ? itemPermalink(row) : '',
     risk,
     suggested,
+    siteStatus,
     ...(errors.length ? { _errors: errors } : {}),
   } as StoreItemFullDetail;
 }

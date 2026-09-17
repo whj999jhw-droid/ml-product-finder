@@ -8,15 +8,28 @@
  *  - POST /:storeId/compliance-fix  一键改为符合规范（dryRun 预览 / 执行）
  *  - POST /:storeId/refresh         强制重建索引
  *
- * ⚠️ 核心事实（2026-09-17 实测，别推翻）：
- *  CBT 商品（CBTxxxx）对本店铺 token 是**只读**的 ——
- *    PUT /items/{CBT}          → 400 `Cannot modify CBT item from this resource`
- *    PUT /marketplace/items/{CBT} → 405
- *    本地站点商品（MLM…/MLB…）→ 403（归属另一个 user_id，本 token 无权）
- *    删除 → 405
- *  所以「一键改为符合规范」对 CBT 商品只能走**克隆清洗重发**：
- *    读原商品 → 洗标题/属性/描述 → POST /global/items 建一条全新的合规链接。
- *  原链接依然无法用 API 暂停/删除，必须到 ML 卖家后台人工处理 —— UI 上已明确提示。
+ * ⚠️ 核心事实（2026-09-18 实测修订，别再用旧结论）：
+ *  之前记录的「CBT 商品对本店 token 只读」**是错的** —— 那是因为用错了资源路径。
+ *  正确路径是 `/global/items/{CBT_ID}`（Global Selling 专用），实测结果：
+ *
+ *   ✅ 能改（写后回读确认生效）：
+ *      PUT /global/items/{CBT}                 { available_quantity: n }   改库存
+ *      PUT /global/items/{CBT}                 { status: 'paused' }        暂停
+ *      PUT /items/{CBT}/description            { plain_text: '…' }         改描述
+ *   ❌ 返回 200 但**值不变**（ML 对 CBT 开放 API 静默忽略）：
+ *      price / title / pictures（顶层与 site_id+logistic_type 作用域都试过）
+ *   ❌ 明确拒绝：
+ *      PUT /items/{CBT}              → 400 cause_id 446 `Cannot modify CBT item from this resource`
+ *      PUT /marketplace/items/{CBT}  → 405
+ *      本地站点商品 MLM…              → 403（归属子账号 user_id，本 token 无 station 权限）
+ *  所以：
+ *    - 库存/描述/暂停 → 直接改原链接（本文件的 /item/:itemId/update）
+ *    - 改标题/图片等 → 仍只能**克隆清洗重发**（POST /global/items 建新链接），
+ *      原链接需到 ML 后台人工处理 —— UI 上已明确提示。
+ *
+ *  ⚠️ 站点级真实在售状态：CBT 父商品 status 常年 active，不代表能卖。
+ *     必须用 /marketplace/items/{CBT}?attributes=marketplace_items 拿到各站点本地
+ *     listing id，再和各子账号的 active/paused 集合比对（见 server/mlSiteStatus.ts）。
  */
 
 import { Router } from 'express';
@@ -31,6 +44,7 @@ import {
   buildCompliancePreview,
   scanItemRisk,
 } from './storeItems.js';
+import { clearStoreSiteCache, getSiteAccounts } from './mlSiteStatus.js';
 import { sanitizeComplianceText } from './bannedWords.js';
 
 export const productAdminRouter = Router();
@@ -83,8 +97,11 @@ productAdminRouter.get('/index', async (req, res) => {
 productAdminRouter.post('/:storeId/refresh', async (req, res) => {
   const store = getStoreRaw(req.params.storeId);
   if (!store) return res.status(404).json({ success: false, message: '店铺不存在' });
+  // force=1：连站点级状态缓存一起清掉重拉（默认只重建商品字段，站点状态走 6h 缓存）
+  const force = req.body?.force === true || req.query.force === '1';
+  if (force) clearStoreSiteCache(store.id);
   buildIndex(store.id).catch((e) => console.error(`[ProductAdmin] 重建失败: ${e?.message}`));
-  res.json({ success: true, message: '已开始重建索引' });
+  res.json({ success: true, message: force ? '已清缓存并开始重建' : '已开始重建索引' });
 });
 
 // ============ 商品列表 ============
@@ -97,13 +114,25 @@ productAdminRouter.get('/:storeId/items', async (req, res) => {
     if (!getIndex(store.id)?.items.length && wait) await ensureIndex(store.id);
 
     const idx = getIndex(store.id);
-    const result = listItems(store.id, {
+    const noSite = req.query.noSite === '1';
+    const blocked = (req.query.blocked as any) || 'all';
+    const listBase = {
       status: (req.query.status as any) || 'all',
       risk: (req.query.risk as any) || 'all',
       q: (req.query.q as string) || '',
-      page: Number(req.query.page) || 1,
-      pageSize: Number(req.query.pageSize) || 50,
-    });
+      // 站点级在售过滤：默认隐藏「全部站点未激活」（买家看不到，多为被平台禁止/下架）
+      onSale: noSite ? 'all' : ((req.query.onSale as any) || 'yes'),
+      blocked,
+    } as any;
+    const result = listItems(store.id, { ...listBase, page: Number(req.query.page) || 1, pageSize: Number(req.query.pageSize) || 50 });
+    // 同款重复统计：同一 SKU 被重复上架的条数（同一件 1688 商品换 2-7 个标题反复铺）
+    const all = listItems(store.id, { ...listBase, page: 1, pageSize: 20000 }).items;
+    const firstByDup = new Map<string, number>();
+    for (const r of all) {
+      const k = r.dupKey || `id:${r.id}`;
+      firstByDup.set(k, (firstByDup.get(k) || 0) + 1);
+    }
+    const dupOf = (r: any) => firstByDup.get(r.dupKey || `id:${r.id}`) || 1;
     res.json({
       success: true,
       building: !!idx?.building,
@@ -112,6 +141,8 @@ productAdminRouter.get('/:storeId/items', async (req, res) => {
       counts: idx?.counts || null,
       error: idx?.error,
       ...result,
+      items: result.items.map((r) => ({ ...r, dupCount: dupOf(r) })),
+      dupGroups: [...firstByDup.values()].filter((n) => n > 1).length,
     });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err?.message || String(err) });
@@ -356,6 +387,157 @@ productAdminRouter.post('/:storeId/compliance-fix', async (req, res) => {
   }
 });
 
+// ============ 直接修改商品（2026-09-18 实测可写字段）============
+//
+// 用户问题：「智赢/妙手都能改商品，咱们怎么就不行？」—— 之前不行是因为路径用错了。
+// 正确路径是 Global Selling 的 /global/items/{CBT_ID}，实测可写并在本接口里**写后回读校验**：
+//   ✅ 描述           PUT /items/{CBT}/description
+//   ✅ 库存           PUT /global/items/{CBT}  { available_quantity }
+//   ✅ 暂停           PUT /global/items/{CBT}  { status:'paused' }
+//   ❌ 价格/标题/图片  ML 返回 200 但值不变（静默忽略），所以本接口不提供，避免“假成功”
+//   ⚠️ 重新激活：ML 返回 200 但实测未生效（原链接多因审核/分类报错被挂起），这里会如实返回 applied:false
+
+interface ItemUpdateFieldResult {
+  field: string;
+  ok: boolean;
+  /** ML 是否真的应用了（写后回读比对，HTTP 200 ≠ 生效） */
+  applied: boolean;
+  http?: number;
+  message: string;
+}
+
+productAdminRouter.post('/:storeId/item/:itemId/update', async (req, res) => {
+  const store = getStoreRaw(req.params.storeId);
+  if (!store) return res.status(404).json({ success: false, message: '店铺不存在' });
+  const itemId = String(req.params.itemId || '');
+  if (!/^CBT/i.test(itemId)) {
+    return res.status(400).json({ success: false, message: '只支持 CBT 开头的商品 ID（本地站点商品归属子账号，本 token 无权修改）' });
+  }
+  const body = (req.body || {}) as { description?: string; availableQuantity?: number; status?: string };
+  const results: ItemUpdateFieldResult[] = [];
+
+  const base = getMlApiBase();
+  let token = '';
+  try {
+    token = await ensureStoreToken(store);
+  } catch (e: any) {
+    return res.status(500).json({ success: false, message: `取 token 失败：${e?.message || e}` });
+  }
+
+  const call = async (method: string, path: string, payload: any) => {
+    const r = await fetch(`${base}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const text = await r.text();
+    let msg = text.slice(0, 220);
+    try {
+      const j = JSON.parse(text);
+      if (j?.message) msg = `${j.error || ''} ${j.message}`.trim();
+    } catch {
+      /* 非 JSON 响应原样截断 */
+    }
+    return { status: r.status, ok: r.ok, msg };
+  };
+
+  const readBack = async (): Promise<any | null> => {
+    try {
+      return await storeApiGet(store, `/items/${itemId}?attributes=id,title,status,sub_status,available_quantity,price`, 2);
+    } catch {
+      return null;
+    }
+  };
+
+  const before = await readBack();
+
+  // ---- 描述 ----
+  if (typeof body.description === 'string' && body.description.trim()) {
+    const r = await call('PUT', `/items/${encodeURIComponent(itemId)}/description`, { plain_text: body.description.trim() });
+    let applied = false;
+    if (r.ok) {
+      try {
+        const d: any = await storeApiGet(store, `/items/${encodeURIComponent(itemId)}/description`, 2);
+        applied = String(d?.plain_text || '').trim() === body.description.trim();
+      } catch {
+        applied = false;
+      }
+    }
+    results.push({
+      field: '描述',
+      ok: r.ok,
+      applied,
+      http: r.status,
+      message: r.ok ? (applied ? '已生效' : 'ML 返回成功但回读内容不一致，请稍后刷新确认') : `失败：${r.msg}`,
+    });
+    await sleep(300);
+  }
+
+  // ---- 库存 ----
+  if (typeof body.availableQuantity === 'number' && Number.isFinite(body.availableQuantity)) {
+    const q = Math.max(0, Math.floor(body.availableQuantity));
+    const r = await call('PUT', `/global/items/${encodeURIComponent(itemId)}`, { available_quantity: q });
+    await sleep(1500);
+    const after = await readBack();
+    const applied = !!after && Number(after.available_quantity) === q;
+    results.push({
+      field: '库存',
+      ok: r.ok,
+      applied,
+      http: r.status,
+      message: r.ok ? (applied ? `已改为 ${q}` : `ML 返回成功但库存仍是 ${after?.available_quantity ?? '未知'}（站点不同步或该链接未生效）`) : `失败：${r.msg}`,
+    });
+  }
+
+  // ---- 状态（暂停 / 重新激活）----
+  if (body.status === 'paused' || body.status === 'active') {
+    const want = body.status;
+    const r = await call('PUT', `/global/items/${encodeURIComponent(itemId)}`, { status: want });
+    await sleep(2500);
+    const after = await readBack();
+    const applied = !!after && String(after.status) === want;
+    results.push({
+      field: want === 'paused' ? '暂停' : '重新激活',
+      ok: r.ok,
+      applied,
+      http: r.status,
+      message: r.ok
+        ? applied
+          ? '已生效'
+          : `ML 返回成功但状态仍是 ${after?.status ?? '未知'}${
+              want === 'active' ? '（多数是被审核/分类报错挂起，需到美客多后台「重新发布」）' : ''
+            }`
+        : `失败：${r.msg}`,
+    });
+  }
+
+  // ---- 明确说明不支持 ----
+  if (body.description === undefined && body.availableQuantity === undefined && body.status === undefined) {
+    return res.status(400).json({ success: false, message: '没有要修改的字段（支持：description / availableQuantity / status）' });
+  }
+
+  const after = await readBack();
+  res.json({
+    success: true,
+    itemId,
+    before,
+    after,
+    results,
+    /** 站点级同步说明：改的是 CBT 父商品，站点侧可能有延迟或不同步 */
+    note: '价格/标题/图片 ML 开放 API 对 CBT 商品不支持（返回 200 但值不变），需要改只能克隆重发或到美客多后台操作。',
+  });
+});
+
+// ============ 子账号（站点映射，给前端显示站点名用） ============
+
+productAdminRouter.get('/:storeId/accounts', async (req, res) => {
+  const store = getStoreRaw(req.params.storeId);
+  if (!store) return res.status(404).json({ success: false, message: '店铺不存在' });
+  const force = req.query.force === '1';
+  const accounts = await getSiteAccounts(store, force);
+  res.json({ success: true, accounts });
+});
+
 // ============ 导出：把筛选结果导成 CSV（给运营手动跟进） ============
 
 productAdminRouter.get('/:storeId/export', (req, res) => {
@@ -366,14 +548,37 @@ productAdminRouter.get('/:storeId/export', (req, res) => {
     risk: (req.query.risk as any) || 'all',
     q: (req.query.q as string) || '',
     page: 1,
-    pageSize: 5000,
+    pageSize: 20000,
+    onSale: req.query.onSale === 'all' ? 'all' : 'yes',
   });
   const esc = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  const head = ['商品ID', '标题', '状态', '风险等级', '命中词', '品牌', '型号', '价格', '库存', '已售', 'SKU'];
+  const head = ['商品ID', '标题', '站点级在售', '在售站点', '未激活站点', '同款重复', '父状态', '风险等级', '命中词', '品牌', '型号', '价格', '库存', '已售', 'SKU', '链接'];
+  const dupN = new Map<string, number>();
+  for (const r of result.items) {
+    const dk = r.dupKey || ('id:' + r.id);
+    dupN.set(dk, (dupN.get(dk) || 0) + 1);
+  }
   const lines = [head.map(esc).join(',')];
   for (const r of result.items) {
     lines.push(
-      [r.id, r.title, r.status, r.risk.level, r.risk.hits.join(' '), r.brand, r.model, r.price, r.availableQuantity, r.soldQuantity, r.sellerSku]
+      [
+        r.id,
+        r.title,
+        r.onSale === false ? '全部未激活' : r.onSale === true ? '在售' : '未知',
+        (r.activeSites || []).join(' '),
+        (r.inactiveSites || []).join(' '),
+        dupN.get(r.dupKey || ('id:' + r.id)) || 1,
+        r.status,
+        r.risk.level,
+        r.risk.hits.join(' '),
+        r.brand,
+        r.model,
+        r.price,
+        r.availableQuantity,
+        r.soldQuantity,
+        r.sellerSku,
+        r.mlPermalink || '',
+      ]
         .map(esc)
         .join(','),
     );

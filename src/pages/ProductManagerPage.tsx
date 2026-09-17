@@ -29,12 +29,14 @@ import {
   Progress,
   Select,
   Space,
+  Switch,
+  Textarea,
+  InputNumber,
   Table,
   Tabs,
   Tag,
   Tooltip,
   Loading,
-  ImageViewer,
 } from 'tdesign-react';
 import type { PrimaryTableCol } from 'tdesign-react';
 import {
@@ -49,6 +51,7 @@ import {
   Wand2,
   Download,
 } from 'lucide-react';
+import { Lightbox } from '../components/Lightbox';
 
 // ============ 类型 ============
 
@@ -88,6 +91,21 @@ interface StoreItemRow {
   lastUpdated?: string;
   risk: StoreItemRisk;
   miaoshouDetailId?: string;
+  /** 站点级真实售卖状态（MLM/MLB/MLC/MCO → active|paused|inactive） */
+  siteStatus?: Record<string, 'active' | 'paused' | 'inactive' | 'unknown'>;
+  activeSites?: string[];
+  pausedSites?: string[];
+  inactiveSites?: string[];
+  /** 至少一个站点在售（买家真能看到）；undefined = 该店还没拉到站点数据 */
+  onSale?: boolean;
+  /** 被美客多禁止的站点（ML 标记 forbidden） */
+  blockedSites?: string[];
+  /** 审核中但未被禁的站点 */
+  reviewSites?: string[];
+  /** 中文原因，如「MLM 被美客多禁止」 */
+  reasons?: string[];
+  /** 同款重复链接数（同一 SKU 被重复上架） */
+  dupCount?: number;
 }
 interface IndexStore {
   storeId: string;
@@ -110,6 +128,14 @@ interface IndexStore {
 }
 interface FullDetail {
   row: StoreItemRow | null;
+  siteStatus?: {
+    sites: Record<string, 'active' | 'paused' | 'inactive' | 'unknown'>;
+    siteItems: Array<{ siteId: string; itemId: string; userId: number; logisticType: string; state: string }>;
+    activeSites: string[];
+    pausedSites: string[];
+    inactiveSites: string[];
+    onSale: boolean;
+  } | null;
   raw: any;
   description: string;
   marketplaceItems: any[];
@@ -131,6 +157,91 @@ interface FixResult {
   newSites?: string[];
   siteErrors?: Array<{ site: string; msg: string }>;
   error?: string;
+}
+
+const SITE_NAME: Record<string, string> = {
+  MLM: '墨西哥',
+  MLB: '巴西',
+  MLC: '智利',
+  MCO: '哥伦比亚',
+  MLA: '阿根廷',
+  MLU: '乌拉圭',
+};
+const SITE_STATE_LABEL: Record<string, string> = {
+  active: '在售',
+  paused: '已暂停',
+  inactive: '未激活',
+  unknown: '未知',
+};
+
+/** 站点级状态徽标：每个站点一个小标签（在售绿 / 已暂停灰 / 未激活红） */
+function SiteBadges({
+  row,
+  size = 'small',
+}: {
+  row: Pick<
+    StoreItemRow,
+    | 'siteStatus'
+    | 'activeSites'
+    | 'pausedSites'
+    | 'inactiveSites'
+    | 'onSale'
+    | 'blockedSites'
+    | 'reviewSites'
+    | 'reasons'
+  >;
+  size?: 'small' | 'mini';
+}) {
+  const st = row.siteStatus;
+  if (!st || !Object.keys(st).length) {
+    return <span className="text-[11px] text-gray-400">站点状态待拉取</span>;
+  }
+  const cls = size === 'mini' ? 'text-[10px] px-1 py-[1px]' : 'text-[11px] px-1.5 py-[1px]';
+  const blocked = new Set(row.blockedSites || []);
+  const reviewing = new Set(row.reviewSites || []);
+  const tipBase = row.reasons?.length ? ' · ' + row.reasons.join('；') : '';
+  return (
+    <span className="inline-flex flex-wrap gap-1 items-center">
+      {Object.entries(st).map(([site, state]) => {
+        const b = blocked.has(site);
+        const r = reviewing.has(site);
+        const label =
+          state === 'active' ? '在售' : b ? '被禁止' : r ? '审核中' : state === 'paused' ? '已暂停' : '未激活';
+        return (
+          <span
+            key={site}
+            title={`${SITE_NAME[site] || site}：${label}${tipBase}`}
+            className={`${cls} rounded border ${
+              state === 'active'
+                ? 'border-green-300 bg-green-50 text-green-700'
+                : b
+                  ? 'border-red-300 bg-red-100 text-red-700'
+                  : r
+                    ? 'border-amber-300 bg-amber-50 text-amber-700'
+                    : state === 'paused'
+                      ? 'border-gray-300 bg-gray-50 text-gray-500'
+                      : 'border-red-300 bg-red-50 text-red-600'
+            }`}
+          >
+            {site} {label}
+          </span>
+        );
+      })}
+      {(row.blockedSites || []).length > 0 && (
+        <span
+          className={`${cls} rounded border border-red-400 bg-red-600 text-white font-medium`}
+          title={'这些站点被美客多标记为 forbidden，买家完全看不到' + tipBase}
+        >
+          🚫 已被美客多禁止 {(row.blockedSites || []).length} 站
+        </span>
+      )}
+      {row.onSale === false && (row.blockedSites || []).length === 0 && (
+        <span className={`${cls} rounded border border-red-300 bg-red-100 text-red-700 font-medium`} title="所有站点都未激活 —— 买家看不到">
+          全部未激活
+        </span>
+      )}
+    </span>
+  );
 }
 
 const RISK_LABEL: Record<string, { label: string; theme: any }> = {
@@ -222,6 +333,15 @@ export function ProductManagerPage() {
   const [listError, setListError] = useState('');
 
   // 详情
+  /** 是否显示「全部站点未激活」的链接（默认隐藏——用户反馈这类不该出现在列表里） */
+  const [includeOffShelf, setIncludeOffShelf] = useState(false);
+  /** 'all' | 'only' 只看被美客多禁止（forbidden）的商品 */
+  const [onlyBlocked, setOnlyBlocked] = useState(false);
+  // ---- 直接修改商品（实测可写字段：描述 / 库存 / 暂停）----
+  const [editDesc, setEditDesc] = useState('');
+  const [editQty, setEditQty] = useState<number>(0);
+  const [editBusy, setEditBusy] = useState('');
+  const [editResults, setEditResults] = useState<Array<{ field: string; ok: boolean; applied: boolean; message: string }> | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<FullDetail | null>(null);
@@ -289,6 +409,9 @@ export function ProductManagerPage() {
           q: qApplied,
           page: String(page),
           pageSize: String(pageSize),
+          // 默认只列「至少一个站点在售」的链接；勾上「含未激活」才显示被平台挂起的
+          onSale: includeOffShelf ? 'all' : 'yes',
+          blocked: onlyBlocked ? 'only' : 'all',
         });
         const r = await fetch(`/api/ml/product-admin/${storeId}/items?${qs}`);
         const d = await r.json();
@@ -311,7 +434,7 @@ export function ProductManagerPage() {
         if (!opts.silent) setLoading(false);
       }
     },
-    [storeId, status, risk, qApplied, page, pageSize],
+    [storeId, status, risk, qApplied, page, pageSize, includeOffShelf, onlyBlocked],
   );
 
   useEffect(() => {
@@ -343,6 +466,9 @@ export function ProductManagerPage() {
           return;
         }
         setDetail(d as FullDetail);
+        setEditDesc(String((d as any)?.description || ''));
+        setEditQty(Number((d as any)?.row?.availableQuantity) || 0);
+        setEditResults(null);
       } catch (e: any) {
         MessagePlugin.error('获取详情异常：' + (e?.message || e));
         setDetailOpen(false);
@@ -397,6 +523,43 @@ export function ProductManagerPage() {
     [storeId, loadItems],
   );
 
+  // ---- 直接改原链接：POST /item/:id/update（后端写后回读校验，200≠生效）----
+  const runUpdate = useCallback(
+    async (patch: { description?: string; availableQuantity?: number; status?: 'paused' | 'active' }, tag: string) => {
+      const id = detail?.row?.id;
+      if (!storeId || !id) return;
+      setEditBusy(tag);
+      setEditResults(null);
+      try {
+        const r = await fetch(`/api/ml/product-admin/${storeId}/item/${id}/update`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patch),
+        });
+        const d = await r.json();
+        if (!d.success) {
+          MessagePlugin.error(d.message || '修改失败');
+          setEditResults([{ field: tag, ok: false, applied: false, message: d.message || '修改失败' }]);
+          return;
+        }
+        setEditResults(d.results || []);
+        const applied = (d.results || []).filter((x: any) => x.applied).length;
+        if (applied) MessagePlugin.success(`${applied} 项已生效`);
+        else MessagePlugin.warning('ML 返回成功但值未变，详见下方逐项说明');
+        // 刷新详情与列表
+        const r2 = await fetch(`/api/ml/product-admin/${storeId}/item/${id}`);
+        const d2 = await r2.json();
+        if (d2.success) setDetail(d2);
+        loadItems({ silent: true });
+      } catch (e: any) {
+        MessagePlugin.error('请求异常：' + (e?.message || e));
+      } finally {
+        setEditBusy('');
+      }
+    },
+    [storeId, detail, loadItems],
+  );
+
   const fixableSelected = useMemo(() => {
     const m: Record<string, StoreItemRow> = {};
     for (const it of items) m[it.id] = it;
@@ -434,6 +597,12 @@ export function ProductManagerPage() {
             <ImageIcon size={14} className="text-gray-300" />
           </div>
         ),
+    },
+    {
+      colKey: 'siteStatus',
+      title: '站点状态',
+      width: 232,
+      cell: ({ row }) => <SiteBadges row={row} />,
     },
     {
       colKey: 'title',
@@ -640,6 +809,37 @@ export function ProductManagerPage() {
             { value: 'paused', label: `已暂停/禁止${counts ? ` (${counts.paused})` : ''}` },
           ]}
         />
+        <label
+          className="inline-flex items-center gap-1.5 text-xs text-gray-600 px-2 py-1 rounded border border-gray-200 cursor-pointer select-none"
+          title="美客多的「未激活」= 所有站点都挂了（多为审核不过/商品分类错误/被平台下架），买家看不到。默认不显示。"
+        >
+          <Switch
+            size="small"
+            value={includeOffShelf}
+            onChange={(v) => {
+              setIncludeOffShelf(!!v);
+              setPage(1);
+            }}
+          />
+          含未激活链接
+          {counts && typeof (counts as any).offShelf === 'number' && (
+            <span className="text-red-500">{(counts as any).offShelf}</span>
+          )}
+        </label>
+        <label className="flex items-center gap-1 text-xs text-gray-600 cursor-pointer" title="只看有站点被美客多标记 forbidden 的商品 —— 买家完全看不到，通常要下架重发或申诉">
+          <Switch
+            size="small"
+            value={onlyBlocked}
+            onChange={(v) => {
+              setOnlyBlocked(!!v);
+              setPage(1);
+            }}
+          />
+          <span className={onlyBlocked ? 'text-red-600 font-medium' : ''}>只看被禁止</span>
+          {counts && typeof (counts as any).blocked === 'number' && (
+            <span className="text-red-500">{(counts as any).blocked}</span>
+          )}
+        </label>
         <Select
           value={risk}
           onChange={(v) => {
@@ -695,6 +895,14 @@ export function ProductManagerPage() {
         )}
         <span className="text-xs text-gray-500">
           共 {total} 件{selected.size > 0 ? ` · 已选 ${selected.size}（可洗 ${fixableSelected.length}）` : ''}
+          {counts && typeof (counts as any).onSale === 'number' && (
+            <span className="ml-2 text-gray-400">
+              · 站点级在售 {(counts as any).onSale} / 全站未激活 {(counts as any).offShelf}
+              {typeof (counts as any).blocked === 'number' && (
+                <span className="text-red-500"> / 含禁售站点 {(counts as any).blocked}</span>
+              )}
+            </span>
+          )}
         </span>
         <span className="ml-auto flex items-center gap-2">
           <Button
@@ -878,6 +1086,134 @@ export function ProductManagerPage() {
                     )}
                   </div>
                 ))}
+              </div>
+            </div>
+
+            {/* 站点级真实在售状态 */}
+            <div>
+              <div className="text-xs font-medium mb-1.5 flex items-center gap-2">
+                站点级在售状态
+                {detail.siteStatus ? (
+                  <Tag size="small" variant="light" theme={detail.siteStatus.onSale ? 'success' : 'danger'}>
+                    {detail.siteStatus.onSale ? '买家可见（至少一个站点在售）' : '全部站点未激活（买家看不到）'}
+                  </Tag>
+                ) : (
+                  <span className="text-[11px] text-gray-400">未取到（接口失败或该店无站点数据）</span>
+                )}
+              </div>
+              <div className="text-xs px-3 py-2 rounded border" style={{ borderColor: 'var(--td-border-level-1-color, #e7e7e7)' }}>
+                <div className="text-[11px] text-gray-500 mb-1.5">
+                  CBT 父商品的 status <strong>不能</strong>代表买家能不能看到 —— 真正说话的是各站点本地 listing：
+                </div>
+                {(detail.siteStatus?.siteItems || []).length ? (
+                  <div className="space-y-1">
+                    {detail.siteStatus!.siteItems.map((m) => (
+                      <div key={`${m.siteId}-${m.itemId}`} className="flex items-center gap-2">
+                        <span className="w-10 shrink-0 text-gray-500">{m.siteId}</span>
+                        <span className="text-[11px] text-gray-400 w-16 shrink-0">{SITE_NAME[m.siteId] || ''}</span>
+                        <Tag
+                          size="small"
+                          variant="light"
+                          theme={m.state === 'active' ? 'success' : m.state === 'paused' ? 'default' : 'danger'}
+                        >
+                          {SITE_STATE_LABEL[m.state] || m.state}
+                        </Tag>
+                        <span className="text-[11px] text-gray-400 truncate">{m.itemId}</span>
+                        <span className="text-[11px] text-gray-300">子账号 {m.userId}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-gray-400">无站点 listing 数据</div>
+                )}
+              </div>
+            </div>
+
+            {/* 直接修改商品（实测可写字段） */}
+            <div>
+              <div className="text-xs font-medium mb-1.5">
+                直接修改原链接
+                <span className="ml-2 text-[11px] font-normal text-gray-400">
+                  实测可写：描述 / 库存 / 暂停 · 价格与标题 ML 开放 API 不支持（返回 200 但值不变）
+                </span>
+              </div>
+              <div className="text-xs px-3 py-2 rounded border space-y-3" style={{ borderColor: 'var(--td-border-level-1-color, #e7e7e7)' }}>
+                <div>
+                  <div className="text-[11px] text-gray-500 mb-1">商品描述（PUT /items/商品ID/description，实测可改）</div>
+                  <Textarea
+                    value={editDesc || (detail.description || '')}
+                    onChange={(v) => setEditDesc(String(v))}
+                    autosize={{ minRows: 3, maxRows: 8 }}
+                    placeholder="留空则不改"
+                  />
+                  <div className="mt-1.5 flex gap-2">
+                    <Button
+                      size="small"
+                      theme="primary"
+                      loading={editBusy === 'desc'}
+                      onClick={() => runUpdate({ description: editDesc || detail.description || '' }, 'desc')}
+                    >
+                      保存描述
+                    </Button>
+                    <Button size="small" variant="outline" onClick={() => setEditDesc(detail.description || '')}>
+                      重置
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="flex items-end gap-2 flex-wrap">
+                  <div>
+                    <div className="text-[11px] text-gray-500 mb-1">
+                      库存 available_quantity（当前 {detail.row?.availableQuantity ?? '—'}）
+                    </div>
+                    <InputNumber
+                      size="small"
+                      theme="normal"
+                      value={editQty}
+                      min={0}
+                      max={9999}
+                      onChange={(v) => setEditQty(Number(v) || 0)}
+                      style={{ width: 120 }}
+                    />
+                  </div>
+                  <Button
+                    size="small"
+                    theme="primary"
+                    loading={editBusy === 'qty'}
+                    onClick={() => runUpdate({ availableQuantity: editQty }, 'qty')}
+                  >
+                    保存库存
+                  </Button>
+                  <Button
+                    size="small"
+                    variant="outline"
+                    theme="default"
+                    loading={editBusy === 'pause'}
+                    disabled={detail.row?.status === 'paused'}
+                    onClick={() => runUpdate({ status: 'paused' }, 'pause')}
+                  >
+                    暂停该链接
+                  </Button>
+                  <Button
+                    size="small"
+                    variant="outline"
+                    loading={editBusy === 'active'}
+                    disabled={detail.row?.status === 'active'}
+                    onClick={() => runUpdate({ status: 'active' }, 'active')}
+                  >
+                    重新激活
+                  </Button>
+                </div>
+
+                {editResults && (
+                  <div className="space-y-1 border-t pt-2" style={{ borderColor: 'var(--td-border-level-1-color, #e7e7e7)' }}>
+                    {editResults.map((r, i) => (
+                      <div key={i} className={r.applied ? 'text-green-600' : 'text-red-600'}>
+                        [{r.field}] {r.applied ? '✅ 已生效' : '⚠️ 未生效'} — {r.message}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1180,7 +1516,7 @@ export function ProductManagerPage() {
         )}
       </Dialog>
 
-      <ImageViewer
+      <Lightbox
         images={viewerImages}
         visible={viewerOpen}
         index={viewerIndex}

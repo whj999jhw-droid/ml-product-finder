@@ -84,6 +84,15 @@ interface Candidate {
   sellerSku?: string | null;
   /** 同款重复链接数：>1 表示这件商品在美客多被重复上架，列表只展示其中一条 */
   dupCount?: number;
+  /** 站点级真实售卖状态（MLM/MLB/MLC/MCO） */
+  siteStatus?: Record<string, 'active' | 'paused' | 'inactive' | 'unknown'>;
+  activeSites?: string[];
+  pausedSites?: string[];
+  inactiveSites?: string[];
+  /** 至少一个站点在售；null/undefined = 该店还没拉到站点数据 */
+  onSale?: boolean | null;
+  /** 同款重复里最终选中这条的依据（其它被合并掉的链接） */
+  dupPick?: { keptId: string; keptActiveSites: string[]; others: Array<{ id: string; activeSites: string[]; title: string }> } | null;
   video: CandidateVideo | null;
   clip?: ClipInfo;
 }
@@ -150,6 +159,48 @@ const STAGE_LABEL: Record<string, string> = {
 };
 
 /** 视频来源 → 展示文案 */
+const SITE_NAME: Record<string, string> = {
+  MLM: '墨西哥',
+  MLB: '巴西',
+  MLC: '智利',
+  MCO: '哥伦比亚',
+  MLA: '阿根廷',
+  MLU: '乌拉圭',
+};
+const SITE_STATE_LABEL: Record<string, string> = {
+  active: '在售',
+  paused: '已暂停',
+  inactive: '未激活',
+  unknown: '未知',
+};
+
+/** 站点级状态徽标：只有 active 才是买家真能看到 */
+function SiteBadges({ row }: { row: { siteStatus?: Record<string, string>; onSale?: boolean | null } }) {
+  const st = row.siteStatus;
+  if (!st || !Object.keys(st).length) {
+    return <span className="text-[11px] text-gray-400">站点状态待拉取</span>;
+  }
+  return (
+    <span className="inline-flex flex-wrap gap-1 items-center">
+      {Object.entries(st).map(([site, state]) => (
+        <span
+          key={site}
+          title={`${SITE_NAME[site] || site}：${SITE_STATE_LABEL[state] || state}（只有「在售」买家才看得到）`}
+          className={`text-[10px] px-1 py-[1px] rounded border ${
+            state === 'active'
+              ? 'border-green-300 bg-green-50 text-green-700'
+              : state === 'paused'
+                ? 'border-gray-300 bg-gray-50 text-gray-500'
+                : 'border-red-300 bg-red-50 text-red-600'
+          }`}
+        >
+          {site} {SITE_STATE_LABEL[state] || state}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 const SOURCE_LABEL: Record<string, string> = {
   source: '源视频转码',
   backup: '服务器备份',
@@ -202,6 +253,9 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
   const [items, setItems] = useState<Candidate[]>([]);
   const [total, setTotal] = useState(0);
   const [linkCounts, setLinkCounts] = useState<{ source: number; ai: number } | null>(null);
+  /** 是否显示「全部站点未激活」的链接（默认不显示——生成视频也没意义） */
+  const [includeOffShelf, setIncludeOffShelf] = useState(false);
+  const [siteStats, setSiteStats] = useState<{ onSale: number; offShelf: number; noSiteData: number } | null>(null);
   const [mergedAway, setMergedAway] = useState(0);
   const [building, setBuilding] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
@@ -233,6 +287,8 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
           page: String(page),
           pageSize: String(pageSize),
           checkClip: checkClip ? '1' : '0',
+          // 默认只列「至少一个站点在售」的链接（站点级真实状态，父状态不可信）
+          offShelf: includeOffShelf ? '1' : '0',
         });
         const r = await fetch(`/api/ml/miaoshou/video/candidates?${qs}`);
         const d = await r.json();
@@ -244,6 +300,7 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
         setItems(d.items || []);
         setTotal(d.total || 0);
         setLinkCounts(d.linkCounts || null);
+        setSiteStats(d.siteStats || null);
         setMergedAway(Number(d.mergedAway) || 0);
         setBuilding(!!d.building);
         setProgress(d.progress || { done: 0, total: 0 });
@@ -254,7 +311,7 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
         if (!opts.silent) setLoading(false);
       }
     },
-    [storeId, qApplied, link, page, pageSize, checkClip],
+    [storeId, qApplied, link, page, pageSize, checkClip, includeOffShelf],
   );
 
   useEffect(() => {
@@ -424,6 +481,12 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
             无图
           </div>
         ),
+    },
+    {
+      colKey: 'siteStatus',
+      title: '站点在售',
+      width: 216,
+      cell: ({ row }) => <SiteBadges row={row} />,
     },
     {
       colKey: 'title',
@@ -636,6 +699,15 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
         >
           同步妙手发布记录
         </Button>
+        <Checkbox
+          checked={includeOffShelf}
+          onChange={(v) => {
+            setIncludeOffShelf(!!v);
+            setPage(1);
+          }}
+          label="含未激活链接"
+          title="美客多的「未激活」= 该站点买家看不到（多为审核不过/分类错误/被下架）。默认不列出——给它生成视频没有意义。"
+        />
         <Checkbox checked={checkClip} onChange={(v) => setCheckClip(!!v)} label="查 ML 审核状态" />
         <Checkbox checked={force} onChange={(v) => setForce(!!v)} label="强制重新生成" />
         <span className="text-xs text-gray-500">
@@ -700,12 +772,29 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
             只能 AI 生成 {linkCounts.ai}
           </Tag>
           {mergedAway > 0 && (
-            <Tag size="small" variant="light" className="mr-1" title="同一 SKU 的多条重复链接已合并，只保留最新一条">
+            <Tag
+              size="small"
+              variant="light"
+              className="mr-1"
+              title="同一 SKU 的多条重复链接已合并：优先保留「活跃站点多」的那条（原来只按上架时间，会留下已下架的那条）"
+            >
               已合并同款重复 {mergedAway} 条
             </Tag>
           )}
+          {siteStats && (
+            <>
+              <Tag size="small" theme="success" variant="light" className="mr-1" title="至少一个站点真实在售（买家看得到）">
+                站点级在售 {siteStats.onSale}
+              </Tag>
+              {siteStats.offShelf > 0 && (
+                <Tag size="small" theme="danger" variant="light" className="mr-1" title="4 个站点全部未激活，买家看不到；勾选「含未激活链接」才显示">
+                  全站未激活已隐藏 {siteStats.offShelf}
+                </Tag>
+              )}
+            </>
+          )}
           <span className="text-gray-400">
-            配对依据是妙手发布记录的标题前缀（SKU 取自 SELLER_SKU 属性）。数量偏低时点「同步妙手发布记录」再刷新。
+            列表以<strong>站点级真实状态</strong>为准（CBT 父商品 status 常年是 active，不可信）。配对依据是妙手发布记录的标题前缀（SKU 取自 SELLER_SKU 属性）。
           </span>
         </div>
       )}

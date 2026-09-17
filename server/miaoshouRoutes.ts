@@ -1188,27 +1188,57 @@ miaoshouRouter.get('/video/candidates', async (req, res) => {
     const li = getLinkIndex();
     const vrecs = getVideoRecords();
 
-    // 一次取全量「真实在售」（status=active 已由索引按 ML 搜索接口的 status=active 判定，
-    // 不再用 CBT 商品自报的 status —— 后者常年是 active，会把已被暂停的商品也带出来）
-    const allRows = listItems(storeId, { status: 'active', page: 1, pageSize: 20000 }).items;
+    // 站点级真实在售口径（2026-09-18 新增）：
+    //  CBT 父状态 / 父账号搜索接口的 status 都**不能**代表买家能不能看到 ——
+    //  实测 CBT5243407174 父状态 active，但 MCO/MLB/MLC/MLM 四个站点本地 listing 全部未激活；
+    //  同 SKU 的 CBT4346668443 才是真正在卖的。所以这里以 `onSale`（至少一个站点在售）为准。
+    const includeOffShelf = String(req.query.offShelf || '') === '1';
+    const allRows = listItems(storeId, {
+      status: 'active',
+      page: 1,
+      pageSize: 20000,
+      onSale: includeOffShelf ? 'all' : 'yes',
+    }).items;
 
     // 同款去重：同一件 1688 商品被重复上架时 SELLER_SKU 完全相同（实测
     // CBT5243407174 / CBT4346668443 的 SKU 都是 639067677628_1014#Green Pliers），
-    // 生成视频也是同一支 → 列表只保留最新一条（allRows 已按 dateCreated 倒序），
+    // 生成视频也是同一支 → 一组里只保留「**真正在售**」的那条：
+    //  ① 活跃站点多的优先（4 站点在售 > 1 站点在售）
+    //  ② 其次按上架时间倒序（原来只按时间，结果留下了已下架的 CBT5243407174，用户已反馈）
     // 其余条数记进 dupCount，前端显示「同款重复 N」而不是静默丢弃。
-    const firstByDup = new Map<string, string>();
-    const dupCount = new Map<string, number>();
     const dupKeyOf = (row: any) => String(row?.dupKey || `id:${row?.id}`);
+    const groups = new Map<string, any[]>();
     for (const row of allRows) {
       const key = dupKeyOf(row);
-      if (firstByDup.has(key)) {
-        dupCount.set(key, (dupCount.get(key) || 1) + 1);
-        continue;
-      }
-      firstByDup.set(key, row.id);
-      dupCount.set(key, 1);
+      const arr = groups.get(key);
+      if (arr) arr.push(row);
+      else groups.set(key, [row]);
     }
-    const dedupRows = allRows.filter((r) => firstByDup.get(dupKeyOf(r)) === r.id);
+    const keptIds = new Set<string>();
+    const dupCount = new Map<string, number>();
+    const dupPicked = new Map<string, { keptId: string; keptActiveSites: string[]; others: Array<{ id: string; activeSites: string[]; title: string }> }>();
+    for (const [key, arr] of groups) {
+      const sorted = [...arr].sort((a: any, b: any) => {
+        const na = (a.activeSites || []).length;
+        const nb = (b.activeSites || []).length;
+        if (na !== nb) return nb - na;
+        const ua = typeof a.onSale === 'boolean' ? (a.onSale ? 1 : 0) : 0;
+        const ub = typeof b.onSale === 'boolean' ? (b.onSale ? 1 : 0) : 0;
+        if (ua !== ub) return ub - ua;
+        return String(b.dateCreated || '').localeCompare(String(a.dateCreated || ''));
+      });
+      const best = sorted[0];
+      keptIds.add(best.id);
+      dupCount.set(key, arr.length);
+      if (arr.length > 1) {
+        dupPicked.set(key, {
+          keptId: best.id,
+          keptActiveSites: best.activeSites || [],
+          others: sorted.slice(1).map((r: any) => ({ id: r.id, activeSites: r.activeSites || [], title: String(r.title || '').slice(0, 80) })),
+        });
+      }
+    }
+    const dedupRows = allRows.filter((r) => keptIds.has(r.id));
     const mergedAway = allRows.length - dedupRows.length;
 
     const decorate = (row: any) => {
@@ -1232,6 +1262,19 @@ miaoshouRouter.get('/video/candidates', async (req, res) => {
         detailLink: ctx.detailLink,
         /** 同款重复链接数：>1 表示这件商品在美客多被重复上架（同一 SKU 多个 listing） */
         dupCount: dupCount.get(dupKeyOf(row)) || 1,
+        /** 站点级真实状态（MLM/MLB/MLC/MCO） */
+        siteStatus: row.siteStatus || null,
+        activeSites: row.activeSites || [],
+        pausedSites: row.pausedSites || [],
+        inactiveSites: row.inactiveSites || [],
+        /** 至少一个站点在售（买家真能看到） */
+        onSale: typeof row.onSale === 'boolean' ? row.onSale : null,
+        /** 被美客多禁止的站点 + 中文原因（如「MLM 被美客多禁止」） */
+        blockedSites: row.blockedSites || [],
+        reviewSites: row.reviewSites || [],
+        reasons: row.reasons || [],
+        /** 该组同款里最终选中的是哪条 + 其它被合并掉的链接（前端可展开看） */
+        dupPick: dupPicked.get(dupKeyOf(row)) || null,
         video: vrec
           ? {
               status: vrec.status,
@@ -1315,6 +1358,14 @@ miaoshouRouter.get('/video/candidates', async (req, res) => {
       /** 去重前/去重后的在售条数（诊断用；mergedAway>0 说明存在重复上架） */
       rawTotal: allRows.length,
       mergedAway,
+      /** 站点级口径统计（含被隐藏的全站未激活链接数，未勾选「包含未激活」时统计的是全量） */
+      siteStats: {
+        onSale: dedupRows.filter((r: any) => r.onSale !== false).length,
+        offShelf: dedupRows.filter((r: any) => r.onSale === false).length,
+        noSiteData: dedupRows.filter((r: any) => typeof r.onSale !== 'boolean').length,
+      },
+      /** 是否包含全站未激活的链接（默认不包含） */
+      includeOffShelf,
       clipError,
       /** 当前配置里可用于 AI 图生视频的平台（空数组=没有配视频模型，源视频缺失时必然失败） */
       aiProviders: listVideoProviders(),

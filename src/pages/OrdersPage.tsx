@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { ReactNode } from 'react';
-import { Card, Tabs, Table, Tag, Dialog, Button, Loading, MessagePlugin, Space, Image, ImageViewer } from 'tdesign-react';
+import { Card, Tabs, Table, Tag, Dialog, Button, Loading, MessagePlugin, Space, Image } from 'tdesign-react';
 import { ShopIcon, RefreshIcon, TranslateIcon } from 'tdesign-icons-react';
+import { Lightbox } from '../components/Lightbox';
 
 interface StoreRow {
   id: string;
@@ -691,7 +692,7 @@ export function OrdersPage() {
       </Dialog>
 
       {/* 商品原图预览 */}
-      <ImageViewer
+      <Lightbox
         images={viewerImages}
         visible={viewerVisible}
         defaultIndex={viewerIndex}

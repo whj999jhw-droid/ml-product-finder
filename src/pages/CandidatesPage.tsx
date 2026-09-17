@@ -11,13 +11,13 @@ import {
   Space,
   Switch,
   Link,
-  ImageViewer,
   Input,
   InputNumber,
   Textarea,
   Collapse,
   Tooltip,
 } from 'tdesign-react';
+import { Lightbox } from '../components/Lightbox';
 import type { PrimaryTableCol } from 'tdesign-react';
 
 interface Candidate {
@@ -1738,7 +1738,7 @@ export function CandidatesPage() {
             </div>
           )}
 
-          <ImageViewer
+          <Lightbox
             images={viewerImages}
             visible={viewerVisible}
             defaultIndex={viewerIndex}
@@ -1869,7 +1869,7 @@ export function CandidatesPage() {
             )}
           </Loading>
 
-          <ImageViewer
+          <Lightbox
             images={viewerImages}
             visible={viewerVisible}
             defaultIndex={viewerIndex}
