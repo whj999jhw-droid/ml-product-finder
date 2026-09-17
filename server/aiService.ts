@@ -578,11 +578,8 @@ async function openaiCompatibleGenerate(opts: LLMOptions, provider: LlmProvider)
 async function volcanoRestGenerate(opts: LLMOptions, provider: LlmProvider): Promise<string> {
   const timeoutMs = opts.timeoutMs ?? 120000;
   const isImage = isImageProvider(provider);
-  const url = isImage
-    ? isImageEndpoint(provider.baseUrl)
-      ? normalizeBaseUrl(provider.baseUrl) // 火山等：端点本身就是 /images/generations
-      : `${normalizeBaseUrl(provider.baseUrl)}/images/generations` // 通用 OpenAI：补 /images/generations
-    : volcanoRestChatUrl(provider.baseUrl);
+  // 同一条铁律：用户填到具体端点就原样请求，只有裸域名/版本号结尾才补 /images/generations
+  const url = isImage ? imageEndpointUrl(provider.baseUrl) : volcanoRestChatUrl(provider.baseUrl);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
