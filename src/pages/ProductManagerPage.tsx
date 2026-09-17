@@ -1,578 +1,1191 @@
-import { useState, useEffect, useCallback } from 'react';
+/**
+ * src/pages/ProductManagerPage.tsx
+ * 商品管理页（重做版）
+ *
+ * 需求：
+ *  1. 分店铺展示全部商品（店铺 Tab）
+ *  2. 可筛选「正在上架 / 已暂停(被禁止) / 违规风险商品」
+ *  3. 违规风险商品可「一键改为符合规范」
+ *  4. 商品详情弹窗展示全部字段
+ *  5. 保留原搜索框与搜索功能
+ *  6. 左右留白收窄、紧凑布局、小屏可用
+ *
+ * ⚠️ 平台事实（2026-09-17 实测，别推翻）：
+ *  CBT 商品对本店 token 是「只读」的 —— PUT /items/{CBT} 报 400、PUT /marketplace/items 报 405、
+ *  本地站点商品报 403、DELETE 报 405。所以「改标题/改价/改图」不能直接改原链接；
+ *  唯一可行的合规化路径是**克隆清洗重发**（POST /global/items 建一条新链接），
+ *  原链接仍需到美客多后台人工暂停/删除 —— 界面上已明确提示。
+ *  命中影视/动漫/游戏 IP 或体育赛事词的商品无法靠改名规避（卖的就是 IP 本身），只能下架。
+ */
+
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Card,
-  Select,
-  Input,
   Button,
+  Checkbox,
   Dialog,
-  Loading,
+  Input,
   MessagePlugin,
-  Image,
-  ImageViewer,
-  Textarea,
-  Tag,
+  Pagination,
+  Progress,
+  Select,
   Space,
+  Table,
+  Tabs,
+  Tag,
+  Tooltip,
+  Loading,
+  ImageViewer,
 } from 'tdesign-react';
-import { SearchIcon, EditIcon, ShopIcon, RefreshIcon } from 'tdesign-icons-react';
+import type { PrimaryTableCol } from 'tdesign-react';
+import {
+  AlertTriangle,
+  ExternalLink,
+  Eye,
+  Image as ImageIcon,
+  RefreshCw,
+  SearchIcon,
+  Shield,
+  ShieldAlert,
+  Wand2,
+  Download,
+} from 'lucide-react';
 
-interface StoreItem {
-  id: string;
-  nickname: string;
-  site: string;
-  mlUserNick?: string;
-  authorized: boolean;
+// ============ 类型 ============
+
+interface RiskFieldHit {
+  id?: string;
+  name?: string;
+  value: string;
+  hits: string[];
 }
-
-interface ProductHit {
+interface StoreItemRisk {
+  level: 'none' | 'platform' | 'brand' | 'ip';
+  hits: string[];
+  titleHits: string[];
+  attrHits: RiskFieldHit[];
+  fixable: boolean;
+  message: string;
+}
+interface StoreItemRow {
   id: string;
   title: string;
-  seller_sku?: string;
+  status: string;
+  subStatus: string[];
   price: number;
-  currency_id: string;
-  thumbnail: string;
-  permalink: string;
-  available_quantity: number;
-  status?: string;
-  pictures: string[];
-  matchType?: 'title' | 'sku';
-}
-
-interface ProductPicture {
-  id?: string;
-  url: string;
-}
-
-interface ProductSiteToSell {
-  site_id: string;
-  price: number;
-  currency_id?: string;
-  listing_type_id?: string;
-  logistic_type?: string;
-  net_proceeds?: boolean;
-}
-
-interface ProductDetail extends ProductHit {
-  description: string;
-  dimensions: { length: string; width: string; height: string; weight: string };
+  currencyId: string;
+  availableQuantity: number;
+  soldQuantity: number;
   condition?: string;
-  site_id?: string;
-  localized_title?: string;
-  localized_price?: number;
-  localized_site_id?: string;
-  localized_item_id?: string;
-  marketplace_items?: { site_id: string; item_id: string }[];
-  // CBT 保存必须用 global 根 ID（CBT...），搜索/详情可能返回本地站点 ID（MLM...）
-  root_item_id?: string;
-  // 主要特性
+  listingTypeId?: string;
+  categoryId?: string;
+  sellerSku?: string;
   brand?: string;
   model?: string;
-  // 图片带 id（CBT 更新必须用 id）
-  pictures_with_id?: ProductPicture[];
-  // CBT 按国家价格
-  sites_to_sell?: ProductSiteToSell[];
+  thumbnail: string;
+  pictures: string[];
+  siteItemIds: string[];
+  dateCreated?: string;
+  lastUpdated?: string;
+  risk: StoreItemRisk;
+  miaoshouDetailId?: string;
+}
+interface IndexStore {
+  storeId: string;
+  storeNick: string;
+  site: string;
+  built: boolean;
+  builtAt: number;
+  building: boolean;
+  progress: { done: number; total: number };
+  counts: {
+    total: number;
+    active: number;
+    paused: number;
+    risk: number;
+    riskIp: number;
+    riskBrand: number;
+    riskPlatform: number;
+  } | null;
+  error?: string;
+}
+interface FullDetail {
+  row: StoreItemRow | null;
+  raw: any;
+  description: string;
+  marketplaceItems: any[];
+  permalink: string;
+  risk: StoreItemRisk;
+  suggested: { title: string; attributeChanges: Array<{ id?: string; name?: string; from: string; to: string }> };
+  _errors?: string[];
+}
+interface FixResult {
+  itemId: string;
+  title?: string;
+  ok: boolean;
+  skipped?: boolean;
+  dry?: boolean;
+  newId?: string;
+  mode?: string;
+  changes?: string[];
+  preview?: { title: string; attributeChanges: any[] };
+  newSites?: string[];
+  siteErrors?: Array<{ site: string; msg: string }>;
+  error?: string;
 }
 
+const RISK_LABEL: Record<string, { label: string; theme: any }> = {
+  none: { label: '无风险', theme: 'success' },
+  platform: { label: '平台违禁词', theme: 'warning' },
+  brand: { label: '品牌词', theme: 'warning' },
+  ip: { label: 'IP/赛事（不可洗）', theme: 'danger' },
+};
+
+const STATUS_LABEL: Record<string, { label: string; theme: any }> = {
+  active: { label: '正在上架', theme: 'success' },
+  paused: { label: '已暂停', theme: 'warning' },
+  closed: { label: '已关闭', theme: 'default' },
+  under_review: { label: '审核中', theme: 'warning' },
+  inactive: { label: '未激活', theme: 'default' },
+  not_yet_active: { label: '待上架', theme: 'default' },
+};
+
+const SUB_LABEL: Record<string, string> = {
+  out_of_stock: '缺货',
+  paused: '已暂停',
+  free_shipping: '包邮',
+  incomplete: '信息不全',
+  deleted: '已删除',
+};
+
+const ITEM_TLD: Record<string, string> = {
+  MLM: 'com.mx',
+  MLB: 'com.br',
+  MLC: 'cl',
+  MCO: 'co',
+  MLA: 'com.ar',
+  MPE: 'com.pe',
+  MPT: 'com.uy',
+};
+
+function permalinkOf(row: { siteItemIds?: string[] }): string {
+  const sid = (row.siteItemIds || [])[0];
+  if (!sid) return '';
+  const tld = ITEM_TLD[sid.slice(0, 3)] || 'com.mx';
+  return `https://www.mercadolibre.${tld}/p/${sid}`;
+}
+
+function fmtTime(v?: string): string {
+  if (!v) return '—';
+  const d = new Date(v);
+  if (isNaN(d.getTime())) return v;
+  return d.toLocaleString('zh-CN');
+}
+
+/** 把任意值转成可读字符串（详情里展示原始字段用） */
+function showVal(v: any): string {
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (Array.isArray(v)) {
+    if (!v.length) return '—';
+    return v.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(' / ');
+  }
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
+// ============ 主组件 ============
+
 export function ProductManagerPage() {
-  const [stores, setStores] = useState<StoreItem[]>([]);
-  const [storeId, setStoreId] = useState<string>('');
-  const [query, setQuery] = useState<string>('');
-  const [searching, setSearching] = useState(false);
-  const [results, setResults] = useState<ProductHit[]>([]);
-  const [searched, setSearched] = useState(false);
+  const [stores, setStores] = useState<IndexStore[]>([]);
+  const [storeId, setStoreId] = useState('');
+  const [loadingStores, setLoadingStores] = useState(true);
 
-  // 编辑弹窗状态
-  const [editOpen, setEditOpen] = useState(false);
-  const [detail, setDetail] = useState<ProductDetail | null>(null);
-  const [editTitle, setEditTitle] = useState('');
-  const [editPictures, setEditPictures] = useState<ProductPicture[]>([]);
-  const [editDesc, setEditDesc] = useState('');
-  const [editLen, setEditLen] = useState('');
-  const [editWid, setEditWid] = useState('');
-  const [editHei, setEditHei] = useState('');
-  const [editWeight, setEditWeight] = useState('');
-  const [editQuantity, setEditQuantity] = useState('');
-  const [editBrand, setEditBrand] = useState('');
-  const [editModel, setEditModel] = useState('');
-  const [editSitesToSell, setEditSitesToSell] = useState<ProductSiteToSell[]>([]);
-  const [saving, setSaving] = useState(false);
+  // 筛选
+  const [status, setStatus] = useState<'all' | 'active' | 'paused'>('all');
+  const [risk, setRisk] = useState<'all' | 'none' | 'risk' | 'ip' | 'brand' | 'platform'>('all');
+  const [query, setQuery] = useState('');
+  const [qApplied, setQApplied] = useState('');
 
-  // 图片放大查看
-  const [previewVisible, setPreviewVisible] = useState(false);
-  const [previewImages, setPreviewImages] = useState<string[]>([]);
-  const [previewIndex, setPreviewIndex] = useState(0);
-  const openViewer = (images: string[], index: number) => {
-    const valid = images.filter(Boolean);
-    if (!valid.length) return;
-    setPreviewImages(valid);
-    setPreviewIndex(index);
-    setPreviewVisible(true);
-  };
+  // 列表
+  const [items, setItems] = useState<StoreItemRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const [loading, setLoading] = useState(false);
+  const [building, setBuilding] = useState(false);
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [counts, setCounts] = useState<IndexStore['counts']>(null);
+  const [listError, setListError] = useState('');
 
-  useEffect(() => {
-    fetch('/api/ml/stores')
-      .then((r) => r.json())
-      .then((d) => {
-        const list: StoreItem[] = (d.stores || []).filter((s: StoreItem) => s.authorized);
-        setStores(list);
-        if (list.length && !storeId) setStoreId(list[0].id);
-      })
-      .catch(() => MessagePlugin.error('获取店铺列表失败'));
-  }, []);
+  // 详情
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detail, setDetail] = useState<FullDetail | null>(null);
+  const [detailFor, setDetailFor] = useState<StoreItemRow | null>(null);
+  const [showRaw, setShowRaw] = useState(false);
 
-  const doSearch = useCallback(async () => {
-    if (!storeId) {
-      MessagePlugin.warning('请先选择店铺');
-      return;
-    }
-    setSearching(true);
-    setSearched(true);
+  // 图片查看
+  const [viewerOpen, setViewerOpen] = useState(false);
+  const [viewerImages, setViewerImages] = useState<string[]>([]);
+  const [viewerIndex, setViewerIndex] = useState(0);
+
+  // 合规修复
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [fixLoading, setFixLoading] = useState(false);
+  const [fixPreview, setFixPreview] = useState<{ results: FixResult[]; total: number } | null>(null);
+  const [fixPreviewOpen, setFixPreviewOpen] = useState(false);
+  const [fixDone, setFixDone] = useState<{ results: FixResult[]; ok: number; failed: number; skipped: number } | null>(null);
+  const [fixDoneOpen, setFixDoneOpen] = useState(false);
+
+  const currentStore = useMemo(() => stores.find((s) => s.storeId === storeId), [stores, storeId]);
+
+  // ---- 店铺索引状态 ----
+  const loadStores = useCallback(async (refresh = false) => {
+    setLoadingStores(true);
     try {
-      const r = await fetch(
-        `/api/ml/stores/${storeId}/products/search?q=${encodeURIComponent(query.trim())}`,
-      );
+      const r = await fetch(`/api/ml/product-admin/index${refresh ? '?refresh=1' : ''}`);
       const d = await r.json();
       if (!d.success) {
-        MessagePlugin.error(d.message || '搜索失败');
-        setResults([]);
-      } else {
-        setResults(d.products || []);
-      }
-    } catch (e: any) {
-      MessagePlugin.error('搜索失败: ' + (e?.message || e));
-      setResults([]);
-    } finally {
-      setSearching(false);
-    }
-  }, [storeId, query]);
-
-  const openEdit = useCallback(async (hit: ProductHit) => {
-    if (!storeId) return;
-    setEditOpen(true);
-    setDetail(null);
-    try {
-      const r = await fetch(`/api/ml/stores/${storeId}/products/${hit.id}`);
-      const d = await r.json();
-      if (!d.success) {
-        MessagePlugin.error(d.message || '获取详情失败');
-        setEditOpen(false);
+        MessagePlugin.error('获取店铺索引失败');
         return;
       }
-      const p: ProductDetail = d.product;
-      setDetail(p);
-      // CBT 商品在本地站点（如 MLM）的标题/价格往往与 global 不同，优先展示本地站点的值，和美客多后台保持一致
-      setEditTitle(p.localized_title || p.title || '');
-      // 优先使用带 id 的图片对象（CBT 保存需要 id）
-      const pics: ProductPicture[] =
-        p.pictures_with_id && p.pictures_with_id.length
-          ? p.pictures_with_id
-          : (p.pictures && p.pictures.length
-              ? p.pictures.map((url) => ({ url }))
-              : p.thumbnail
-                ? [{ url: p.thumbnail }]
-                : []);
-      setEditPictures(pics);
-      setEditDesc(p.description || '');
-      setEditLen(p.dimensions?.length || '');
-      setEditWid(p.dimensions?.width || '');
-      setEditHei(p.dimensions?.height || '');
-      setEditWeight(p.dimensions?.weight || '');
-      setEditQuantity(p.available_quantity !== undefined ? String(p.available_quantity) : '');
-      setEditBrand(p.brand || '');
-      setEditModel(p.model || '');
-      setEditSitesToSell(p.sites_to_sell || []);
+      const list: IndexStore[] = d.stores || [];
+      setStores(list);
+      if (!storeId && list.length) setStoreId(list[0].storeId);
     } catch (e: any) {
-      MessagePlugin.error('获取详情失败: ' + (e?.message || e));
-      setEditOpen(false);
+      MessagePlugin.error('获取店铺索引异常：' + (e?.message || e));
+    } finally {
+      setLoadingStores(false);
     }
   }, [storeId]);
 
-  const saveEdit = useCallback(async () => {
-    if (!storeId || !detail) return;
-    setSaving(true);
-    const saveItemId = detail.root_item_id || detail.id;
-    try {
-      const r = await fetch(`/api/ml/stores/${storeId}/products/${saveItemId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: editTitle,
-          pictures: editPictures,
-          sites_to_sell: editSitesToSell,
-          length: editLen,
-          width: editWid,
-          height: editHei,
-          weight: editWeight,
-          description: editDesc,
-          site_id: detail.site_id || '',
-          available_quantity: editQuantity,
-          brand: editBrand,
-          model: editModel,
-        }),
-      });
-      const d = await r.json();
-      if (!d.success) {
-        MessagePlugin.error(d.message || '保存失败');
-      } else {
-        MessagePlugin.success('保存成功，已提交到美客多');
-        setEditOpen(false);
-        // 刷新搜索结果中的标题/缩略图/价格
-        const firstLocalPrice = editSitesToSell[0]?.price;
-        setResults((prev) =>
-          prev.map((x) =>
-            x.id === detail.id
-              ? {
-                  ...x,
-                  title: editTitle,
-                  price: firstLocalPrice ?? x.price,
-                  thumbnail: editPictures[0]?.url || x.thumbnail,
-                }
-              : x,
-          ),
-        );
-      }
-    } catch (e: any) {
-      MessagePlugin.error('保存失败: ' + (e?.message || e));
-    } finally {
-      setSaving(false);
-    }
-  }, [
-    storeId,
-    detail,
-    editTitle,
-    editPictures,
-    editSitesToSell,
-    editLen,
-    editWid,
-    editHei,
-    editWeight,
-    editDesc,
-    editQuantity,
-    editBrand,
-    editModel,
-  ]);
+  useEffect(() => {
+    loadStores();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  const updatePicture = (idx: number, val: string) => {
-    setEditPictures((prev) => prev.map((p, i) => (i === idx ? { ...p, url: val } : p)));
-  };
-  const removePicture = (idx: number) => {
-    setEditPictures((prev) => prev.filter((_, i) => i !== idx));
-  };
-  const addPicture = () => setEditPictures((prev) => [...prev, { url: '' }]);
+  // 索引构建中 / 未构建完成 → 轮询
+  useEffect(() => {
+    const cur = stores.find((s) => s.storeId === storeId);
+    if (!cur) return;
+    if (!cur.building && cur.built) return;
+    const t = window.setInterval(() => loadStores(), 5000);
+    return () => window.clearInterval(t);
+  }, [stores, storeId, loadStores]);
 
-  return (
-    <div className="p-3 max-w-7xl mx-auto">
-      <div className="flex items-center gap-2 mb-1">
-        <ShopIcon size={20} />
-        <h1 className="text-xl font-semibold">商品管理</h1>
-      </div>
-      <p className="text-sm mb-4" style={{ color: 'var(--td-text-color-secondary)' }}>
-        按商品 SKU 或标题模糊查询，可编辑图片、标题、按国家价格、库存、品牌、模型、重量、长宽高、描述并提交到美客多。
-      </p>
-
-      {/* 搜索栏 */}
-      <Card className="mb-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <Select
-            value={storeId}
-            onChange={(v) => setStoreId(v as string)}
-            style={{ flex: '1 1 180px', minWidth: 0 }}
-            placeholder="选择店铺"
-            options={stores.map((s) => ({
-              value: s.id,
-              label: `${s.nickname || s.mlUserNick || s.site}（${s.site}）`,
-            }))}
-          />
-          <Input
-            value={query}
-            onChange={(v) => setQuery(v as string)}
-            onEnter={doSearch}
-            placeholder="输入 SKU 或商品标题关键字"
-            style={{ flex: '2 1 200px', minWidth: 0 }}
-            clearable
-          />
-          <Button theme="primary" icon={<SearchIcon />} loading={searching} onClick={doSearch}>
-            搜索
-          </Button>
-        </div>
-      </Card>
-
-      {/* 结果区 */}
-      {!searched && (
-        <Card>
-          <div className="text-center py-16" style={{ color: 'var(--td-text-color-placeholder)' }}>
-            选择一个已授权店铺，输入 SKU 或标题关键字开始搜索。
-          </div>
-        </Card>
-      )}
-
-      {searched && searching && (
-        <Card>
-          <Loading loading={true} text="正在搜索商品…" style={{ width: '100%', height: 200 }} />
-        </Card>
-      )}
-
-      {searched && !searching && results.length === 0 && (
-        <Card>
-          <div className="text-center py-16" style={{ color: 'var(--td-text-color-placeholder)' }}>
-            没有找到匹配的商品，试试更短的关键字。
-          </div>
-        </Card>
-      )}
-
-      {searched && !searching && results.length > 0 && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-          {results.map((hit) => (
-            <div
-              key={hit.id}
-              className="cursor-pointer"
-              onClick={() => openEdit(hit)}
-            >
-              <Card className="hover:shadow-lg transition-shadow">
-                <div className="flex flex-col gap-2">
-                  <div className="flex justify-center bg-gray-50 rounded" style={{ height: 160 }}>
-                    {hit.thumbnail ? (
-                      <Image
-                        src={hit.thumbnail}
-                        fit="contain"
-                        style={{ width: 160, height: 160, cursor: 'pointer' }}
-                        onClick={() => openViewer([hit.thumbnail], 0)}
-                      />
-                    ) : (
-                      <div className="flex items-center text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>
-                        无图
-                      </div>
-                    )}
-                  </div>
-                <div className="flex items-center gap-1">
-                  {hit.matchType === 'sku' && <Tag size="small" theme="success">SKU</Tag>}
-                  {hit.matchType === 'title' && <Tag size="small" theme="primary">标题</Tag>}
-                  <span className="text-xs" style={{ color: 'var(--td-text-color-secondary)' }}>
-                    {hit.currency_id} {hit.price}
-                  </span>
-                </div>
-                <div className="text-sm line-clamp-2" style={{ minHeight: 40 }} title={hit.title}>
-                  {hit.title || '（无标题）'}
-                </div>
-                {hit.seller_sku && (
-                  <div className="text-xs truncate" style={{ color: 'var(--td-text-color-secondary)' }}>
-                    SKU: {hit.seller_sku}
-                  </div>
-                )}
-                <Button size="small" variant="text" icon={<EditIcon />} theme="primary">
-                  编辑
-                </Button>
-              </div>
-              </Card>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* 编辑弹窗 */}
-      <Dialog
-        visible={editOpen}
-        onClose={() => setEditOpen(false)}
-        header="编辑商品"
-        width="min(720px, 92vw)"
-        footer={
-          <Space>
-            <Button theme="default" variant="outline" onClick={() => setEditOpen(false)}>
-              取消
-            </Button>
-            <Button theme="primary" loading={saving} onClick={saveEdit}>
-              保存到美客多
-            </Button>
-          </Space>
+  // ---- 商品列表 ----
+  const loadItems = useCallback(
+    async (opts: { silent?: boolean } = {}) => {
+      if (!storeId) return;
+      if (!opts.silent) setLoading(true);
+      try {
+        const qs = new URLSearchParams({
+          status,
+          risk,
+          q: qApplied,
+          page: String(page),
+          pageSize: String(pageSize),
+        });
+        const r = await fetch(`/api/ml/product-admin/${storeId}/items?${qs}`);
+        const d = await r.json();
+        if (!d.success) {
+          setListError(d.message || '加载失败');
+          setItems([]);
+          setTotal(0);
+          return;
         }
-      >
-        {!detail ? (
-          <Loading loading={true} text="加载商品详情…" style={{ height: 200 }} />
+        setItems(d.items || []);
+        setTotal(d.total || 0);
+        setBuilding(!!d.building);
+        setProgress(d.progress || { done: 0, total: 0 });
+        setCounts(d.counts || null);
+        setListError(d.error || '');
+      } catch (e: any) {
+        setListError(e?.message || String(e));
+        setItems([]);
+      } finally {
+        if (!opts.silent) setLoading(false);
+      }
+    },
+    [storeId, status, risk, qApplied, page, pageSize],
+  );
+
+  useEffect(() => {
+    loadItems();
+  }, [loadItems]);
+
+  // 切换店铺时清空选择与筛选
+  const switchStore = (id: string) => {
+    setStoreId(id);
+    setSelected(new Set());
+    setPage(1);
+  };
+
+  // ---- 详情 ----
+  const openDetail = useCallback(
+    async (row: StoreItemRow) => {
+      if (!storeId) return;
+      setDetailOpen(true);
+      setDetailFor(row);
+      setDetail(null);
+      setShowRaw(false);
+      setDetailLoading(true);
+      try {
+        const r = await fetch(`/api/ml/product-admin/${storeId}/item/${encodeURIComponent(row.id)}`);
+        const d = await r.json();
+        if (!d.success) {
+          MessagePlugin.error(d.message || '获取详情失败');
+          setDetailOpen(false);
+          return;
+        }
+        setDetail(d as FullDetail);
+      } catch (e: any) {
+        MessagePlugin.error('获取详情异常：' + (e?.message || e));
+        setDetailOpen(false);
+      } finally {
+        setDetailLoading(false);
+      }
+    },
+    [storeId],
+  );
+
+  const openViewer = (images: string[], index: number) => {
+    const valid = (images || []).filter(Boolean);
+    if (!valid.length) return;
+    const idx = Math.min(index, valid.length - 1);
+    setViewerImages(valid);
+    setViewerIndex(idx < 0 ? 0 : idx);
+    setViewerOpen(true);
+  };
+
+  // ---- 一键改为符合规范 ----
+  const runFix = useCallback(
+    async (ids: string[], dryRun: boolean) => {
+      if (!storeId || !ids.length) return;
+      setFixLoading(true);
+      try {
+        const r = await fetch(`/api/ml/product-admin/${storeId}/compliance-fix`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ itemIds: ids, dryRun }),
+        });
+        const d = await r.json();
+        if (!d.success) {
+          MessagePlugin.error(d.message || '操作失败');
+          return;
+        }
+        if (dryRun) {
+          setFixPreview({ results: d.results || [], total: d.total || ids.length });
+          setFixPreviewOpen(true);
+        } else {
+          setFixDone({ results: d.results || [], ok: d.ok || 0, failed: d.failed || 0, skipped: d.skipped || 0 });
+          setFixDoneOpen(true);
+          setFixPreviewOpen(false);
+          setSelected(new Set());
+          loadItems({ silent: true });
+        }
+      } catch (e: any) {
+        MessagePlugin.error('请求异常：' + (e?.message || e));
+      } finally {
+        setFixLoading(false);
+      }
+    },
+    [storeId, loadItems],
+  );
+
+  const fixableSelected = useMemo(() => {
+    const m: Record<string, StoreItemRow> = {};
+    for (const it of items) m[it.id] = it;
+    return [...selected].filter((id) => m[id] && m[id].risk.fixable);
+  }, [selected, items]);
+
+  const columns: PrimaryTableCol<StoreItemRow>[] = [
+    {
+      colKey: 'row-select',
+      title: (
+        <Checkbox
+          checked={items.length > 0 && items.every((i) => selected.has(i.id))}
+          indeterminate={items.some((i) => selected.has(i.id)) && !items.every((i) => selected.has(i.id))}
+          onChange={(v) => (v ? setSelected(new Set(items.map((i) => i.id))) : setSelected(new Set()))}
+          disabled={!items.some((i) => i.risk.level !== 'none')}
+        />
+      ),
+      width: 44,
+    },
+    {
+      colKey: 'thumbnail',
+      title: '图片',
+      width: 60,
+      cell: ({ row }) =>
+        row.thumbnail ? (
+          <img
+            src={row.thumbnail}
+            style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 4, cursor: 'zoom-in' }}
+            referrerPolicy="no-referrer"
+            loading="lazy"
+            onClick={() => openViewer(row.pictures?.length ? row.pictures : [row.thumbnail], 0)}
+          />
         ) : (
-          <div className="space-y-5 max-h-[70vh] overflow-auto pr-2">
-            {/* 图片 */}
-            <div>
-              <div className="text-sm font-medium mb-2">商品图片（点击可放大；可编辑/删除/新增图片地址）</div>
-              <div className="flex flex-wrap gap-2 mb-3">
-                {editPictures.map((pic, idx) =>
-                  pic.url ? (
-                    <Image
-                      key={idx}
-                      src={pic.url}
-                      fit="cover"
-                      style={{ width: 72, height: 72, cursor: 'pointer' }}
-                      onClick={() => openViewer(editPictures.map((p) => p.url), idx)}
-                    />
-                  ) : (
-                    <div
-                      key={idx}
-                      className="flex items-center justify-center bg-gray-100 text-xs"
-                      style={{ width: 72, height: 72 }}
-                    >
-                      空
-                    </div>
-                  ),
-                )}
-              </div>
-              <div className="space-y-2">
-                {editPictures.map((pic, idx) => (
-                  <div key={idx} className="flex items-center gap-2">
-                    <Input
-                      value={pic.url}
-                      onChange={(v) => updatePicture(idx, v as string)}
-                      placeholder="图片 URL（https://...）"
-                      style={{ flex: 1 }}
-                    />
-                    {pic.id && (
-                      <span className="text-xs" style={{ color: 'var(--td-text-color-secondary)' }}>
-                        ID:{pic.id.slice(0, 16)}…
-                      </span>
-                    )}
-                    <Button size="small" variant="text" theme="danger" onClick={() => removePicture(idx)}>
-                      删除
-                    </Button>
-                  </div>
-                ))}
-                <Button size="small" variant="dashed" onClick={addPicture}>
-                  + 新增图片
-                </Button>
-              </div>
-            </div>
-
-            {/* 标题 */}
-            <div>
-              <div className="text-sm font-medium mb-2 flex items-center gap-2">
-                <span>标题</span>
-                {detail?.localized_site_id && (
-                  <Tag size="small" theme="warning">{detail.localized_site_id} 站点</Tag>
-                )}
-                {detail?.localized_title && detail.title !== detail.localized_title && (
-                  <span className="text-xs" style={{ color: 'var(--td-text-color-secondary)' }}>
-                    全局标题：{detail.title}
-                  </span>
-                )}
-              </div>
-              <Input value={editTitle} onChange={(v) => setEditTitle(v as string)} placeholder="商品标题" />
-            </div>
-
-            {/* 价格：按国家（CBT）— 净收入（net_proceeds，USD） */}
-            <div>
-              <div className="text-sm font-medium mb-2 flex items-center gap-2">
-                <span>按国家的净收入（USD）</span>
-                {detail?.price !== undefined && (
-                  <span className="text-xs" style={{ color: 'var(--td-text-color-secondary)' }}>
-                    全局参考价：{detail.currency_id || 'USD'} {detail.price}
-                  </span>
-                )}
-              </div>
-              <div className="text-xs mb-2" style={{ color: 'var(--td-text-color-placeholder)' }}>
-                每个国家单独设置卖家净收入，美客多自动加运费/佣金计算公开售价。保存时按各站点定价模式（净收入/标价）分别提交。
-              </div>
-              {editSitesToSell.length === 0 ? (
-                <div className="text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>
-                  未获取到站点价格数据。
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {editSitesToSell.map((s, idx) => (
-                    <div key={s.site_id} className="flex items-center gap-2">
-                      <Tag size="small" theme="primary">{s.site_id}</Tag>
-                      <Input
-                        value={String(s.price)}
-                        onChange={(v) => {
-                          const price = Number(v);
-                          setEditSitesToSell((prev) =>
-                            prev.map((x, i) => (i === idx ? { ...x, price: Number.isFinite(price) ? price : 0 } : x)),
-                          );
-                        }}
-                        placeholder={`${s.site_id} 价格`}
-                        style={{ flex: 1 }}
-                      />
-                      <span className="text-xs" style={{ color: 'var(--td-text-color-secondary)' }}>
-                        {s.currency_id || 'USD'}
-                      </span>
-                    </div>
-                  ))}
-                </div>
+          <div className="w-[44px] h-[44px] rounded bg-gray-100 flex items-center justify-center">
+            <ImageIcon size={14} className="text-gray-300" />
+          </div>
+        ),
+    },
+    {
+      colKey: 'title',
+      title: '商品',
+      ellipsis: true,
+      cell: ({ row }) => {
+        const pl = permalinkOf(row);
+        return (
+          <div>
+            <div className="text-sm leading-snug">{row.title || '（无标题）'}</div>
+            <div className="flex items-center gap-2 flex-wrap mt-0.5">
+              <span className="text-[11px] text-gray-400">{row.id}</span>
+              {row.sellerSku && <span className="text-[11px] text-gray-500">SKU: {row.sellerSku}</span>}
+              {pl && (
+                <a
+                  href={pl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[11px] text-blue-600 hover:underline inline-flex items-center gap-0.5"
+                >
+                  <ExternalLink size={10} /> ML 链接
+                </a>
               )}
             </div>
+          </div>
+        );
+      },
+    },
+    {
+      colKey: 'status',
+      title: '状态',
+      width: 122,
+      cell: ({ row }) => {
+        const st = STATUS_LABEL[row.status] || { label: row.status || '—', theme: 'default' };
+        return (
+          <div className="flex flex-col gap-0.5">
+            <Tag size="small" theme={st.theme} variant="light">
+              {st.label}
+            </Tag>
+            {row.subStatus?.length > 0 && (
+              <span className="text-[11px] text-gray-500">
+                {row.subStatus.map((s) => SUB_LABEL[s] || s).join(' / ')}
+              </span>
+            )}
+          </div>
+        );
+      },
+    },
+    {
+      colKey: 'risk',
+      title: '违规风险',
+      width: 150,
+      cell: ({ row }) => {
+        const rl = RISK_LABEL[row.risk.level] || RISK_LABEL.none;
+        const tip = [
+          row.risk.message,
+          row.risk.titleHits?.length ? `标题命中：${row.risk.titleHits.join(', ')}` : '',
+          ...(row.risk.attrHits || []).map((a) => `${a.name || a.id}="${a.value}" → ${a.hits.join(', ')}`),
+        ]
+          .filter(Boolean)
+          .join('\n');
+        return (
+          <Tooltip content={<span style={{ whiteSpace: 'pre-wrap' }}>{tip}</span>} placement="top-left">
+            <div className="flex flex-col gap-0.5">
+              <Tag size="small" theme={rl.theme} variant="light">
+                {row.risk.level === 'none' ? <Shield size={11} className="inline mr-0.5" /> : <ShieldAlert size={11} className="inline mr-0.5" />}
+                {rl.label}
+              </Tag>
+              {row.risk.level !== 'none' && (
+                <span className="text-[11px] text-gray-500 line-clamp-2">
+                  {row.risk.hits.slice(0, 3).join(', ')}
+                  {row.risk.hits.length > 3 ? ` +${row.risk.hits.length - 3}` : ''}
+                </span>
+              )}
+            </div>
+          </Tooltip>
+        );
+      },
+    },
+    {
+      colKey: 'price',
+      title: '价格 / 库存',
+      width: 110,
+      cell: ({ row }) => (
+        <div className="text-[12px] leading-tight">
+          <div className="font-medium">
+            {row.currencyId} {row.price}
+          </div>
+          <div className="text-gray-500">
+            库存 {row.availableQuantity} · 已售 {row.soldQuantity}
+          </div>
+        </div>
+      ),
+    },
+    {
+      colKey: 'action',
+      title: '操作',
+      width: 148,
+      fixed: 'right',
+      cell: ({ row }) => (
+        <Space size={2} breakLine>
+          <Button size="small" variant="text" onClick={() => openDetail(row)}>
+            <Eye size={12} className="inline mr-0.5" />
+            详情
+          </Button>
+          {row.risk.level !== 'none' && (
+            <Tooltip
+              content={
+                row.risk.fixable
+                  ? '洗掉品牌词/违禁词后克隆生成一条新的合规链接（原链接需到美客多后台暂停）'
+                  : '命中 IP/赛事词，改名也侵权，只能到美客多后台下架'
+              }
+            >
+              <Button
+                size="small"
+                variant="text"
+                theme={row.risk.fixable ? 'primary' : 'default'}
+                disabled={!row.risk.fixable || fixLoading}
+                onClick={() => runFix([row.id], true)}
+              >
+                <Wand2 size={12} className="inline mr-0.5" />
+                改为合规
+              </Button>
+            </Tooltip>
+          )}
+        </Space>
+      ),
+    },
+  ];
 
-            {/* 尺寸 / 重量：与美客多后台顺序一致（高 × 宽 × 长，重量 g） */}
+  const fixableOnPage = items.filter((i) => i.risk.fixable).length;
+
+  return (
+    <div className="p-2 sm:p-3 w-full">
+      {/* 标题 */}
+      <div className="flex items-center gap-2 mb-2 flex-wrap">
+        <Shield size={18} />
+        <h1 className="text-lg font-semibold">商品管理</h1>
+        <span className="text-xs text-gray-500">
+          分店铺展示全部商品，可筛在售 / 已暂停 / 违规风险，查看全部字段，违规风险商品可一键改为合规
+        </span>
+        <span className="ml-auto flex items-center gap-2">
+          <Button
+            size="small"
+            variant="outline"
+            icon={<RefreshCw size={13} />}
+            loading={loadingStores}
+            onClick={() => {
+              loadStores(true);
+              loadItems();
+            }}
+          >
+            刷新索引
+          </Button>
+          {storeId && (
+            <Button
+              size="small"
+              variant="outline"
+              icon={<Download size={13} />}
+              onClick={() => window.open(`/api/ml/product-admin/${storeId}/export?status=${status}&risk=${risk}&q=${encodeURIComponent(qApplied)}`, '_blank')}
+            >
+              导出 CSV
+            </Button>
+          )}
+        </span>
+      </div>
+
+      {/* 店铺 Tab */}
+      <div className="border-b mb-2">
+        <Tabs
+          value={storeId}
+          onChange={(v) => switchStore(v as string)}
+          theme="normal"
+        >
+          {stores.map((s) => (
+            <Tabs.TabPanel
+              key={s.storeId}
+              value={s.storeId}
+              label={
+                <span className="inline-flex items-center gap-1">
+                  {s.storeNick}
+                  {s.counts && <span className="text-[11px] text-gray-400">({s.counts.total})</span>}
+                  {s.building && <span className="text-[11px] text-blue-500">建索引…</span>}
+                </span>
+              }
+            />
+          ))}
+        </Tabs>
+      </div>
+
+      {/* 筛选栏 */}
+      <div className="flex items-center gap-2 flex-wrap mb-2">
+        <Select
+          value={status}
+          onChange={(v) => {
+            setStatus(v as any);
+            setPage(1);
+          }}
+          style={{ width: 132 }}
+          size="small"
+          options={[
+            { value: 'all', label: '全部状态' },
+            { value: 'active', label: `正在上架${counts ? ` (${counts.active})` : ''}` },
+            { value: 'paused', label: `已暂停/禁止${counts ? ` (${counts.paused})` : ''}` },
+          ]}
+        />
+        <Select
+          value={risk}
+          onChange={(v) => {
+            setRisk(v as any);
+            setPage(1);
+          }}
+          style={{ width: 168 }}
+          size="small"
+          options={[
+            { value: 'all', label: '全部风险' },
+            { value: 'risk', label: `仅违规风险${counts ? ` (${counts.risk})` : ''}` },
+            { value: 'none', label: '无风险' },
+            { value: 'brand', label: `品牌词${counts ? ` (${counts.riskBrand})` : ''}` },
+            { value: 'platform', label: '平台违禁词' },
+            { value: 'ip', label: `IP/赛事不可洗${counts ? ` (${counts.riskIp})` : ''}` },
+          ]}
+        />
+        <Input
+          value={query}
+          onChange={(v) => setQuery(String(v))}
+          onEnter={() => {
+            setQApplied(query.trim());
+            setPage(1);
+          }}
+          placeholder="搜索标题 / 商品ID / SKU / 品牌 / 型号"
+          style={{ width: 260 }}
+          size="small"
+          clearable
+        />
+        <Button
+          size="small"
+          theme="primary"
+          icon={<SearchIcon />}
+          onClick={() => {
+            setQApplied(query.trim());
+            setPage(1);
+          }}
+        >
+          搜索
+        </Button>
+        {qApplied && (
+          <Button
+            size="small"
+            variant="text"
+            onClick={() => {
+              setQuery('');
+              setQApplied('');
+              setPage(1);
+            }}
+          >
+            清空搜索
+          </Button>
+        )}
+        <span className="text-xs text-gray-500">
+          共 {total} 件{selected.size > 0 ? ` · 已选 ${selected.size}（可洗 ${fixableSelected.length}）` : ''}
+        </span>
+        <span className="ml-auto flex items-center gap-2">
+          <Button
+            size="small"
+            variant="outline"
+            disabled={!fixableOnPage}
+            onClick={() => setSelected(new Set(items.filter((i) => i.risk.fixable).map((i) => i.id)))}
+          >
+            勾选本页可洗商品({fixableOnPage})
+          </Button>
+          <Button
+            size="small"
+            theme="primary"
+            disabled={!fixableSelected.length || fixLoading}
+            loading={fixLoading}
+            onClick={() => runFix(fixableSelected, true)}
+          >
+            <Wand2 size={13} className="inline mr-0.5" />
+            批量改为合规({fixableSelected.length})
+          </Button>
+        </span>
+      </div>
+
+      {/* 索引构建中 */}
+      {(building || (currentStore && !currentStore.built && !currentStore.error)) && (
+        <div className="mb-2 text-xs px-3 py-2 rounded border border-blue-200 bg-blue-50 text-blue-700 flex items-center gap-3">
+          <span>正在建立全店商品索引（约 3000 件，首次约 1-2 分钟）…</span>
+          <Progress
+            theme="line"
+            percentage={progress.total ? Math.round((progress.done / progress.total) * 100) : 0}
+            style={{ flex: 1, minWidth: 120 }}
+          />
+          <span>
+            {progress.done}/{progress.total}
+          </span>
+        </div>
+      )}
+      {listError && (
+        <div className="mb-2 text-xs px-3 py-2 rounded border border-red-200 bg-red-50 text-red-700">
+          索引/取数异常：{listError}
+        </div>
+      )}
+
+      {/* 批量合规提示 */}
+      {selected.size > 0 && fixableSelected.length < selected.size && (
+        <div className="mb-2 text-xs px-3 py-2 rounded border border-amber-200 bg-amber-50 text-amber-800 flex items-start gap-2">
+          <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+          <span>
+            已选 {selected.size} 件中，仅 <strong>{fixableSelected.length}</strong> 件可通过改名规避；
+            其余命中影视/动漫/游戏 IP 或体育赛事词，卖的就是 IP 本身，改名仍侵权，需到美客多后台下架。
+          </span>
+        </div>
+      )}
+
+      <Table
+        data={items}
+        columns={columns}
+        rowKey="id"
+        loading={loading}
+        hover
+        size="small"
+        bordered
+        selectedRowKeys={[...selected]}
+        onSelectChange={(v) => setSelected(new Set(v as string[]))}
+      />
+
+      {total > 0 && (
+        <div className="flex justify-end mt-3">
+          <Pagination
+            current={page}
+            pageSize={pageSize}
+            total={total}
+            showJumper
+            pageSizeOptions={[20, 50, 100, 200]}
+            onChange={({ current: c }) => setPage(c)}
+            onPageSizeChange={(s) => {
+              setPageSize(s);
+              setPage(1);
+            }}
+          />
+        </div>
+      )}
+
+      {!loading && total === 0 && storeId && !building && (
+        <div className="text-center py-10 text-gray-400 text-sm">
+          没有符合条件的商品
+        </div>
+      )}
+
+      {/* ============ 详情弹窗（全部字段） ============ */}
+      <Dialog
+        visible={detailOpen}
+        onClose={() => setDetailOpen(false)}
+        header={
+          <div className="flex items-center gap-2">
+            <span>商品详情</span>
+            {detail?.risk && detail.risk.level !== 'none' && (
+              <Tag size="small" theme={RISK_LABEL[detail.risk.level].theme} variant="light">
+                {RISK_LABEL[detail.risk.level].label}
+              </Tag>
+            )}
+          </div>
+        }
+        width="min(1000px, 96vw)"
+        footer={null}
+      >
+        {detailLoading ? (
+          <Loading loading={true} text="加载商品全部字段…" style={{ height: 240 }} />
+        ) : !detail ? (
+          <div className="text-center py-10 text-gray-400 text-sm">未取到详情</div>
+        ) : (
+          <div className="space-y-4 max-h-[74vh] overflow-auto pr-1">
+            {detail._errors?.length ? (
+              <div className="text-xs px-3 py-2 rounded border border-amber-200 bg-amber-50 text-amber-800">
+                部分接口未取到：{detail._errors.join('；')}
+              </div>
+            ) : null}
+
+            {/* 图片 */}
+            {(() => {
+              const rowPics: string[] = detail.row?.pictures?.length ? detail.row.pictures : [];
+              const rawPics: string[] = ((detail.raw?.pictures || []) as any[])
+                .map((p: any) => p?.secure_url || p?.url)
+                .filter(Boolean);
+              const pics: string[] = rowPics.length ? rowPics : rawPics;
+              if (!pics.length) return null;
+              return (
+                <div>
+                  <div className="text-xs font-medium mb-1.5">商品图片（{pics.length} 张，点击放大）</div>
+                  <div className="flex flex-wrap gap-2">
+                    {pics.slice(0, 12).map((u: string, i: number) => (
+                      <img
+                        key={i}
+                        src={u}
+                        style={{ width: 62, height: 62, objectFit: 'cover', borderRadius: 4, cursor: 'zoom-in' }}
+                        referrerPolicy="no-referrer"
+                        onClick={() => openViewer(pics, i)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* 核心字段 */}
             <div>
-              <div className="text-sm font-medium mb-2">尺寸与重量（单位：厘米 / 克）</div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                <div>
-                  <div className="text-xs mb-1" style={{ color: 'var(--td-text-color-secondary)' }}>高</div>
-                  <Input value={editHei} onChange={(v) => setEditHei(v as string)} placeholder="高" />
-                </div>
-                <div>
-                  <div className="text-xs mb-1" style={{ color: 'var(--td-text-color-secondary)' }}>宽</div>
-                  <Input value={editWid} onChange={(v) => setEditWid(v as string)} placeholder="宽" />
-                </div>
-                <div>
-                  <div className="text-xs mb-1" style={{ color: 'var(--td-text-color-secondary)' }}>长</div>
-                  <Input value={editLen} onChange={(v) => setEditLen(v as string)} placeholder="长" />
-                </div>
-                <div>
-                  <div className="text-xs mb-1" style={{ color: 'var(--td-text-color-secondary)' }}>重量</div>
-                  <Input value={editWeight} onChange={(v) => setEditWeight(v as string)} placeholder="克" />
-                </div>
+              <div className="text-xs font-medium mb-1.5">基础字段</div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-3 gap-y-1.5 text-xs">
+                {(
+                  [
+                    ['商品ID', detail.row?.id],
+                    ['站点商品ID', (detail.row?.siteItemIds || []).join(', ')],
+                    ['状态', `${detail.row?.status || '—'}${detail.row?.subStatus?.length ? ` (${detail.row.subStatus.join(', ')})` : ''}`],
+                    ['SKU', detail.row?.sellerSku],
+                    ['品牌', detail.row?.brand],
+                    ['型号', detail.row?.model],
+                    ['价格', `${detail.row?.currencyId || ''} ${detail.row?.price ?? ''}`],
+                    ['库存', detail.row?.availableQuantity],
+                    ['已售', detail.row?.soldQuantity],
+                    ['成色', detail.row?.condition],
+                    ['上架类型', detail.row?.listingTypeId],
+                    ['类目ID', detail.row?.categoryId],
+                    ['妙手 detailId', detail.row?.miaoshouDetailId],
+                    ['创建时间', fmtTime(detail.row?.dateCreated)],
+                    ['更新时间', fmtTime(detail.row?.lastUpdated)],
+                    ['商品链接', detail.permalink],
+                  ] as Array<[string, any]>
+                ).map(([k, v]) => (
+                  <div key={k} className="flex gap-1 min-w-0">
+                    <span className="text-gray-400 shrink-0" style={{ minWidth: 62 }}>
+                      {k}
+                    </span>
+                    {k === '商品链接' && v ? (
+                      <a href={v} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline truncate">
+                        {v}
+                      </a>
+                    ) : (
+                      <span className="truncate" title={showVal(v)}>
+                        {showVal(v)}
+                      </span>
+                    )}
+                  </div>
+                ))}
               </div>
             </div>
 
-            {/* 库存 / 品牌 / 模型 */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div>
-                <div className="text-sm font-medium mb-2">库存</div>
-                <Input
-                  value={editQuantity}
-                  onChange={(v) => setEditQuantity(v as string)}
-                  placeholder="可售数量"
-                />
-              </div>
-              <div>
-                <div className="text-sm font-medium mb-2">品牌</div>
-                <Input
-                  value={editBrand}
-                  onChange={(v) => setEditBrand(v as string)}
-                  placeholder="BRAND"
-                />
-              </div>
-              <div>
-                <div className="text-sm font-medium mb-2">模型</div>
-                <Input
-                  value={editModel}
-                  onChange={(v) => setEditModel(v as string)}
-                  placeholder="MODEL"
-                />
+            {/* 风险分析 */}
+            <div>
+              <div className="text-xs font-medium mb-1.5">侵权 / 违禁风险分析</div>
+              <div className="text-xs px-3 py-2 rounded border" style={{ borderColor: 'var(--td-border-level-1-color, #e7e7e7)' }}>
+                <div className="flex items-center gap-2 mb-1">
+                  <Tag size="small" theme={RISK_LABEL[detail.risk.level].theme} variant="light">
+                    {RISK_LABEL[detail.risk.level].label}
+                  </Tag>
+                  <span className="text-gray-500">{detail.risk.message}</span>
+                </div>
+                {detail.risk.level !== 'none' && !detail.risk.fixable && (
+                  <div className="text-red-600">
+                    该商品命中 IP/赛事词，无法通过改名规避侵权，请到美客多后台下架。
+                  </div>
+                )}
+                {detail.risk.titleHits?.length ? (
+                  <div className="mt-1">
+                    <span className="text-gray-400">标题命中：</span>
+                    {detail.risk.titleHits.map((h) => (
+                      <Tag key={h} size="small" variant="outline" className="mr-1">
+                        {h}
+                      </Tag>
+                    ))}
+                  </div>
+                ) : null}
+                {detail.risk.attrHits?.length ? (
+                  <div className="mt-1 space-y-0.5">
+                    <span className="text-gray-400">属性命中：</span>
+                    {detail.risk.attrHits.map((a, i) => (
+                      <div key={i} className="pl-3">
+                        <span className="text-gray-500">{a.name || a.id}</span> = 「{a.value}」
+                        {a.hits.map((h) => (
+                          <Tag key={h} size="small" theme="danger" variant="light" className="ml-1">
+                            {h}
+                          </Tag>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             </div>
+
+            {/* 合规化预览 */}
+            {detail.risk.level !== 'none' && detail.risk.fixable && (
+              <div>
+                <div className="text-xs font-medium mb-1.5">
+                  一键改为合规 —— 预览（洗掉品牌词/违禁词后克隆生成新链接）
+                </div>
+                <div className="text-xs px-3 py-2 rounded border space-y-1.5" style={{ borderColor: 'var(--td-border-level-1-color, #e7e7e7)' }}>
+                  <div>
+                    <span className="text-gray-400">原标题：</span>
+                    <span className="line-through text-gray-500">{detail.row?.title}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400">新标题：</span>
+                    <span className="text-green-700 font-medium">{detail.suggested.title}</span>
+                  </div>
+                  {detail.suggested.attributeChanges?.length ? (
+                    <div>
+                      <span className="text-gray-400">属性改动（{detail.suggested.attributeChanges.length} 处）：</span>
+                      <table className="w-full mt-1" style={{ borderCollapse: 'collapse' }}>
+                        <thead>
+                          <tr className="text-gray-400 text-left">
+                            <th className="pr-3 font-normal">字段</th>
+                            <th className="pr-3 font-normal">原值</th>
+                            <th className="font-normal">改为</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {detail.suggested.attributeChanges.map((c, i) => (
+                            <tr key={i}>
+                              <td className="pr-3">{c.name || c.id}</td>
+                              <td className="pr-3 line-through text-gray-500">{c.from}</td>
+                              <td className="text-green-700">{c.to}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="text-gray-400">属性无需改动</div>
+                  )}
+                  <div className="pt-1">
+                    <Button size="small" theme="primary" loading={fixLoading} onClick={() => runFix([detail.row!.id], true)}>
+                      <Wand2 size={12} className="inline mr-0.5" />
+                      改为符合规范（先预览）
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 全部属性 */}
+            {Array.isArray(detail.raw?.attributes) && detail.raw.attributes.length > 0 && (
+              <div>
+                <div className="text-xs font-medium mb-1.5">全部属性（{detail.raw.attributes.length} 项）</div>
+                <div className="max-h-56 overflow-auto border rounded">
+                  <table className="w-full text-xs" style={{ borderCollapse: 'collapse' }}>
+                    <thead className="sticky top-0 bg-gray-50">
+                      <tr className="text-left text-gray-500">
+                        <th className="px-2 py-1 font-normal">属性ID</th>
+                        <th className="px-2 py-1 font-normal">名称</th>
+                        <th className="px-2 py-1 font-normal">值</th>
+                        <th className="px-2 py-1 font-normal">value_id</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.raw.attributes.map((a: any, i: number) => (
+                        <tr key={i} className="border-t">
+                          <td className="px-2 py-1 text-gray-400">{a.id}</td>
+                          <td className="px-2 py-1">{a.name}</td>
+                          <td className="px-2 py-1">
+                            {a.value_name || showVal(a.values?.map((v: any) => v?.name))}
+                          </td>
+                          <td className="px-2 py-1 text-gray-400">{showVal(a.value_id)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* 站点售卖信息 */}
+            {detail.marketplaceItems?.length > 0 && (
+              <div>
+                <div className="text-xs font-medium mb-1.5">各站点售卖信息（CBT）</div>
+                <div className="overflow-auto border rounded">
+                  <table className="w-full text-xs" style={{ borderCollapse: 'collapse' }}>
+                    <thead className="bg-gray-50">
+                      <tr className="text-left text-gray-500">
+                        {Object.keys(detail.marketplaceItems[0] || {})
+                          .slice(0, 8)
+                          .map((k) => (
+                            <th key={k} className="px-2 py-1 font-normal">
+                              {k}
+                            </th>
+                          ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.marketplaceItems.map((m: any, i: number) => (
+                        <tr key={i} className="border-t">
+                          {Object.keys(detail.marketplaceItems[0] || {})
+                            .slice(0, 8)
+                            .map((k) => (
+                              <td key={k} className="px-2 py-1">
+                                {showVal(m[k])}
+                              </td>
+                            ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
 
             {/* 描述 */}
             <div>
-              <div className="text-sm font-medium mb-2">描述</div>
-              <Textarea
-                value={editDesc}
-                onChange={(v) => setEditDesc(v as string)}
-                placeholder="商品描述（纯文本）"
-                autosize={{ minRows: 4, maxRows: 10 }}
-              />
+              <div className="text-xs font-medium mb-1.5">商品描述</div>
+              <div
+                className="text-xs px-3 py-2 rounded border whitespace-pre-wrap max-h-52 overflow-auto"
+                style={{ borderColor: 'var(--td-border-level-1-color, #e7e7e7)' }}
+              >
+                {detail.description || '（无描述）'}
+              </div>
             </div>
 
-            <div className="text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>
-              商品 ID：{detail.id}
-              {detail.root_item_id && detail.root_item_id !== detail.id ? `（根 ID：${detail.root_item_id}）` : ''}
-              ｜ 状态：{detail.status || '—'} ｜ SKU：{detail.seller_sku || '—'}
+            {/* 原始 JSON */}
+            <div>
+              <Button size="small" variant="text" onClick={() => setShowRaw((v) => !v)}>
+                {showRaw ? '收起' : '展开'}完整原始数据（JSON）
+              </Button>
+              {showRaw && (
+                <pre
+                  className="text-[11px] mt-1 p-2 rounded border overflow-auto max-h-72"
+                  style={{ borderColor: 'var(--td-border-level-1-color, #e7e7e7)' }}
+                >
+                  {JSON.stringify(detail.raw, null, 2)}
+                </pre>
+              )}
             </div>
           </div>
         )}
       </Dialog>
 
+      {/* ============ 合规修复：预览确认 ============ */}
+      <Dialog
+        visible={fixPreviewOpen}
+        onClose={() => setFixPreviewOpen(false)}
+        header={`改为符合规范 · 预览（${fixPreview?.results.filter((r) => r.dry).length || 0} 件可执行）`}
+        width="min(880px, 95vw)"
+        footer={
+          <Space>
+            <Button variant="outline" onClick={() => setFixPreviewOpen(false)}>
+              取消
+            </Button>
+            <Button
+              theme="primary"
+              loading={fixLoading}
+              disabled={!fixPreview?.results.some((r) => r.dry)}
+              onClick={() => {
+                const ids = (fixPreview?.results || []).filter((r) => r.dry).map((r) => r.itemId);
+                runFix(ids, false);
+              }}
+            >
+              确认执行（克隆生成新链接）
+            </Button>
+          </Space>
+        }
+      >
+        {fixPreview && (
+          <div className="space-y-3 max-h-[70vh] overflow-auto pr-1">
+            <div className="text-xs px-3 py-2 rounded border border-amber-200 bg-amber-50 text-amber-900">
+              <strong>重要：</strong>美客多 CBT 商品对本店 API 是只读的（改不了、删不掉、暂停不了）。
+              因此「改为合规」是<strong>克隆一件清洗后的新商品并重新上架</strong>，得到一条全新的合规链接；
+              <strong>原违规链接仍需你到美客多卖家后台手动暂停或删除</strong>，否则旧链接依然存在侵权风险。
+            </div>
+            {fixPreview.results.map((r) => (
+              <div key={r.itemId} className="text-xs border rounded p-2 space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Tag size="small" theme={r.dry ? 'primary' : r.ok ? 'success' : 'danger'} variant="light">
+                    {r.dry ? '可执行' : r.ok ? '成功' : r.skipped ? '无需修改' : '失败'}
+                  </Tag>
+                  <span className="text-gray-400">{r.itemId}</span>
+                  <span className="truncate">{r.title}</span>
+                </div>
+                {r.changes?.length ? (
+                  <ul className="list-disc list-inside text-gray-600 space-y-0.5">
+                    {r.changes.map((c, i) => (
+                      <li key={i}>{c}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                {r.error && <div className="text-red-600">{r.error}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+      </Dialog>
+
+      {/* ============ 合规修复：执行结果 ============ */}
+      <Dialog
+        visible={fixDoneOpen}
+        onClose={() => setFixDoneOpen(false)}
+        header="改为符合规范 · 执行结果"
+        width="min(880px, 95vw)"
+        footer={
+          <Button theme="primary" onClick={() => setFixDoneOpen(false)}>
+            知道了
+          </Button>
+        }
+      >
+        {fixDone && (
+          <div className="space-y-3 max-h-[70vh] overflow-auto pr-1">
+            <div className="flex items-center gap-3 text-sm">
+              <Tag theme="success">成功 {fixDone.ok}</Tag>
+              <Tag theme="warning">无需修改 {fixDone.skipped}</Tag>
+              <Tag theme="danger">失败 {fixDone.failed}</Tag>
+            </div>
+            <div className="text-xs px-3 py-2 rounded border border-amber-200 bg-amber-50 text-amber-900">
+              新链接已生成，请在美客多后台<strong>暂停/删除原始违规链接</strong>（API 无权限操作原 CBT 商品）。
+            </div>
+            {fixDone.results.map((r) => (
+              <div key={r.itemId} className="text-xs border rounded p-2 space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Tag size="small" theme={r.ok ? 'success' : r.skipped ? 'warning' : 'danger'} variant="light">
+                    {r.ok ? '成功' : r.skipped ? '无需修改' : '失败'}
+                  </Tag>
+                  <span className="text-gray-400">{r.itemId}</span>
+                  <span className="truncate">{r.title}</span>
+                  {r.newId && (
+                    <Tag size="small" theme="primary" variant="outline">
+                      新链接 {r.newId}
+                    </Tag>
+                  )}
+                  {r.newSites?.length ? <span className="text-gray-500">站点 {r.newSites.join('/')}</span> : null}
+                </div>
+                {r.changes?.length ? (
+                  <ul className="list-disc list-inside text-gray-600 space-y-0.5">
+                    {r.changes.map((c, i) => (
+                      <li key={i}>{c}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                {r.siteErrors?.length ? (
+                  <div className="text-red-600">
+                    站点报错：{r.siteErrors.map((s) => `${s.site}: ${s.msg}`).join('；')}
+                  </div>
+                ) : null}
+                {r.error && <div className="text-red-600">{r.error}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+      </Dialog>
+
       <ImageViewer
-        images={previewImages}
-        visible={previewVisible}
-        index={previewIndex}
+        images={viewerImages}
+        visible={viewerOpen}
+        index={viewerIndex}
         closeOnOverlay
-        onClose={() => setPreviewVisible(false)}
+        onClose={() => setViewerOpen(false)}
       />
     </div>
   );

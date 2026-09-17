@@ -23,6 +23,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { fileURLToPath } from 'url';
 import { getStoreRaw, ensureStoreToken } from './stores.js';
+import { generateVideoFromImage } from './i2v.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -265,8 +266,55 @@ export async function convertToClipsFormat(
   }
 }
 
-// ============ ML Clips 上传 ============
+/**
+ * 把 **AI 生成的原始片段** 归一化成 ML Clips 合规格式。
+ *
+ * 与 convertToClipsFormat 的区别：那个是为「1688 横版源视频」设计的（居中裁 9:16 + 去底部 12%）；
+ * AI 片段可能本来就是竖版（1024x1792），用那套会把画面裁成中间一条，必须改用
+ * 「覆盖式缩放 + 居中裁切」（force_original_aspect_ratio=increase + crop），横竖都正确。
+ *
+ * 另外 AI 片段常见问题：无音轨（ML 要求必须有音频）、时长 5s（ML 要求 ≥10s）、
+ * 智谱免费档右下角烧了「AI生成」水印（只能裁不能关，实测纵向 95.0%~97.7% → 裁底部 8%）。
+ */
+export async function normalizeAiClip(
+  inputPath: string,
+  outputPath: string,
+  opts: { cropBottomPct?: number; targetDuration?: number } = {},
+): Promise<{ success: boolean; info: VideoInfo | null; error?: string }> {
+  const info = await getVideoInfo(inputPath);
+  if (!info || !info.width) {
+    return { success: false, info: null, error: 'ffprobe 读不出 AI 片段信息（原始片段可能是 mjpeg-in-mp4、无时长元数据）' };
+  }
+  const srcDur = Number.isFinite(info.duration) && info.duration > 0 ? info.duration : 5;
+  const target = Math.max(10, Math.min(opts.targetDuration || 12, 60));
+  const cropBottom = Math.max(0, Math.min(opts.cropBottomPct || 0, 0.2));
 
+  const preCrop = cropBottom > 0 ? `crop=iw:ih*${(1 - cropBottom).toFixed(4)}:0:0,` : '';
+  const vf = `${preCrop}scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30`;
+
+  const args: string[] = ['-y'];
+  if (srcDur < target - 0.3) args.push('-stream_loop', '-1'); // 太短：循环补足
+  args.push('-i', inputPath);
+  if (!info.hasAudio) {
+    // 无音轨 → 补静音轨（ML Clips 强制要求有音频）
+    args.push('-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo');
+  }
+  args.push('-vf', vf, '-c:v', 'libx264', '-preset', 'fast', '-crf', '24', '-pix_fmt', 'yuv420p');
+  args.push('-c:a', 'aac', '-b:a', '128k');
+  if (!info.hasAudio) args.push('-map', '0:v:0', '-map', '1:a:0');
+  args.push('-t', String(target), '-shortest', outputPath);
+
+  try {
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    await execFileAsync('ffmpeg', args, { timeout: 120000, maxBuffer: 10 * 1024 * 1024 });
+    return { success: true, info };
+  } catch (e: any) {
+    console.error(`[VideoClips] AI 片段归一化失败: ${e?.message}`);
+    return { success: false, info, error: `AI 片段归一化失败：${String(e?.message || e).slice(0, 300)}` };
+  }
+}
+
+// ============ ML Clips 上传 ============
 /**
  * 上传视频到 ML Clips
  *
@@ -318,9 +366,18 @@ export async function uploadClip(
 // ============ 视频处理记录（持久化） ============
 
 export interface VideoRecord {
+  /** 记录键对应的商品标识：老流程=妙手 detailId，新「视频生成」tab=ML CBT itemId */
   detailId: string;
   storeId: string;
   cbtItemId: string;
+  /** ML CBT 商品 ID（与 cbtItemId 同义，便于前端按 itemId 匹配） */
+  itemId?: string;
+  /** 关联到的妙手采集箱 detailId（可能为空，纯 ML 存量商品没有） */
+  miaoshouDetailId?: string;
+  /** 这条视频的来源：source=1688/妙手源视频转码 / backup=服务器已有备份 / ai=AI 图生视频 */
+  sourceKind?: 'source' | 'backup' | 'ai';
+  /** 商品主图 URL（AI 图生视频兼底用，刷新/重传时可再次生成） */
+  mainImageUrl?: string;
   sourceUrl?: string;
   title?: string;
   /** 备份文件名（位于 data/video-backups/） */
@@ -472,6 +529,7 @@ export interface VideoPipelineResult {
  * @param force 强制重新上传（忽略 ML 已有的 clip，用于「失败后按原因重传」）
  */
 export async function processAndUploadVideo(opts: {
+  /** 记录键：老流程传妙手 detailId；「视频生成」tab 传 ML itemId */
   detailId: string;
   mainImgVideoUrl: string;
   cbtItemId: string;
@@ -480,6 +538,16 @@ export async function processAndUploadVideo(opts: {
   title?: string;
   reuseBackup?: boolean;
   force?: boolean;
+  /** 商品主图 URL —— 既无源视频又无备份时用它做 AI 图生视频 */
+  mainImageUrl?: string;
+  /** 额外的备份文件名（不带 .mp4），用于兼容老流程按妙手 detailId 存的备份 */
+  altBackupKeys?: string[];
+  /** 是否允许 AI 图生视频兜底（默认允许） */
+  enableAiFallback?: boolean;
+  /** 关联到的妙手采集箱 detailId（仅记录用） */
+  miaoshouDetailId?: string;
+  /** 本次运行内已熔断的 AI 视频平台（批量任务复用） */
+  disabledAiPlatforms?: Set<string>;
 }): Promise<VideoPipelineResult> {
   const {
     detailId,
@@ -490,6 +558,11 @@ export async function processAndUploadVideo(opts: {
     title,
     reuseBackup = true,
     force = false,
+    mainImageUrl,
+    altBackupKeys,
+    enableAiFallback = true,
+    miaoshouDetailId,
+    disabledAiPlatforms,
   } = opts;
 
   const now = () => Date.now();
@@ -511,8 +584,11 @@ export async function processAndUploadVideo(opts: {
   rec.storeId = storeId;
   rec.cbtItemId = cbtItemId;
   rec.detailId = detailId;
+  rec.itemId = cbtItemId;
+  rec.miaoshouDetailId = miaoshouDetailId || rec.miaoshouDetailId;
   rec.sites = siteIds;
-  rec.sourceUrl = mainImgVideoUrl;
+  if (mainImgVideoUrl && !mainImgVideoUrl.startsWith('backup://')) rec.sourceUrl = mainImgVideoUrl;
+  if (mainImageUrl) rec.mainImageUrl = mainImageUrl;
   if (title) rec.title = title;
   rec.updatedAt = now();
 
@@ -561,82 +637,144 @@ export async function processAndUploadVideo(opts: {
     console.warn(`[VideoClips] ${detailId} 状态查询失败（继续尝试上传）: ${pre.error}`);
   }
 
-  // 1. 定位输出文件：优先复用服务器备份
+  // ============ 1. 定位/生成输出文件 ============
+  // 三档来源（按优先级）：
+  //   ① 服务器已有备份  —— 含老流程按妙手 detailId 存的备份（altBackupKeys）
+  //   ② 1688 / 妙手源视频 —— 下载 → 裁 9:16 → 去底部文字 → 限时长
+  //   ③ AI 图生视频       —— 用商品主图现场生成 → 归一化（含去水印/补音轨/补时长）
+  const backupKeys = Array.from(new Set([detailId, ...(altBackupKeys || [])].filter(Boolean)));
+  const findBackup = (): string => {
+    for (const k of backupKeys) {
+      const p = path.join(BACKUP_DIR, `${k}.mp4`);
+      try {
+        if (fs.existsSync(p) && fs.statSync(p).size > 1000) return p;
+      } catch { /* ignore */ }
+    }
+    return '';
+  };
   const backupName = `${detailId}.mp4`;
   const backupPath = path.join(BACKUP_DIR, backupName);
-  const hasBackup =
-    fs.existsSync(backupPath) && fs.statSync(backupPath).size > 1000;
+  const foundBackup = findBackup();
+  const hasBackup = !!foundBackup;
   let outPath = backupPath;
+  const tried: string[] = [];
 
   if (reuseBackup && hasBackup) {
     rec.stage = 'backup';
     rec.status = 'uploading';
-    rec.backupFile = backupName;
-    rec.backupSize = fs.statSync(backupPath).size;
+    rec.sourceKind = 'backup';
+    rec.backupFile = path.basename(foundBackup);
+    rec.backupSize = fs.statSync(foundBackup).size;
     saveVideoRecord(rec);
-    console.log(`[VideoClips] ${detailId} 复用服务器备份 ${backupName}`);
+    outPath = foundBackup;
+    console.log(`[VideoClips] ${detailId} 复用服务器备份 ${path.basename(foundBackup)}`);
   } else {
-    // 1a. 下载 1688 视频
+    let produced = false;
     const rawPath = path.join(TMP_DIR, `${detailId}_raw.mp4`);
     const tmpOut = path.join(TMP_DIR, `${detailId}_clips.mp4`);
-    rec.stage = 'download';
-    rec.status = 'uploading';
-    saveVideoRecord(rec);
-    console.log(`[VideoClips] 开始处理 ${detailId}: ${mainImgVideoUrl.slice(0, 60)}...`);
-    const dlOk = await downloadVideo(mainImgVideoUrl, rawPath);
 
-    if (dlOk) {
-      // 1b. 转换为 ML 合规格式（9:16、10-61s、含音频、1080x1920）
-      rec.stage = 'convert';
+    // ② 源视频（1688 / 妙手 mainImgVideoUrl）
+    if (mainImgVideoUrl && !mainImgVideoUrl.startsWith('backup://')) {
+      rec.stage = 'download';
+      rec.status = 'uploading';
+      rec.sourceKind = 'source';
       saveVideoRecord(rec);
-      const convResult = await convertToClipsFormat(rawPath, tmpOut);
-      if (convResult.success) {
-        // 1c. 写入服务器备份（永久保留）
-        fs.mkdirSync(BACKUP_DIR, { recursive: true });
-        try {
-          fs.copyFileSync(tmpOut, backupPath);
-          outPath = backupPath;
-        } catch (e: any) {
-          outPath = tmpOut; // 备份写失败则用临时文件继续上传，不阻断
-        }
-        rec.duration = convResult.info?.duration;
-        rec.width = convResult.info?.width;
-        rec.height = convResult.info?.height;
-        if (convResult.info) {
+      console.log(`[VideoClips] 开始处理 ${detailId}: ${mainImgVideoUrl.slice(0, 60)}...`);
+      const dlOk = await downloadVideo(mainImgVideoUrl, rawPath);
+      if (dlOk) {
+        rec.stage = 'convert';
+        saveVideoRecord(rec);
+        const convResult = await convertToClipsFormat(rawPath, tmpOut);
+        if (convResult.success) {
+          fs.mkdirSync(BACKUP_DIR, { recursive: true });
+          try {
+            fs.copyFileSync(tmpOut, backupPath);
+            outPath = backupPath;
+          } catch {
+            outPath = tmpOut; // 备份写失败则用临时文件继续上传，不阻断
+          }
+          rec.duration = convResult.info?.duration;
+          rec.width = convResult.info?.width;
+          rec.height = convResult.info?.height;
+          produced = true;
           console.log(
-            `[VideoClips] ${detailId} 转换完成 ${convResult.info.width}x${convResult.info.height} ` +
-              `${convResult.info.duration.toFixed(1)}s 音频=${convResult.info.hasAudio}`
+            `[VideoClips] ${detailId} 源视频转换完成 ${convResult.info?.width}x${convResult.info?.height} ` +
+              `${(convResult.info?.duration || 0).toFixed(1)}s 音频=${convResult.info?.hasAudio}`,
           );
+        } else {
+          tried.push(`源视频转换失败：${convResult.error}`);
         }
       } else {
-        // 转换失败：有备份则退回用备份，否则报错
-        try { fs.unlinkSync(rawPath); } catch {}
-        if (hasBackup) {
-          outPath = backupPath;
-        } else {
-          rec.status = 'failed';
-          rec.error = `视频转换失败：${convResult.error}`;
-          rec.updatedAt = now();
-          saveVideoRecord(rec);
-          return { success: false, stage: 'convert', error: rec.error, record: rec };
-        }
+        tried.push('源视频下载失败（1688 视频可能已删除或需登录）');
       }
+      try { fs.unlinkSync(rawPath); } catch { /* ignore */ }
+      try { fs.unlinkSync(tmpOut); } catch { /* ignore */ }
     } else {
-      // 下载失败：有备份则退回用备份（应对 1688 视频已删除），否则报错
+      tried.push('该商品没有 1688 / 妙手源视频');
+    }
+
+    // ③ AI 图生视频兜底
+    if (!produced && enableAiFallback && mainImageUrl) {
+      rec.stage = 'ai';
+      rec.status = 'uploading';
+      rec.sourceKind = 'ai';
+      rec.error = `源视频不可用，改用 AI 图生视频：${tried.join('；')}`;
+      saveVideoRecord(rec);
+      console.log(`[VideoClips] ${detailId} 无源视频，改用 AI 图生视频（主图 ${mainImageUrl.slice(0, 60)}）`);
+      const aiRaw = path.join(TMP_DIR, `${detailId}_ai_raw.mp4`);
+      const aiOut = path.join(TMP_DIR, `${detailId}_ai_clips.mp4`);
+      const ai = await generateVideoFromImage({
+        imageUrl: mainImageUrl,
+        outPath: aiRaw,
+        durationSec: 10,
+        disabledPlatforms: disabledAiPlatforms,
+      });
+      if (ai.ok) {
+        const norm = await normalizeAiClip(aiRaw, aiOut, {
+          cropBottomPct: ai.cropBottomPct,
+          targetDuration: 10,
+        });
+        if (norm.success) {
+          fs.mkdirSync(BACKUP_DIR, { recursive: true });
+          try {
+            fs.copyFileSync(aiOut, backupPath);
+            outPath = backupPath;
+          } catch {
+            outPath = aiOut;
+          }
+          rec.duration = norm.info?.duration;
+          rec.width = norm.info?.width;
+          rec.height = norm.info?.height;
+          produced = true;
+          rec.sourceUrl = `ai:${ai.providerName || ai.platform}`;
+          console.log(`[VideoClips] ${detailId} AI 图生视频完成（${ai.providerName}）`);
+        } else {
+          tried.push(`AI 片段归一化失败：${norm.error}`);
+        }
+      } else {
+        tried.push(`AI 图生视频失败：${ai.error}`);
+      }
+      try { fs.unlinkSync(aiRaw); } catch { /* ignore */ }
+      try { fs.unlinkSync(aiOut); } catch { /* ignore */ }
+    } else if (!produced && !enableAiFallback) {
+      tried.push('本次未启用 AI 图生视频兜底');
+    } else if (!produced && !mainImageUrl) {
+      tried.push('该商品没有可用主图，无法走 AI 图生视频');
+    }
+
+    if (!produced) {
       if (hasBackup) {
-        outPath = backupPath;
+        outPath = foundBackup;
+        rec.sourceKind = 'backup';
       } else {
         rec.status = 'failed';
-        rec.error = '下载失败（1688 视频可能已删除或需登录）';
+        rec.error = `无法获得可用视频：${tried.join('；') || '未知原因'}`;
+        rec.stage = 'prepare';
         rec.updatedAt = now();
         saveVideoRecord(rec);
-        return { success: false, stage: 'download', error: rec.error, record: rec };
+        return { success: false, stage: 'prepare', error: rec.error, record: rec };
       }
     }
-    try {
-      fs.unlinkSync(rawPath);
-      fs.unlinkSync(tmpOut);
-    } catch {}
     rec.backupFile = backupName;
     rec.backupSize = fs.existsSync(backupPath) ? fs.statSync(backupPath).size : 0;
     rec.stage = 'backup';
@@ -644,9 +782,9 @@ export async function processAndUploadVideo(opts: {
   }
 
   // 兜底：确保输出文件可用
-  if (!fs.existsSync(outPath)) {
+  if (!outPath || !fs.existsSync(outPath)) {
     rec.status = 'failed';
-    rec.error = '无可用视频文件（无备份且源视频下载失败）';
+    rec.error = '无可用视频文件（既无备份，源视频与 AI 生成也没成功）';
     rec.updatedAt = now();
     saveVideoRecord(rec);
     return { success: false, stage: 'prepare', error: rec.error, record: rec };
@@ -711,6 +849,8 @@ export async function refreshVideoRecord(
     sites: rec.sites,
     title: rec.title,
     sourceUrl: cur.sourceUrl || rec.sourceUrl,
+    mainImageUrl: cur.mainImageUrl || rec.mainImageUrl,
+    miaoshouDetailId: cur.miaoshouDetailId || rec.miaoshouDetailId,
     refreshAttempts: (cur.refreshAttempts || 0) + 1,
     lastRefreshAt: Date.now(),
     updatedAt: Date.now(),
@@ -719,9 +859,9 @@ export async function refreshVideoRecord(
   if (!r.createdAt) r.createdAt = Date.now();
   saveVideoRecord(r);
 
-  if (!r.sourceUrl && !(r.backupFile && fs.existsSync(backupFilePath(r)))) {
+  if (!r.sourceUrl && !r.mainImageUrl && !(r.backupFile && fs.existsSync(backupFilePath(r)))) {
     r.status = 'failed';
-    r.error = '无源视频 URL 且无服务器备份，无法重传';
+    r.error = '无源视频 URL、无商品主图且无服务器备份，无法重传';
     r.updatedAt = Date.now();
     saveVideoRecord(r);
     return r;
@@ -729,11 +869,13 @@ export async function refreshVideoRecord(
 
   return (await processAndUploadVideo({
     detailId: r.detailId,
-    mainImgVideoUrl: r.sourceUrl || '',
+    mainImgVideoUrl: (r.sourceUrl || '').startsWith('ai:') ? '' : (r.sourceUrl || ''),
     cbtItemId: r.cbtItemId,
     siteIds: r.sites,
     storeId: r.storeId,
     title: r.title,
+    mainImageUrl: r.mainImageUrl,
+    miaoshouDetailId: r.miaoshouDetailId,
     reuseBackup: true,
     force: !!opts.forceReupload,
   })).record!;

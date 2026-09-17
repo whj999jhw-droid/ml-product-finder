@@ -25,7 +25,7 @@ import {
   IP_BLACKLIST,
   SPORTS_BLACKLIST,
 } from './bannedWords.js';
-import { getStoreRaw, getAllStores } from './stores.js';
+import { getStoreRaw, getAllStores, storeApiGet } from './stores.js';
 import {
   BACKUP_DIR,
   processAndUploadVideo,
@@ -36,7 +36,11 @@ import {
   listVideoRecordsSorted,
   backupFilePath,
   overallReview,
+  saveVideoRecord,
 } from './videoClips.js';
+import { ensureIndex, getIndex, listItems, itemPermalink } from './storeItems.js';
+import { createVideoJob, getVideoJob, listVideoJobs, cancelVideoJob } from './videoJobs.js';
+import { listVideoProviders } from './i2v.js';
 
 export const miaoshouRouter = Router();
 
@@ -1001,6 +1005,480 @@ miaoshouRouter.get('/video/file/:detailId', (req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=86400');
   res.setHeader('Content-Type', 'video/mp4');
   return res.sendFile(p);
+});
+
+// ============ 「视频生成」tab：ML 存量在售商品 → 生成/上传视频 ============
+//
+// 与上面「已发布」tab 的区别：
+//  - 数据源换成 **ML 店铺在售商品**（全店索引，天然满足「没有被美客多暂停」），
+//    不再依赖妙手采集箱，因此妙手 ERP 自己上架、本系统完全没记录的商品也能覆盖到；
+//  - 视频来源三档：① 妙手/1688 源视频 → ② 服务器已有备份 → ③ AI 用商品主图生成。
+
+/**
+ * 标题归一化（用于「妙手发布记录 ↔ ML 商品」配对）。
+ * 实测 ML 标题 = 妙手标题 + 规格后缀（如 "... Pashmina Navy Blue"），
+ * 而本店 ML 商品**完全没有 SKU**（seller_custom_field 全空），所以只能靠标题前缀配对。
+ */
+function normalizeTitleForLink(s: any): string {
+  return String(s || '')
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * 前缀长度实测值：30 字符能避开「同款不同色」的歧义，且覆盖约 79% 在售商品
+ * （精确整标题匹配只有 1.4%，因为 ML 会截断标题并追加规格后缀）。
+ */
+const TITLE_LINK_PREFIX = 30;
+
+interface ItemLinkIndex {
+  /** `${storeId}|${itemId}` → 妙手 detailId（本系统自己发布、记录里带 itemId，最可靠） */
+  byItem: Map<string, string>;
+  /** `${storeId}|标题前缀` → detailId（同一店铺内唯一才收录） */
+  byStorePrefix: Map<string, string>;
+  /** `标题前缀` → detailId（全局唯一才收录） */
+  byPrefix: Map<string, string>;
+  size: number;
+  builtAt: number;
+}
+
+let linkIndexCache: ItemLinkIndex | null = null;
+
+/**
+ * 妙手发布记录 → ML 商品 的配对索引（三级优先级）：
+ *   ① 记录里直接有 itemId —— 本系统通过 CBT 发布的商品，最准；
+ *   ② 店内唯一标题前缀 ③ 全局唯一标题前缀 —— 妙手 ERP 自己上架的商品没有 itemId，
+ *      且发布时 ML 没写 SKU，只能靠标题前缀配对（非唯一前缀一律丢弃，避免配错源视频）。
+ * 有 detailId 才能去妙手采集箱取 1688 源视频，否则只能退化到 AI 图生视频。
+ */
+function getLinkIndex(): ItemLinkIndex {
+  const now = Date.now();
+  const records = getPublishRecords();
+  const count = Object.keys(records).length;
+  if (linkIndexCache && linkIndexCache.size === count && now - linkIndexCache.builtAt < 60000) {
+    return linkIndexCache;
+  }
+  const byItem = new Map<string, string>();
+  const storePrefixSets = new Map<string, Set<string>>();
+  const prefixSets = new Map<string, Set<string>>();
+  for (const r of Object.values(records)) {
+    if (!r?.detailId) continue;
+    const did = String(r.detailId);
+    if (r.itemId && r.storeId && r.status === 'success') byItem.set(`${r.storeId}|${r.itemId}`, did);
+    if (!r.title || !r.storeId) continue;
+    const t = normalizeTitleForLink(r.title);
+    if (t.length < TITLE_LINK_PREFIX) continue;
+    const key = t.slice(0, TITLE_LINK_PREFIX);
+    const sk = `${r.storeId}|${key}`;
+    if (!storePrefixSets.has(sk)) storePrefixSets.set(sk, new Set());
+    storePrefixSets.get(sk)!.add(did);
+    if (!prefixSets.has(key)) prefixSets.set(key, new Set());
+    prefixSets.get(key)!.add(did);
+  }
+  const byStorePrefix = new Map<string, string>();
+  for (const [k, v] of storePrefixSets) if (v.size === 1) byStorePrefix.set(k, [...v][0]);
+  const byPrefix = new Map<string, string>();
+  for (const [k, v] of prefixSets) if (v.size === 1) byPrefix.set(k, [...v][0]);
+  linkIndexCache = { byItem, byStorePrefix, byPrefix, size: count, builtAt: now };
+  console.log(
+    `[ItemLink] 配对索引：直接 ${byItem.size} / 店内标题前缀 ${byStorePrefix.size} / 全局标题前缀 ${byPrefix.size}（发布记录 ${count}）`,
+  );
+  return linkIndexCache;
+}
+
+/** 兼容旧调用名：只返回「记录里直接有 itemId」的映射 */
+function buildItemToDetailIdMap(): Map<string, string> {
+  return getLinkIndex().byItem;
+}
+
+/**
+ * 备份文件名集合（缓存 30 秒）。
+ * 视频 tab 一次要判 3000+ 件商品有没有备份，逐件 existsSync+statSync 要上万次系统调用，
+ * 改成一次性 readdir 建集合，后续 O(1) 查。
+ */
+let backupNameSet: Set<string> | null = null;
+let backupNameSetAt = 0;
+
+function getBackupNameSet(): Set<string> {
+  const now = Date.now();
+  if (backupNameSet && now - backupNameSetAt < 30000) return backupNameSet;
+  const set = new Set<string>();
+  try {
+    for (const f of fs.readdirSync(BACKUP_DIR)) {
+      if (f.toLowerCase().endsWith('.mp4')) set.add(f.slice(0, -4));
+    }
+  } catch { /* 目录不存在等，视为无备份 */ }
+  backupNameSet = set;
+  backupNameSetAt = now;
+  return set;
+}
+
+function backupExistsFor(keys: string[]): boolean {
+  const set = getBackupNameSet();
+  for (const k of keys) {
+    if (k && set.has(String(k))) return true;
+  }
+  return false;
+}
+
+/** 一件 ML 商品的视频相关上下文（候选列表与生成流程共用） */
+interface ItemVideoContext {
+  storeId: string;
+  itemId: string;
+  title: string;
+  thumbnail: string;
+  mainImageUrl: string;
+  detailId?: string;
+  /** 记录键：有关联妙手 detailId 时用它（与「已发布」tab 的记录合并），否则用 itemId */
+  recordKey: string;
+  hasBackup: boolean;
+  /** detailId 的配对来源：record=发布记录直接对应 / title=标题前缀配对 / none=没配到 */
+  detailLink: 'record' | 'title' | 'none';
+  /** 预计会走哪一档来源，供 UI 提示 */
+  expectedSource: 'source' | 'backup' | 'ai';
+}
+
+function itemVideoContext(storeId: string, row: any, li: ItemLinkIndex): ItemVideoContext {
+  let detailId: string | undefined = li.byItem.get(`${storeId}|${row.id}`);
+  let detailLink: ItemVideoContext['detailLink'] = detailId ? 'record' : 'none';
+  if (!detailId) {
+    const p = normalizeTitleForLink(row?.title);
+    if (p.length >= TITLE_LINK_PREFIX) {
+      const key = p.slice(0, TITLE_LINK_PREFIX);
+      detailId = li.byStorePrefix.get(`${storeId}|${key}`) || li.byPrefix.get(key);
+      if (detailId) detailLink = 'title';
+    }
+  }
+  const recordKey = detailId || row.id;
+  const hasBackup = backupExistsFor([recordKey, row.id, detailId || '']);
+  return {
+    storeId,
+    itemId: row.id,
+    title: row.title,
+    thumbnail: row.thumbnail,
+    mainImageUrl: (row.pictures && row.pictures[0]) || row.thumbnail || '',
+    detailId,
+    recordKey,
+    hasBackup,
+    detailLink,
+    expectedSource: hasBackup ? 'backup' : detailId ? 'source' : 'ai',
+  };
+}
+
+/**
+ * GET /video/candidates
+ * 列出某店铺「在售（active）」商品的视频生成视图。
+ *
+ * query: storeId(必填) / q / page / pageSize / checkClip=1（对当前页逐条查 ML Clips 状态）
+ */
+miaoshouRouter.get('/video/candidates', async (req, res) => {
+  const storeId = String(req.query.storeId || '');
+  if (!storeId) return res.status(400).json({ success: false, error: '缺少 storeId' });
+  const store = getStoreRaw(storeId);
+  if (!store) return res.status(404).json({ success: false, error: '店铺不存在' });
+  try {
+    const idx = await ensureIndex(storeId);
+    const { items, total, page, pageSize } = listItems(storeId, {
+      status: 'active',
+      q: (req.query.q as string) || '',
+      page: Number(req.query.page) || 1,
+      pageSize: Number(req.query.pageSize) || 20,
+    });
+    const li = getLinkIndex();
+    const vrecs = getVideoRecords();
+    const linkFilter = String(req.query.link || 'any');
+    const build = (rows: any[]) =>
+      rows.map((row) => {
+      const ctx = itemVideoContext(storeId, row, li);
+      const vrec = vrecs[`${storeId}|${ctx.recordKey}`] || vrecs[`${storeId}|${row.id}`];
+      return {
+        itemId: row.id,
+        title: row.title,
+        thumbnail: row.thumbnail,
+        price: row.price,
+        currencyId: row.currencyId,
+        status: row.status,
+        soldQuantity: row.soldQuantity,
+        permalink: itemPermalink(row),
+        miaoshouDetailId: ctx.detailId || null,
+        recordKey: ctx.recordKey,
+        hasBackup: ctx.hasBackup,
+        expectedSource: ctx.expectedSource,
+        detailLink: ctx.detailLink,
+        video: vrec
+          ? {
+              status: vrec.status,
+              stage: vrec.stage,
+              error: vrec.error,
+              sourceKind: vrec.sourceKind,
+              siteStatuses: vrec.siteStatuses,
+              clipUuid: vrec.clipUuid,
+              hasBackup: ctx.hasBackup,
+              updatedAt: vrec.updatedAt,
+            }
+          : null,
+      };
+    });
+
+    // 来源统计 + 按来源筛选（source=能取到妙手/1688 源视频；ai=只能靠 AI 图生视频）
+    // ML 商品没有 SKU，源视频只能靠「妙手发布记录标题前缀」配对；未配到的只能走 AI 图生视频。
+    const all = listItems(storeId, {
+      status: 'active',
+      q: (req.query.q as string) || '',
+      page: 1,
+      pageSize: 20000,
+    }).items;
+    const allCtx = build(all as any[]);
+    const linkCounts = {
+      source: allCtx.filter((o: any) => o.miaoshouDetailId).length,
+      ai: allCtx.filter((o: any) => !o.miaoshouDetailId).length,
+    };
+    let totalEff = total;
+    let out = build(items as any[]);
+    if (linkFilter === 'source' || linkFilter === 'ai') {
+      const filtered = allCtx.filter((o: any) =>
+        linkFilter === 'source' ? !!o.miaoshouDetailId : !o.miaoshouDetailId,
+      );
+      totalEff = filtered.length;
+      const ps = Number(req.query.pageSize) || 20;
+      const pg = Number(req.query.page) || 1;
+      out = filtered.slice((pg - 1) * ps, pg * ps) as any;
+    }
+
+    // 可选：对当前页逐条查 ML Clips 真实审核状态（页面级，几十条，可接受）
+    let clipError = '';
+    if (req.query.checkClip === '1' && out.length) {
+      await Promise.all(
+        out.map(async (o) => {
+          try {
+            const st = await fetchClipStatus(o.itemId, storeId);
+            (o as any).clip = {
+              ok: st.ok,
+              clipCount: st.clipCount,
+              siteStatuses: st.siteStatuses,
+              review: overallReview(st.siteStatuses),
+              error: st.error || '',
+            };
+          } catch (e: any) {
+            (o as any).clip = { ok: false, error: e?.message || String(e), siteStatuses: {}, clipCount: 0 };
+          }
+        }),
+      );
+      clipError = (out.find((o: any) => o.clip && !o.clip.ok) as any)?.clip?.error || '';
+    }
+
+    res.json({
+      success: true,
+      storeId,
+      storeNick: store.nickname,
+      building: !!idx?.building,
+      progress: idx?.progress || { done: 0, total: 0 },
+      builtAt: idx?.builtAt || 0,
+      counts: idx?.counts || null,
+      total: totalEff,
+      page,
+      pageSize,
+      linkCounts,
+      clipError,
+      /** 当前配置里可用于 AI 图生视频的平台（空数组=没有配视频模型，源视频缺失时必然失败） */
+      aiProviders: listVideoProviders(),
+      items: out,
+    });
+  } catch (e: any) {
+    console.error(`[VideoCandidates] 失败: ${e?.message}`);
+    res.json({ success: false, error: e?.message || String(e) });
+  }
+});
+
+/**
+ * 为一件 ML 商品生成/上传视频（内部函数，单件接口与批量任务共用）。
+ * 视频来源顺序：妙手/1688 源视频 → 服务器备份 → AI 图生视频（商品主图）。
+ */
+async function runItemVideo(
+  ctx: ItemVideoContext,
+  opts: { sites?: string[]; force?: boolean; shopId?: string; skipHasClip?: boolean; disabledAi?: Set<string> },
+): Promise<{ ok: boolean; skipped?: boolean; skipReason?: string; stage?: string; error?: string; sourceKind?: string; clipUuid?: string; siteStatuses?: Record<string, string> }> {
+  const sites = (opts.sites && opts.sites.length ? opts.sites : ['MLM']).filter(Boolean);
+
+  // 已有视频 → 直接同步状态返回（除非 force）
+  if (!opts.force) {
+    const pre = await fetchClipStatus(ctx.itemId, ctx.storeId);
+    if (pre.ok && pre.siteStatuses && Object.keys(pre.siteStatuses).length) {
+      const review = overallReview(pre.siteStatuses);
+      if (review.kind !== 'bad') {
+        // 回写记录，让列表能看到
+        saveVideoRecord({
+          detailId: ctx.recordKey,
+          storeId: ctx.storeId,
+          cbtItemId: ctx.itemId,
+          itemId: ctx.itemId,
+          miaoshouDetailId: ctx.detailId,
+          sites,
+          title: ctx.title,
+          status: 'uploaded',
+          siteStatuses: pre.siteStatuses,
+          clipUuid: pre.clipUuids?.[0],
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          refreshAttempts: 0,
+          lastRefreshAt: Date.now(),
+          stage: 'done',
+        } as any);
+        return { ok: true, skipped: true, skipReason: `ML 已有视频（${review.label}），已跳过`, stage: 'done', siteStatuses: pre.siteStatuses };
+      }
+    }
+  }
+
+  // 找源视频：妙手采集箱详情里的 mainImgVideoUrl / videoUrl
+  let sourceUrl = '';
+  if (ctx.detailId) {
+    try {
+      const detail = await getMercadoCollectBoxDetail(String(ctx.detailId), opts.shopId || '12637644', '0');
+      const info = detail?.siteCollectItemInfo || {};
+      sourceUrl = info.mainImgVideoUrl || info.videoUrl || '';
+    } catch (e: any) {
+      console.warn(`[ItemVideo] ${ctx.itemId} 取妙手详情失败（继续走后续来源）: ${e?.message?.slice(0, 120)}`);
+    }
+  }
+
+  const result = await processAndUploadVideo({
+    detailId: ctx.recordKey,
+    mainImgVideoUrl: sourceUrl,
+    cbtItemId: ctx.itemId,
+    siteIds: sites,
+    storeId: ctx.storeId,
+    title: ctx.title,
+    mainImageUrl: ctx.mainImageUrl,
+    altBackupKeys: ctx.detailId ? [ctx.detailId, ctx.itemId] : [ctx.itemId],
+    reuseBackup: true,
+    force: !!opts.force,
+    miaoshouDetailId: ctx.detailId,
+    disabledAiPlatforms: opts.disabledAi,
+  });
+
+  const rec = result.record;
+  return {
+    ok: result.success,
+    stage: result.stage,
+    error: result.error,
+    sourceKind: rec?.sourceKind,
+    clipUuid: rec?.clipUuid,
+    siteStatuses: rec?.siteStatuses,
+  };
+}
+
+/** 解析一件商品（含索引未命中时兜底实时取详情） */
+async function resolveContext(storeId: string, itemId: string): Promise<ItemVideoContext | null> {
+  const idx = getIndex(storeId);
+  let row = idx?.items.find((r) => r.id === itemId);
+  if (!row) {
+    // 索引还没建完 / 刚上架的商品：实时拉一次
+    const store = getStoreRaw(storeId);
+    if (!store) return null;
+    try {
+      const raw: any = await storeApiGet(store, `/items/${encodeURIComponent(itemId)}`, 2);
+      if (raw?.id) {
+        row = {
+          id: raw.id,
+          title: raw.title || '',
+          thumbnail: raw.thumbnail || '',
+          pictures: (raw.pictures || []).map((p: any) => p?.secure_url || p?.url).filter(Boolean),
+        } as any;
+      }
+    } catch (e: any) {
+      console.error(`[ItemVideo] 兜底取详情失败 ${itemId}: ${e?.message}`);
+    }
+  }
+  if (!row) return null;
+  return itemVideoContext(storeId, row, getLinkIndex());
+}
+
+/**
+ * POST /video/generate
+ * 单件商品：生成并上传视频。
+ * body: { storeId, itemId, sites?, force?, shopId? }
+ */
+miaoshouRouter.post('/video/generate', async (req, res) => {
+  const { storeId, itemId, sites, force, shopId } = req.body as {
+    storeId?: string; itemId?: string; sites?: string[]; force?: boolean; shopId?: string;
+  };
+  if (!storeId || !itemId) return res.status(400).json({ success: false, error: '缺少 storeId / itemId' });
+  try {
+    const ctx = await resolveContext(storeId, itemId);
+    if (!ctx) return res.json({ success: false, error: '找不到该商品（可能已被删除或不属于该店铺）' });
+    const r = await runItemVideo(ctx, { sites, force, shopId });
+    res.json({
+      success: r.ok,
+      skipped: r.skipped,
+      error: r.error,
+      skipReason: r.skipReason,
+      stage: r.stage,
+      sourceKind: r.sourceKind,
+      clipUuid: r.clipUuid,
+      siteStatuses: r.siteStatuses,
+      record: getVideoRecords()[`${storeId}|${ctx.recordKey}`] || null,
+    });
+  } catch (e: any) {
+    console.error(`[VideoGenerate] 失败: ${e?.message}`);
+    res.json({ success: false, error: e?.message || String(e), stage: 'error' });
+  }
+});
+
+/**
+ * POST /video/job
+ * 批量：为多件商品生成并上传视频（后台任务，前端轮询进度）。
+ * body: { storeId, itemIds: string[], sites?, force?, shopId? }
+ */
+miaoshouRouter.post('/video/job', async (req, res) => {
+  const { storeId, itemIds, sites, force, shopId } = req.body as {
+    storeId?: string; itemIds?: string[]; sites?: string[]; force?: boolean; shopId?: string;
+  };
+  if (!storeId || !Array.isArray(itemIds) || !itemIds.length) {
+    return res.status(400).json({ success: false, error: '缺少 storeId / itemIds' });
+  }
+  const store = getStoreRaw(storeId);
+  if (!store) return res.status(404).json({ success: false, error: '店铺不存在' });
+  const ids = Array.from(new Set(itemIds.filter(Boolean))).slice(0, 200);
+  await ensureIndex(storeId);
+
+  // AI 平台熔断集合：整个任务共享，避免每件都白等同一个不可用平台
+  const disabledAi = new Set<string>();
+
+  const job = createVideoJob({
+    storeId,
+    storeNick: store.nickname,
+    itemIds: ids,
+    titles: Object.fromEntries(
+      (getIndex(storeId)?.items || []).filter((r) => ids.includes(r.id)).map((r) => [r.id, r.title]),
+    ),
+    runner: async (id) => {
+      const ctx = await resolveContext(storeId, id);
+      if (!ctx) return { ok: false, skipped: true, skipReason: '找不到该商品（可能已被删除）', stage: 'check' };
+      return runItemVideo(ctx, { sites, force, shopId, disabledAi });
+    },
+  });
+  res.json({ success: true, job });
+});
+
+/** GET /video/job/:id → 任务进度 */
+miaoshouRouter.get('/video/job/:id', (req, res) => {
+  const job = getVideoJob(req.params.id);
+  if (!job) return res.status(404).json({ success: false, error: '任务不存在或已被清理' });
+  res.json({ success: true, job });
+});
+
+/** GET /video/jobs → 最近的任务列表 */
+miaoshouRouter.get('/video/jobs', (_req, res) => {
+  res.json({ success: true, jobs: listVideoJobs() });
+});
+
+/** POST /video/job/:id/cancel → 取消任务（当前这件跑完就停） */
+miaoshouRouter.post('/video/job/:id/cancel', (req, res) => {
+  const ok = cancelVideoJob(req.params.id);
+  res.json({ success: ok, message: ok ? '已请求取消，当前商品处理完即停止' : '任务不存在或已结束' });
 });
 
 // ============ 妙手侧已发布同步（妙手 ERP 已上传 → 本系统也显示已上传） ============

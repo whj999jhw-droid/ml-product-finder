@@ -115,21 +115,69 @@ export interface BannedCheckResult {
   message: string;
 }
 
+/** 分词库命中结果（品牌 / 影视动漫游戏 IP / 体育 / 平台违禁词分开记） */
+export interface CategorizedHits {
+  brand: string[];
+  ip: string[];
+  sports: string[];
+  platform: string[];
+}
+
+/**
+ * 把文本按「四类词库」分别命中一次，返回各类命中词。
+ *
+ * 为什么要分类：处置方式完全不同 ——
+ *  - brand（品牌词，如数据线 Model 写了 Apple）：**可洗**，删词换通用说法即可继续卖；
+ *  - ip / sports（卖的就是 IP 本身，如蜘蛛侠帽子、世界杯围巾）：**改名字也侵权**，只能下架；
+ *  - platform（西/葡语夸大宣传、医疗功效等）：**可洗**。
+ */
+export function categorizeHits(text: string, site?: string): CategorizedHits {
+  const lower = (text || '').toLowerCase();
+  const out: CategorizedHits = { brand: [], ip: [], sports: [], platform: [] };
+  for (const b of BRAND_BLACKLIST) if (containsWord(lower, b)) out.brand.push(b);
+  for (const b of IP_BLACKLIST) if (containsWord(lower, b) && !out.brand.includes(b)) out.ip.push(b);
+  for (const b of SPORTS_BLACKLIST) if (containsWord(lower, b) && !out.brand.includes(b) && !out.ip.includes(b)) out.sports.push(b);
+  const wordList = (site || '').toUpperCase() === 'MLB' ? BANNED_WORDS_PT : BANNED_WORDS_ES;
+  for (const w of wordList) if (containsWord(lower, w)) out.platform.push(w);
+  return out;
+}
+
+/** 四类词库全集（供索引扫描做批量预筛，避免逐字段跑正则） */
+export const ALL_RISK_WORDS: string[] = Array.from(
+  new Set([...BRAND_BLACKLIST, ...IP_BLACKLIST, ...SPORTS_BLACKLIST, ...BANNED_WORDS_ES, ...BANNED_WORDS_PT]),
+);
+
+/**
+ * 判断文本是否命中任意风险词（含短词词边界校验）。
+ * 走「先 includes 粗筛 → 再边界校验」的快路径，索引扫描 6000+ 商品时用这个。
+ */
+export function hitsAnyRiskWord(lowerText: string, word: string): boolean {
+  if (!lowerText.includes(word)) return false;
+  return containsWord(lowerText, word);
+}
+
 /**
  * 边界匹配，避免 'lv' 命中 'silver'、'acer' 命中西语 'acero'(钢)、
  * 'fila' 命中西语 'fila'(行) 之类的误报。
  * 长度 <=4 且不含空格的词一律走严格词边界。
  */
-function containsWord(text: string, word: string): boolean {
-  const w = word.trim();
-  if (!w) return false;
-  if (w.length <= 4 && !w.includes(' ')) {
-    const re = new RegExp(
+const SHORT_WORD_RE = new Map<string, RegExp>();
+function shortWordRe(w: string): RegExp {
+  let re = SHORT_WORD_RE.get(w);
+  if (!re) {
+    re = new RegExp(
       `(^|[^a-z0-9á-úà-ũç])${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^a-z0-9á-úà-ũç])`,
       'i'
     );
-    return re.test(text);
+    SHORT_WORD_RE.set(w, re);
   }
+  return re;
+}
+
+function containsWord(text: string, word: string): boolean {
+  const w = word.trim();
+  if (!w) return false;
+  if (w.length <= 4 && !w.includes(' ')) return shortWordRe(w).test(text);
   return text.includes(w);
 }
 
@@ -180,4 +228,53 @@ export function sanitizeTitle(title: string): string {
   ];
   for (const [re, to] of replaceMap) out = out.replace(re, to);
   return out.replace(/\s{2,}/g, ' ').replace(/\s*\(\s*\)/g, '').trim();
+}
+
+// ===== 「一键改为符合规范」用的强清洗 =====
+// 与 sanitizeTitle 的区别：这里要**清干净**品牌/商标/平台违禁词，供克隆重发或直接提交 ML 使用。
+// 只处理「可洗」的词（品牌词、平台违禁词）；IP / 体育词属不可洗，调用方必须先判断 fixable。
+
+// ⚠️ 只删「真正的品牌/商标名」。
+// 不要把蓝牙(Bluetooth)、USB-C/Type-C/Micro USB 这类**通用标准名**放进来 —— 它们不是侵权词，
+// 删掉只会让标题变得不可读（早期脚本曾误删，导致 "Cable ," 这种残句）。
+const BRAND_TOKEN_RE =
+  /\b(apple|iphone|ipad|airpods|macbook|samsung|galaxy|huawei|xiaomi|honor|redmi|oppo|vivo|oneplus|pixel|nike|adidas|puma|reebok|new balance|asics|under armour|skechers|timberland|crocs|gucci|chanel|dior|prada|louis vuitton|rolex|cartier|disney|lego|barbie|hello kitty|pokemon|pokémon|marvel|nintendo|playstation|xbox|lightning|thunderbolt|mag ?safe)\b/gi;
+// 接口/技术商标 → 通用说法（保留可读性，不留下悬空连接词）
+const BRAND_REPLACE: Array<[RegExp, string]> = [
+  [/\blightning\b/gi, '8 Pin'],
+  [/\bthunderbolt\b/gi, 'High Speed'],
+  [/\bmag ?safe\b/gi, 'Magnetic'],
+  [/\btype-?c\b/gi, 'Type-C'],
+  [/\bmicro ?usb\b/gi, 'Micro USB'],
+  [/\busb-?c\b/gi, 'USB-C'],
+];
+
+/** 清洗单段文本：替换接口商标 → 删除品牌词 → 收拾残留标点/悬空连接词 */
+export function sanitizeComplianceText(text: string): string {
+  if (typeof text !== 'string' || !text) return text;
+  let s = text;
+  for (const [re, to] of BRAND_REPLACE) s = s.replace(re, to);
+  s = s.replace(BRAND_TOKEN_RE, ' ');
+  // 清掉品牌词后常见的悬空连接词/标点：", ," / "para ," / "to Android" 等
+  s = s
+    .replace(/\s*\(\s*\)/g, '')
+    .replace(/^\s*(to|for|and|with|de|para|y|con)\b\s*/i, '')
+    .replace(/\b(to|for|and|de|para|y|con)\s*(?=[,;]|$)/gi, '')
+    .replace(/\s*,\s*(?=[,;]|$)/g, '')
+    .replace(/,{2,}/g, ',')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/^[\s,;:+\-]+|[\s,;:+\-]+$/g, '')
+    .replace(/\s+,/g, ',');
+
+  // 平台违禁词（西/葡语宣传词、医疗词）整段剔除
+  for (const w of ALL_RISK_WORDS) {
+    if (w.length > 4 || w.includes(' ')) {
+      if (s.toLowerCase().includes(w)) s = s.replace(new RegExp(escapeRe(w), 'gi'), ' ');
+    }
+  }
+  return s.replace(/\s{2,}/g, ' ').replace(/\s*,\s*(?=[,;]|$)/g, '').replace(/^[\s,;:+\-]+|[\s,;:+\-]+$/g, '').trim();
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

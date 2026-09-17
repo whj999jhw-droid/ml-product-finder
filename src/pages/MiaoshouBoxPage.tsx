@@ -25,6 +25,7 @@ import {
 } from 'tdesign-react';
 import type { PrimaryTableCol } from 'tdesign-react';
 import { FeatureIntro } from '../components/FeatureIntro';
+import { VideoGenTab } from './VideoGenTab';
 import { Inbox, RefreshCw, Video, CloudUpload, Play, RotateCw } from 'lucide-react';
 
 // ============ 类型定义 ============
@@ -202,8 +203,8 @@ export function MiaoshouBoxPage() {
 
   // 已发布记录（storeId|detailId → 记录），用于「已发布」标记与防重复发布
   const [publishedRecords, setPublishedRecords] = useState<Record<string, any>>({});
-  // 当前 tab：未发布 / 已发布
-  const [activeTab, setActiveTab] = useState<'unpublished' | 'published'>('unpublished');
+  // 当前 tab：未发布 / 已发布 / 视频生成
+  const [activeTab, setActiveTab] = useState<'unpublished' | 'published' | 'video'>('unpublished');
 
   // 每行的发布目标（storeId → sites[]）
   const [targets, setTargets] = useState<Record<string, PublishTarget>>({});
@@ -879,13 +880,21 @@ export function MiaoshouBoxPage() {
                 妙手侧限流对策：点「同步妙手已上传」把妙手 ERP 自己上架的商品同步过来，
                 「已发布」列表按上传时间倒序
               </li>
+              <li>
+                <strong>「视频生成」tab</strong>：直接列出 <strong>ML 店铺全部在售商品</strong>
+                （含妙手 ERP 自己上架的，天然满足「未被美客多暂停」），可单件或勾选批量生成并上传 Clips。
+                视频来源按「服务器备份 → 妙手/1688 源视频 → AI 用商品主图生成」三档自动降级；
+                配对妙手源视频靠<strong>标题前缀</strong>（ML 商品没有 SKU），列表可筛「有源视频 / 只能 AI 生成」，
+                数量偏低时点「同步妙手发布记录」再刷新。每一件的阶段（下载/转码/AI/上传）与
+                失败原因（含火山方舟欠费、平台限流、ML 拒收等）都会写明。
+              </li>
             </ul>
           </div>
         }
       />
 
-      {/* 操作栏 */}
-      <div className="flex items-center gap-3 px-5 py-3 flex-shrink-0">
+      {/* 操作栏（采集箱专用；「视频生成」tab 有自己的工具栏） */}
+      <div className={`flex items-center gap-3 px-5 py-3 flex-shrink-0 ${activeTab === 'video' ? 'hidden' : ''}`}>
         <Button
           icon={<Inbox size={16} />}
           onClick={() => loadBox(true)}
@@ -909,9 +918,11 @@ export function MiaoshouBoxPage() {
           clearable
         />
         <span className="text-sm text-gray-500 ml-auto">
-          {activeTab === 'unpublished'
-            ? <>妙手未发布 {unpublishedItems.length} 件 · 搜索命中 {filteredItems.length} 件</>
-            : <>已发布 {publishedItems.length} 件</>}
+          {activeTab === 'unpublished' ? (
+            <>妙手未发布 {unpublishedItems.length} 件 · 搜索命中 {filteredItems.length} 件</>
+          ) : (
+            <>已发布 {publishedItems.length} 件</>
+          )}
           {activeTab === 'unpublished' && selected.size > 0 && (
             <span className="ml-2 text-blue-600 font-medium">已选 {selected.size} 件</span>
           )}
@@ -1194,6 +1205,9 @@ export function MiaoshouBoxPage() {
               </div>
             )}
           </div>
+        </Tabs.TabPanel>
+        <Tabs.TabPanel value="video" label="视频生成">
+          <VideoGenTab stores={stores} />
         </Tabs.TabPanel>
       </Tabs>
       </div>
