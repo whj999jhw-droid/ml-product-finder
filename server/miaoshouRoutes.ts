@@ -1131,6 +1131,8 @@ interface ItemVideoContext {
   title: string;
   thumbnail: string;
   mainImageUrl: string;
+  /** 商品图片列表（前 5 张）——「图集运镜视频」兜底用 */
+  pictures: string[];
   detailId?: string;
   /** 记录键：有关联妙手 detailId 时用它（与「已发布」tab 的记录合并），否则用 itemId */
   recordKey: string;
@@ -1160,6 +1162,7 @@ export function itemVideoContext(storeId: string, row: any, li: ItemLinkIndex): 
     title: row.title,
     thumbnail: row.thumbnail,
     mainImageUrl: (row.pictures && row.pictures[0]) || row.thumbnail || '',
+    pictures: ((row.pictures || []) as string[]).filter(Boolean).slice(0, 5),
     detailId,
     recordKey,
     hasBackup,
@@ -1391,6 +1394,8 @@ export async function runItemVideo(
     disabledAi?: Set<string>;
     /** 阶段拆分：generate=只生成本地备份；upload=只上传已有备份；both=连贯执行 */
     mode?: 'generate' | 'upload' | 'both';
+    /** 是否允许「图集运镜视频」兜底（默认允许） */
+    enableSlideshowFallback?: boolean;
   },
 ): Promise<{ ok: boolean; skipped?: boolean; skipReason?: string; stage?: string; error?: string; sourceKind?: string; clipUuid?: string; siteStatuses?: Record<string, string> }> {
   const sites = (opts.sites && opts.sites.length ? opts.sites : ['MLM']).filter(Boolean);
@@ -1444,6 +1449,8 @@ export async function runItemVideo(
     storeId: ctx.storeId,
     title: ctx.title,
     mainImageUrl: ctx.mainImageUrl,
+    imageUrls: ctx.pictures,
+    enableSlideshowFallback: opts.enableSlideshowFallback !== false,
     altBackupKeys: ctx.detailId ? [ctx.detailId, ctx.itemId] : [ctx.itemId],
     reuseBackup: true,
     force: !!opts.force,

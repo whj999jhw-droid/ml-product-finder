@@ -25,6 +25,7 @@ import { promisify } from 'util';
 import { fileURLToPath } from 'url';
 import { getStoreRaw, ensureStoreToken } from './stores.js';
 import { generateVideoFromImage } from './i2v.js';
+import { generateSlideshowVideo } from './slideshow.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -566,6 +567,10 @@ export async function processAndUploadVideo(opts: {
    *  - 'rule' 只用本地品类规则（零成本、零延迟）
    */
   aiPromptMode?: 'auto' | 'rule';
+  /** 商品图片列表（主图之外的细节图）——全部 AI 平台失败时做「图集运镜视频」兜底 */
+  imageUrls?: string[];
+  /** 是否允许「图集运镜视频」兜底（AI 全挂时的保底，默认允许） */
+  enableSlideshowFallback?: boolean;
 }): Promise<VideoPipelineResult> {
   const {
     detailId,
@@ -583,6 +588,8 @@ export async function processAndUploadVideo(opts: {
     disabledAiPlatforms,
     mode = 'both',
     aiPromptMode = 'auto',
+    imageUrls,
+    enableSlideshowFallback = true,
   } = opts;
 
   // 阶段拆分：能否「现场生成」/ 是否需要「上传 ML」
@@ -807,6 +814,42 @@ export async function processAndUploadVideo(opts: {
       tried.push('本次未启用 AI 图生视频兜底');
     } else if (!produced && !mainImageUrl) {
       tried.push('该商品没有可用主图，无法走 AI 图生视频');
+    }
+
+    // ③' 图集运镜视频兜底（零 AI 成本）：AI 平台全挂 / 全部欠费时，用商品多图做 Ken Burns
+    //    注意画面是持续运镜的（zoompan），不是纯静态图 —— ML Clips 禁止静态图。
+    if (!produced && enableSlideshowFallback) {
+      const slideImgs = [...(imageUrls || [])];
+      if (mainImageUrl && !slideImgs.includes(mainImageUrl)) slideImgs.unshift(mainImageUrl);
+      if (slideImgs.length) {
+        rec.stage = 'slideshow';
+        rec.status = 'uploading';
+        rec.sourceKind = 'slideshow';
+        saveVideoRecord(rec);
+        console.log(`[VideoClips] ${detailId} AI 不可用，改用图集运镜兜底（${slideImgs.length} 张图）`);
+        const slideOut = path.join(TMP_DIR, `${detailId}_slide.mp4`);
+        const slide = await generateSlideshowVideo({ imageUrls: slideImgs, outPath: slideOut });
+        if (slide.success) {
+          fs.mkdirSync(BACKUP_DIR, { recursive: true });
+          try {
+            fs.copyFileSync(slideOut, backupPath);
+            outPath = backupPath;
+          } catch {
+            outPath = slideOut;
+          }
+          rec.duration = slide.durationSec;
+          rec.width = 1080;
+          rec.height = 1920;
+          rec.sourceUrl = 'slideshow:ffmpeg';
+          produced = true;
+          console.log(
+            `[VideoClips] ${detailId} 图集运镜兜底完成（${slide.imagesUsed} 图 / ${slide.durationSec}s）`,
+          );
+        } else {
+          tried.push(`图集运镜兜底失败：${slide.error}`);
+        }
+        try { fs.unlinkSync(slideOut); } catch { /* ignore */ }
+      }
     }
 
     if (!produced) {

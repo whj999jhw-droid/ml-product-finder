@@ -63,6 +63,8 @@ export interface AutoVideoConfig {
   aiPromptMode: 'auto' | 'rule';
   /** 是否允许 AI 图生视频兜底（没有源视频时） */
   enableAiFallback: boolean;
+  /** 是否允许「图集运镜视频」兜底（AI 全挂时的零成本保底，默认允许） */
+  enableSlideshowFallback: boolean;
 }
 
 export interface AutoVideoQueueItem {
@@ -116,6 +118,7 @@ const DEFAULT_CONFIG: AutoVideoConfig = {
   sites: ['MLM'],
   aiPromptMode: 'auto',
   enableAiFallback: true,
+  enableSlideshowFallback: true,
 };
 
 function emptyState(): AutoVideoState {
@@ -182,6 +185,7 @@ export function saveAutoVideoConfig(patch: Partial<AutoVideoConfig>): { config: 
   if (typeof patch.onlyOnSale === 'boolean') next.onlyOnSale = patch.onlyOnSale;
   if (typeof patch.skipExisting === 'boolean') next.skipExisting = patch.skipExisting;
   if (typeof patch.enableAiFallback === 'boolean') next.enableAiFallback = patch.enableAiFallback;
+  if (typeof patch.enableSlideshowFallback === 'boolean') next.enableSlideshowFallback = patch.enableSlideshowFallback;
   if (Array.isArray(patch.sites) && patch.sites.length) next.sites = patch.sites.filter(Boolean);
   if (patch.aiPromptMode === 'auto' || patch.aiPromptMode === 'rule') next.aiPromptMode = patch.aiPromptMode;
   if (patch.order === 'newest' || patch.order === 'sold' || patch.order === 'random') next.order = patch.order;
@@ -371,6 +375,34 @@ function coolDownPlatform(name: string, reason: string): void {
   console.warn(`[AutoVideo] 平台 ${name} 冷却 30 分钟：${reason.slice(0, 120)}`);
 }
 
+/**
+ * 只熔断「真正报了永久性错误」的平台，绝不能连坐。
+ * 教训（2026-09-18）：火山欠费后聚合错误串匹配到「欠费」，把无辜的 agnes/智谱也熔断了，
+ * 导致「所有视频平台均失败」的假象。聚合错误格式是每行「平台名（stage）：原因」。
+ */
+const PERMANENT_LINE =
+  /SetLimitExceeded|余额不足|无可用资源包|AccountOverdueError|overdue balance|InvalidEndpointOrModel|无权限|not authorized|invalid api key|unauthorized|model_not_found|invalid mode|欠费/i;
+
+function coolDownFailedPlatformsOnly(error: string): void {
+  for (const line of String(error).split('\n')) {
+    if (!PERMANENT_LINE.test(line)) continue;
+    // 行首平台名：「火山--视频生成（submit）：...」/「agnes（poll）：...」
+    const m = line.match(/^\s*([^\s（(]+)\s*[（(]/);
+    if (!m) continue;
+    const name = m[1];
+    const key = /火山|ark/i.test(name)
+      ? 'volcano'
+      : /智谱|zhipu|bigmodel/i.test(name)
+        ? 'zhipu'
+        : /agnes/i.test(name)
+          ? 'agnes'
+          : /七牛|qiniu/i.test(name)
+            ? 'qiniu'
+            : '';
+    if (key) coolDownPlatform(key, line.trim().slice(0, 160));
+  }
+}
+
 async function tick(): Promise<void> {
   if (ticking) return;
   ticking = true;
@@ -385,13 +417,13 @@ async function tick(): Promise<void> {
       state.uploadedThisHour = 0;
     }
 
-    const disabledAi = currentDisabledAi();
-
     // ---------- 阶段一：生成本地视频（每小时 generatePerHour 条）----------
     while (state.generatedThisHour < config.generatePerHour && state.phase === 'running') {
       const item = state.queue.find((i) => i.state === 'pending');
       if (!item) break;
       item.attempts++;
+      // 每件都取最新熔断表：第一件把火山跑欠费后，同轮后续商品立即跳过火山
+      const disabledAi = currentDisabledAi();
       try {
         const ctx = await resolveContext(item.storeId, item.itemId);
         if (!ctx) {
@@ -403,6 +435,7 @@ async function tick(): Promise<void> {
           mode: 'generate',
           sites: config.sites,
           disabledAi,
+          enableSlideshowFallback: config.enableSlideshowFallback,
         });
         if (r.ok) {
           if (r.stage === 'generated') {
@@ -425,10 +458,7 @@ async function tick(): Promise<void> {
           }
         } else {
           item.error = r.skipReason || r.error || '生成失败';
-          if (/欠费|余额|无可用资源包|doing|权限|does not exist|InvalidEndpoint/i.test(item.error)) {
-            // 平台级问题 → 冷却，别让后面每件都白等
-            for (const p of ['volcano', 'zhipu', 'agnes']) coolDownPlatform(p, item.error);
-          }
+          coolDownFailedPlatformsOnly(item.error);
           if (item.attempts >= MAX_ATTEMPTS) {
             item.state = 'failed';
             state.totalFailed++;

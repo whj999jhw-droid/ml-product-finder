@@ -32,6 +32,7 @@ interface AutoVideoConfig {
   sites: string[];
   aiPromptMode: AiPromptMode;
   enableAiFallback: boolean;
+  enableSlideshowFallback: boolean;
 }
 
 interface QueueItem {
@@ -116,6 +117,7 @@ const DEFAULT_CONFIG: AutoVideoConfig = {
   sites: ['MLM'],
   aiPromptMode: 'auto',
   enableAiFallback: true,
+  enableSlideshowFallback: true,
 };
 
 export function AutoVideoPage() {
@@ -341,6 +343,9 @@ export function AutoVideoPage() {
               </Field>
               <Field label="允许 AI 图生视频兜底">
                 <Switch value={config.enableAiFallback} onChange={(v) => patchConfig({ enableAiFallback: !!v })} />
+              </Field>
+              <Field label="允许图集运镜兜底（AI 全挂时零成本保底）">
+                <Switch value={config.enableSlideshowFallback} onChange={(v) => patchConfig({ enableSlideshowFallback: !!v })} />
               </Field>
               <Field label="上传站点">
                 <Select multiple value={config.sites} options={SITE_OPTIONS} onChange={(v) => patchConfig({ sites: (v as string[]) || [] })} style={{ width: '100%' }} />
