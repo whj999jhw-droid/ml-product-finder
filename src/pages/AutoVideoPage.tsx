@@ -127,11 +127,11 @@ export function AutoVideoPage() {
   const [loadingStatus, setLoadingStatus] = useState(false);
   const timerRef = useRef<number | null>(null);
 
-  const api = useCallback(async (url: string, opts?: RequestInit) => {
+  const api = useCallback(async (url: string, opts?: { method?: string; body?: any }) => {
     const r = await fetch(url, {
       method: opts?.method || 'GET',
       headers: { 'Content-Type': 'application/json' },
-      body: opts?.body ? JSON.stringify(opts.body) : undefined,
+      body: opts?.body !== undefined ? JSON.stringify(opts.body) : undefined,
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`);

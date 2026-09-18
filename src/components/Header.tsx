@@ -24,6 +24,7 @@ interface HeaderProps {
   isCandidatesPage?: boolean;
   isConfigPage?: boolean;
   isMiaoshouBoxPage?: boolean;
+  isAutoVideoPage?: boolean;
   sidebarOpen: boolean;
   theme: Theme;
   currentSession: Session | undefined;
@@ -47,6 +48,7 @@ export function Header({
   isCandidatesPage,
   isConfigPage,
   isMiaoshouBoxPage,
+  isAutoVideoPage,
   sidebarOpen,
   theme,
   currentSession,
