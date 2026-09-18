@@ -66,7 +66,8 @@ function normalizeBaseUrl(url: string): string {
 export function friendlyAiError(status: number | undefined, rawText: string): string {
   const t = rawText || '';
   if (status === 429 && /SetLimitExceeded|set usage limit/i.test(t)) {
-    return `该模型已达到账号设定的用量上限、服务被暂停（429 SetLimitExceeded）——请求已正确到达厂商，不是 URL 问题。请到厂商控制台调高/恢复该模型的用量限额，或换一个未限额的模型。原始返回：${t.slice(0, 200)}`;
+    const safeMode = /Safe Experience Mode|模型激活/i.test(t);
+    return `该模型已达到账号设定的用量上限、服务被暂停（429 SetLimitExceeded）——请求已正确到达厂商，不是 URL 问题。${safeMode ? '恢复方法：到火山方舟控制台「模型激活」页调整或关闭「安全体验模式」的用量限额，或换一个未限额的模型。' : '请到厂商控制台调高/恢复该模型的用量限额，或换一个未限额的模型。'}原始返回：${t.slice(0, 200)}`;
   }
   if (/AccountOverdue|欠费/i.test(t)) {
     return `账号欠费（AccountOverdue），厂商拒绝服务——需要充值后才能继续使用。原始返回：${t.slice(0, 200)}`;
@@ -615,7 +616,8 @@ async function volcanoRestGenerate(opts: LLMOptions, provider: LlmProvider): Pro
         ? {
             model: provider.model,
             prompt: opts.prompt,
-            size: '1024x1024',
+            // 火山方舟官方调用方式：size="2K"（OpenAI SDK 示例口径），response_format/watermark 同官方参数
+            size: provider.baseUrl.toLowerCase().includes('volces.com') ? '2K' : '1024x1024',
             response_format: 'url',
             watermark: false,
             stream: false,
@@ -1014,18 +1016,31 @@ async function probeImageProvider(provider: LlmProvider): Promise<{ success: boo
   try {
     // 非智谱图片模型走 OpenAI 兼容 /images/generations 接口（七牛云、agnes 等）
     const url = imageEndpointUrl(provider.baseUrl);
+    // 火山方舟按官方调用方式传参（OpenAI SDK 示例）：size="2K"、response_format="url"、watermark 开关；
+    // seedream 不支持 n 参数，其他 OpenAI 兼容平台保留 n。
+    const isArk = provider.baseUrl.toLowerCase().includes('volces.com');
     const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${provider.apiKey}`,
       },
-      body: JSON.stringify({
-        model: provider.model,
-        prompt: '一只可爱的卡通小猫，白底，高清',
-        size: '1024x1024',
-        n: 1,
-      }),
+      body: JSON.stringify(
+        isArk
+          ? {
+              model: provider.model,
+              prompt: '一只可爱的卡通小猫，白底，高清',
+              size: '2K',
+              response_format: 'url',
+              watermark: false,
+            }
+          : {
+              model: provider.model,
+              prompt: '一只可爱的卡通小猫，白底，高清',
+              size: '1024x1024',
+              n: 1,
+            },
+      ),
       signal: AbortSignal.timeout(120000),
     });
     const text = await res.text();

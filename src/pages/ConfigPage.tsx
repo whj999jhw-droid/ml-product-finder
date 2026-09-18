@@ -201,31 +201,23 @@ function AiConfigPanel() {
     } catch { /* ignore */ }
   }, [rowResults]);
 
-  const rowKeyOf = (p: LlmProviderForm) => `${(p.baseUrl || '').trim()}|${p.type || 'openai'}`;
+  const rowKeyOf = (p: LlmProviderForm) =>
+    p.__key || `${(p.baseUrl || '').trim()}|${p.type || 'openai'}|${(p.models || '').trim()}`;
 
   /**
-   * 归一化：同一「baseUrl + 调用方式」合并为一条（models 取并集），并挂上唯一 __key。
-   * 加载与保存都过这里，保证列表里永远不存在 key 重复的行。
+   * 归一化：**不合并**。同一 baseUrl 允许多条记录（每个模型一行，互不干扰），
+   * 只保证每行都有唯一 __key（避免 React key 撞车产生幽灵行）。
+   * 加载与保存都过这里。
    */
   const normalizeRows = (list: LlmProviderForm[]): { rows: LlmProviderForm[]; merged: number } => {
-    const byKey = new Map<string, LlmProviderForm>();
-    let merged = 0;
-    for (const p of list) {
-      const key = rowKeyOf(p);
-      const hit = byKey.get(key);
-      if (!hit) {
-        byKey.set(key, { ...p, __key: key });
-        continue;
-      }
-      merged += 1;
-      const models = new Set(
-        [...hit.models.split(/[,，]/), ...p.models.split(/[,，]/)].map((m) => m.trim()).filter(Boolean),
-      );
-      hit.models = Array.from(models).join(', ');
-      if (!hit.apiKey && p.apiKey) hit.apiKey = p.apiKey;
-      if (!hit.name && p.name) hit.name = p.name;
-    }
-    return { rows: Array.from(byKey.values()), merged };
+    const used = new Set<string>();
+    const rows = list.map((p, i) => {
+      let key = p.__key || rowKeyOf(p);
+      while (!key || used.has(key)) key = `${rowKeyOf(p)}#${i}-${used.size}`;
+      used.add(key);
+      return { ...p, __key: key };
+    });
+    return { rows, merged: 0 };
   };
 
   /** 取某行在全局列表中的下标（对象引用优先、__key 兜底）；找不到返回 -1 */
@@ -301,7 +293,7 @@ function AiConfigPanel() {
       const res = await fetch('/api/ml/llm-config');
       const data = await res.json();
       const raw: any[] = data.providers || [];
-      // 合并「同一 baseUrl + 调用方式 的多个 model」为一条表单记录（models 用逗号拼接），并挂唯一 __key
+      // 不合并：每个已保存记录（每个模型）单独一行，挂唯一 __key
       const { rows } = normalizeRows(
         raw
           .filter((p: any) => (p.baseUrl || '').trim())
@@ -379,11 +371,8 @@ function AiConfigPanel() {
   };
 
   const doSave = async (list: LlmProviderForm[]): Promise<boolean> => {
-    // 归一化：合并重复行（同一 baseUrl+调用方式）并把 __key 补齐，避免 React key 撞车产生幽灵行
-    const { rows, merged } = normalizeRows(list);
-    if (merged > 0) {
-      MessagePlugin.info(`已自动合并 ${merged} 条重复平台（同一 baseUrl + 调用方式只保留一条，模型已合并）`);
-    }
+    // 归一化：不合并（同一 baseUrl 允许多行），只把 __key 补齐，避免 React key 撞车产生幽灵行
+    const { rows } = normalizeRows(list);
     setSaving(true);
     try {
       const res = await fetch('/api/ml/llm-config', {
@@ -435,8 +424,9 @@ function AiConfigPanel() {
             byBase.get(k)!.push(r);
           }
           for (const p of providers) {
-            const rows = byBase.get((p.baseUrl || '').trim());
-            if (rows) next[rowKeyOf(p)] = { data: { success: rows.every((r: any) => r.success), perProvider: rows }, testedAt: Date.now() };
+            const rowModels = (p.models || '').split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+            const rows = (byBase.get((p.baseUrl || '').trim()) || []).filter((r: any) => !r.model || rowModels.includes(r.model));
+            if (rows.length) next[rowKeyOf(p)] = { data: { success: rows.every((r: any) => r.success), perProvider: rows }, testedAt: Date.now() };
           }
           return next;
         });
