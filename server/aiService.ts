@@ -57,6 +57,27 @@ function normalizeBaseUrl(url: string): string {
 }
 
 /**
+ * 把厂商返回的原始错误翻译成人话，避免误判成 URL/代码问题。
+ * 依据火山方舟官方错误码：
+ *  - SetLimitExceeded（HTTP 429）：账号对【该模型】设定的用量上限已用完、服务被暂停
+ *    → 到方舟控制台「在线推理-用量限额」调额/恢复，或换模型。与请求 URL 无关。
+ *  - AccountOverdue / ExplorationQuotaExceeded：账号欠费/免费额度用尽 → 需充值。
+ */
+export function friendlyAiError(status: number | undefined, rawText: string): string {
+  const t = rawText || '';
+  if (status === 429 && /SetLimitExceeded|set usage limit/i.test(t)) {
+    return `该模型已达到账号设定的用量上限、服务被暂停（429 SetLimitExceeded）——请求已正确到达厂商，不是 URL 问题。请到厂商控制台调高/恢复该模型的用量限额，或换一个未限额的模型。原始返回：${t.slice(0, 200)}`;
+  }
+  if (/AccountOverdue|欠费/i.test(t)) {
+    return `账号欠费（AccountOverdue），厂商拒绝服务——需要充值后才能继续使用。原始返回：${t.slice(0, 200)}`;
+  }
+  if (/ExplorationQuotaExceeded|免费额度/i.test(t)) {
+    return `免费额度已用尽（ExplorationQuotaExceeded）——需要付费开通后才能继续使用。原始返回：${t.slice(0, 200)}`;
+  }
+  return t ? t.slice(0, 200) : '未知错误';
+}
+
+/**
  * 已知的「具体接口」结尾。命中即说明用户已经把地址填到了某个 endpoint，
  * **必须原样请求，不再追加任何后缀**。
  */
@@ -557,7 +578,7 @@ async function openaiCompatibleGenerate(opts: LLMOptions, provider: LlmProvider)
 
       if (!res.ok) {
         const text = await res.text();
-        throw new Error(`LLM API ${res.status}: ${text.slice(0, 200)}`);
+        throw new Error(`LLM API ${res.status}: ${friendlyAiError(res.status, text)}`);
       }
 
       const data = (await res.json()) as OpenAICompletionResponse;
@@ -623,7 +644,7 @@ async function volcanoRestGenerate(opts: LLMOptions, provider: LlmProvider): Pro
 
       if (!res.ok) {
         const text = await res.text();
-        throw new Error(`LLM API ${res.status}: ${text.slice(0, 200)}`);
+        throw new Error(`LLM API ${res.status}: ${friendlyAiError(res.status, text)}`);
       }
 
       if (isImage) {
@@ -973,7 +994,7 @@ async function probeImageProvider(provider: LlmProvider): Promise<{ success: boo
       });
       const text = await res.text();
       if (!res.ok) {
-        return { success: false, error: `图片生成探测失败 HTTP ${res.status}: ${text.slice(0, 200)}`, raw: text };
+        return { success: false, error: `图片生成探测失败 HTTP ${res.status}: ${friendlyAiError(res.status, text)}`, raw: text };
       }
       const data = JSON.parse(text) as ImageGenerationResponse & { task_id?: string; id?: string };
       const imageUrl = data?.data?.[0]?.url || data?.data?.[0]?.b64_json;
@@ -1009,7 +1030,7 @@ async function probeImageProvider(provider: LlmProvider): Promise<{ success: boo
     });
     const text = await res.text();
     if (!res.ok) {
-      return { success: false, error: `图片生成探测失败 HTTP ${res.status}: ${text.slice(0, 200)}`, raw: text };
+      return { success: false, error: `图片生成探测失败 HTTP ${res.status}: ${friendlyAiError(res.status, text)}`, raw: text };
     }
     const data = JSON.parse(text) as ImageGenerationResponse & { task_id?: string; id?: string };
     const imageUrl = data?.data?.[0]?.url || data?.data?.[0]?.b64_json;
@@ -1068,7 +1089,7 @@ async function probeVideoProvider(provider: LlmProvider): Promise<{ success: boo
     });
     const text = await res.text();
     if (!res.ok && res.status !== 202) {
-      return { success: false, error: `视频生成探测失败 HTTP ${res.status}: ${text.slice(0, 200)}`, raw: text };
+      return { success: false, error: `视频生成探测失败 HTTP ${res.status}: ${friendlyAiError(res.status, text)}`, raw: text };
     }
     return { success: true, sample: { httpStatus: String(res.status), note: '视频生成通常是异步任务，接口已接受请求即视为可用' }, raw: text };
   } catch (err: any) {
@@ -1120,7 +1141,7 @@ async function probeOcrProvider(provider: LlmProvider): Promise<{ success: boole
       if (isFormatRestriction) {
         return { success: true, sample: { httpStatus: String(res.status), note: 'OCR 接口可达（探测图片格式受限，实际请上传真实图片/PDF）' }, raw: text };
       }
-      return { success: false, error: `OCR 探测失败 HTTP ${res.status}: ${text.slice(0, 200)}`, raw: text };
+      return { success: false, error: `OCR 探测失败 HTTP ${res.status}: ${friendlyAiError(res.status, text)}`, raw: text };
     }
     return { success: true, sample: { httpStatus: String(res.status), note: 'OCR/layout_parsing 接口已响应' }, raw: text };
   } catch (err: any) {
@@ -1149,7 +1170,7 @@ async function probeEmbeddingProvider(provider: LlmProvider): Promise<{ success:
     });
     const text = await res.text();
     if (!res.ok) {
-      return { success: false, error: `Embedding 探测失败 HTTP ${res.status}: ${text.slice(0, 200)}`, raw: text };
+      return { success: false, error: `Embedding 探测失败 HTTP ${res.status}: ${friendlyAiError(res.status, text)}`, raw: text };
     }
     return { success: true, sample: { httpStatus: String(res.status), note: 'Embedding 接口已响应' }, raw: text };
   } catch (err: any) {
