@@ -202,22 +202,41 @@ function AiConfigPanel() {
   }, [rowResults]);
 
   const rowKeyOf = (p: LlmProviderForm) =>
-    p.__key || `${(p.baseUrl || '').trim()}|${p.type || 'openai'}|${(p.models || '').trim()}`;
+    p.__key || `${(p.name || '').trim()}|${p.type || 'openai'}|${(p.models || '').trim()}`;
 
   /**
-   * 归一化：**不合并**。同一 baseUrl 允许多条记录（每个模型一行，互不干扰），
-   * 只保证每行都有唯一 __key（避免 React key 撞车产生幽灵行）。
-   * 加载与保存都过这里。
+   * 归一化：**按平台名分组**——相同「名字 + 调用方式」合并为一条（models 取并集）；
+   * **不同名字、即使 baseUrl 相同也不合并**（各自独立一行，可分别配不同 Key/端点行为）。
+   * 名字为空时退回按 baseUrl 分组（兼容不填名字的旧习惯）。
+   * 加载与保存都过这里，保证每行有唯一 __key。
    */
   const normalizeRows = (list: LlmProviderForm[]): { rows: LlmProviderForm[]; merged: number } => {
+    const byKey = new Map<string, LlmProviderForm>();
+    let merged = 0;
+    for (const p of list) {
+      const name = (p.name || '').trim();
+      const key = `${name ? `n:${name.toLowerCase()}` : `b:${(p.baseUrl || '').trim()}`}|${p.type || 'openai'}`;
+      const hit = byKey.get(key);
+      if (!hit) {
+        byKey.set(key, { ...p, __key: key });
+        continue;
+      }
+      merged += 1;
+      const models = new Set(
+        [...hit.models.split(/[,，]/), ...p.models.split(/[,，]/)].map((m) => m.trim()).filter(Boolean),
+      );
+      hit.models = Array.from(models).join(', ');
+      if (!hit.apiKey && p.apiKey) hit.apiKey = p.apiKey;
+    }
+    // 保证 __key 全局唯一（防 React key 撞车产生幽灵行）
     const used = new Set<string>();
-    const rows = list.map((p, i) => {
-      let key = p.__key || rowKeyOf(p);
-      while (!key || used.has(key)) key = `${rowKeyOf(p)}#${i}-${used.size}`;
-      used.add(key);
-      return { ...p, __key: key };
+    const rows = Array.from(byKey.values()).map((r) => {
+      let k = r.__key || rowKeyOf(r);
+      while (!k || used.has(k)) k = `${r.__key || rowKeyOf(r)}#${used.size}`;
+      used.add(k);
+      return { ...r, __key: k };
     });
-    return { rows, merged: 0 };
+    return { rows, merged };
   };
 
   /** 取某行在全局列表中的下标（对象引用优先、__key 兜底）；找不到返回 -1 */
@@ -293,7 +312,7 @@ function AiConfigPanel() {
       const res = await fetch('/api/ml/llm-config');
       const data = await res.json();
       const raw: any[] = data.providers || [];
-      // 不合并：每个已保存记录（每个模型）单独一行，挂唯一 __key
+      // 按「平台名+调用方式」分组：同名合并（模型取并集），不同名不合并
       const { rows } = normalizeRows(
         raw
           .filter((p: any) => (p.baseUrl || '').trim())
@@ -371,8 +390,11 @@ function AiConfigPanel() {
   };
 
   const doSave = async (list: LlmProviderForm[]): Promise<boolean> => {
-    // 归一化：不合并（同一 baseUrl 允许多行），只把 __key 补齐，避免 React key 撞车产生幽灵行
-    const { rows } = normalizeRows(list);
+    // 归一化：按「平台名+调用方式」合并（同名合并、不同名不合并），并把 __key 补齐
+    const { rows, merged } = normalizeRows(list);
+    if (merged > 0) {
+      MessagePlugin.info(`已合并 ${merged} 条同名平台（相同平台名的模型已合并到同一行；不同平台名即使 baseUrl 相同也保持独立）`);
+    }
     setSaving(true);
     try {
       const res = await fetch('/api/ml/llm-config', {
