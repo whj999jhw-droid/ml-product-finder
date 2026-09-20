@@ -796,11 +796,26 @@ const ML_ITEM_DOMAIN: Record<string, string> = {
   MCO: 'articulo.mercadolibre.com.co',
 };
 
+/** 真实 ML 商品 ID：站点前缀(MLM/MLB/MLC/MCO…)+可选横杠+纯数字。
+ *
+ * ⚠️ 不能再用 `replace(/^[A-Za-z]{3}-?/, '')` 粗暴剥前缀：
+ *  1688 定制加工品的 ml_item_id 形如 `custom-687391368966-钥匙扣 定制`，
+ *  前 3 个字母 `cus` 被剥掉后剩 `tom-687391368966-…`，拼出来就是
+ *  `https://articulo.mercadolibre.com.mx/MLM-tom-687391368966-…` 这种死链。
+ *  实测库里 1151/2129 条（54%）属于这种情况，所以必须先严格校验再拼。
+ *  校验不通过返回 ''，前端据此不渲染为链接（假链接比没链接更糟）。 */
+const ML_ITEM_ID_RE = /^(MLM|MLB|MLC|MCO|MLA|MLU|MPE|MLV|MRD)-?(\d+)$/i;
+
 export function mlPermalinkOf(site?: string | null, mlItemId?: string | null): string {
   if (!site || !mlItemId) return '';
-  const domain = ML_ITEM_DOMAIN[site];
-  const num = mlItemId.replace(/^[A-Za-z]{3}-?/, '');
-  return domain && num ? `https://${domain}/${site}-${num}` : '';
+  const m = ML_ITEM_ID_RE.exec(String(mlItemId).trim());
+  if (!m) return '';
+  const prefix = m[1].toUpperCase();
+  const num = m[2];
+  // 以 ID 自带前缀决定域名，比 site 字段更可信（避免 site 与 ID 不同站时拼错域名）
+  const domain = ML_ITEM_DOMAIN[prefix] || ML_ITEM_DOMAIN[String(site).toUpperCase()];
+  if (!domain) return '';
+  return `https://${domain}/${prefix}-${num}`;
 }
 
 export function insertCandidate(data: any): { id: number; isNew: boolean } {

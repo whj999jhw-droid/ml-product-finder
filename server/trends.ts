@@ -50,9 +50,31 @@ interface FullTrendCacheEntry {
   fetchedAt: string;
 }
 
+/** 历史快照：每次从 ML 拉到新热搜就存一条，用于算「趋势加速度」。
+ *  只保留每站最近 MAX_SNAPSHOTS 条，避免文件无限膨胀。 */
+interface TrendSnapshot {
+  site: string;
+  fetchedAt: string; // ISO
+  items: { keyword: string; index: number }[];
+}
+
+const MAX_SNAPSHOTS = 30; // 每站保留最近 30 次抓取
+
 interface TrendCache {
   entries: TrendCacheEntry[];
   fullEntries: FullTrendCacheEntry[];
+  snapshots?: TrendSnapshot[];
+}
+
+export type TrendMomentumStatus = 'new' | 'rising' | 'flat' | 'falling' | 'unknown';
+
+export interface TrendMomentum {
+  keyword: string;
+  translation?: string;
+  rank: number; // 当前名次（1 起）
+  prevRank?: number; // 上一次名次（无 = 新入榜）
+  delta: number; // 上升了几位（正数=排名前进）
+  status: TrendMomentumStatus;
 }
 
 interface TranslationCacheEntry {
@@ -78,12 +100,16 @@ function ensureDataDir() {
 
 function loadCache(): TrendCache {
   ensureDataDir();
-  if (!fs.existsSync(CACHE_FILE)) return { entries: [], fullEntries: [] };
+  if (!fs.existsSync(CACHE_FILE)) return { entries: [], fullEntries: [], snapshots: [] };
   try {
     const raw = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8')) as TrendCache;
-    return { entries: raw.entries || [], fullEntries: raw.fullEntries || [] };
+    return {
+      entries: raw.entries || [],
+      fullEntries: raw.fullEntries || [],
+      snapshots: raw.snapshots || [],
+    };
   } catch {
-    return { entries: [], fullEntries: [] };
+    return { entries: [], fullEntries: [], snapshots: [] };
   }
 }
 
@@ -197,17 +223,27 @@ export async function getTrends(site: string, limit = 50, forceRefresh = false):
       else return [];
     }
     // 写回 trends 缓存（关键词 + 整条），供后续直接命中
+    const nowIso = new Date(now).toISOString();
     const newEntry: FullTrendCacheEntry = {
       site: s,
       items: items.map((x) => ({ ...x, translation: undefined })),
-      fetchedAt: new Date(now).toISOString(),
+      fetchedAt: nowIso,
     };
+    // 追加一条历史快照（用于算趋势加速度）。每站只保留最近 MAX_SNAPSHOTS 条。
+    const newSnapshot: TrendSnapshot = {
+      site: s,
+      fetchedAt: nowIso,
+      items: items.map((x) => ({ keyword: x.keyword, index: x.index })),
+    };
+    const prevSnaps = fileCache.snapshots || [];
+    const siteSnapshots = prevSnaps.filter((x) => x.site === s).concat(newSnapshot).slice(-MAX_SNAPSHOTS);
     const updated: TrendCache = {
       entries: [
         ...fileCache.entries.filter((e) => e.site !== s),
-        { site: s, keywords: items.map((x) => x.keyword), fetchedAt: new Date(now).toISOString() },
+        { site: s, keywords: items.map((x) => x.keyword), fetchedAt: nowIso },
       ],
       fullEntries: [...fileCache.fullEntries.filter((e) => e.site !== s), newEntry],
+      snapshots: [...prevSnaps.filter((x) => x.site !== s), ...siteSnapshots],
     };
     saveCache(updated);
   }
@@ -224,6 +260,53 @@ export async function getTrends(site: string, limit = 50, forceRefresh = false):
   }
 
   return items.slice(0, max);
+}
+
+/**
+ * 计算某站点热搜词的「趋势加速度」：对比最近两次快照的名次变化。
+ *
+ * 为什么做这个：ML 官方 /trends 只给「当前名次」这一个静态切片，光看名次
+ * 无法判断一个词是在往上冲还是已经见顶回落。存下历史快照后就能算出斜率，
+ * 相当于自建的先行信号 —— 而且零外部依赖、零封禁风险。
+ * （实测：Reddit 在本服务器是 403 封数据中心 IP；Google Trends 关键词接口 429
+ *   限流；TikTok 强反爬。都不适合做自动数据源，见 2026-09-20 评估记录。）
+ *
+ * 判定规则（名次差 ±2 以内视为噪声，避免榜单微小抖动误判）：
+ *   delta >= 2  上升 / delta <= -2 下降 / 其余 持平 / 上次没出现过 = 新入榜
+ *
+ * @param site 站点代码
+ * @returns 每个词的名次变化；历史快照不足 2 条时 status='unknown'（尚未积累数据）
+ */
+export async function getTrendMomentum(site: string): Promise<TrendMomentum[]> {
+  const s = (site || 'MLM').toUpperCase();
+  const items = await getTrends(s, 50);
+  const cache = loadCache();
+  const snaps = (cache.snapshots || [])
+    .filter((x) => x.site === s)
+    .sort((a, b) => new Date(a.fetchedAt).getTime() - new Date(b.fetchedAt).getTime());
+
+  const hasHistory = snaps.length >= 2;
+  const prev = hasHistory ? snaps[snaps.length - 2] : undefined;
+  const prevRankMap = new Map<string, number>();
+  if (prev) for (const it of prev.items) prevRankMap.set(it.keyword, it.index);
+
+  return items.map((it) => {
+    const prevRank = prevRankMap.get(it.keyword);
+    if (prevRank === undefined) {
+      return {
+        keyword: it.keyword,
+        translation: it.translation,
+        rank: it.index,
+        delta: 0,
+        status: (hasHistory ? 'new' : 'unknown') as TrendMomentumStatus,
+      };
+    }
+    const delta = prevRank - it.index; // 正数 = 名次前进
+    let status: TrendMomentumStatus = 'flat';
+    if (delta >= 2) status = 'rising';
+    else if (delta <= -2) status = 'falling';
+    return { keyword: it.keyword, translation: it.translation, rank: it.index, prevRank, delta, status };
+  });
 }
 
 /**

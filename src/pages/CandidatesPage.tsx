@@ -1278,11 +1278,20 @@ export function CandidatesPage() {
       cell: ({ row }) => {
         const title = row.ml_title || row.ali1688_title || '';
         const isFallback = !row.ml_title && !!row.ali1688_title;
-        return (
-          <a href={row.ml_permalink} target="_blank" rel="noreferrer" className="hover:underline block">
+        // 没有真实 ML 链接时（1688 定制加工品等，ml_item_id 形如 custom-xxx）不渲染成 <a>，
+        // 否则 href="" 会跳回当前页，比不显示链接更糟。
+        const body = (
+          <>
             <span className={isFallback ? 'text-orange-600' : ''}>{title}</span>
             {isFallback && <span className="text-xs text-gray-400 ml-1">(来自1688)</span>}
+          </>
+        );
+        return row.ml_permalink ? (
+          <a href={row.ml_permalink} target="_blank" rel="noreferrer" className="hover:underline block">
+            {body}
           </a>
+        ) : (
+          <span className="block">{body}</span>
         );
       },
     },

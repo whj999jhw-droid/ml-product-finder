@@ -783,7 +783,7 @@ import {
   detectProviderType,
 } from './aiService.js';
 import * as imagePipeline from './imagePipeline.js';
-import { getTrendsKeywords, getTrends } from './trends.js';
+import { getTrendsKeywords, getTrends, getTrendMomentum } from './trends.js';
 
 // 获取可用站点列表
 app.get('/api/ml/sites', (req, res) => {
@@ -3021,6 +3021,21 @@ app.get('/api/ml/trends', async (req, res) => {
     res.json({ success: true, site, keywords, count: keywords.length });
   } catch (err: any) {
     res.json({ success: false, message: err?.message || '获取热搜失败' });
+  }
+});
+
+// 热搜词「趋势加速度」：GET /api/ml/trend-momentum/MLM
+// 对比最近两次热搜快照的名次变化，判断每个词在上升还是回落。
+// 历史快照不足 2 条时 status 全为 'unknown'（需等下次抓取积累数据）。
+app.get('/api/ml/trend-momentum/:site', async (req, res) => {
+  try {
+    const site = (req.params.site as string) || 'MLM';
+    const items = await getTrendMomentum(site);
+    const summary: Record<string, number> = { rising: 0, flat: 0, falling: 0, new: 0, unknown: 0 };
+    for (const it of items) summary[it.status] = (summary[it.status] || 0) + 1;
+    res.json({ success: true, site, items, summary, count: items.length });
+  } catch (err: any) {
+    res.json({ success: false, message: err?.message || '获取趋势加速度失败' });
   }
 });
 

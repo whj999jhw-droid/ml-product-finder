@@ -236,6 +236,88 @@ function normalizeItem(site: string, item: any, categoryName: string, rates: Rec
   };
 }
 
+/** 站点中文名（给 LLM prompt 用，让它知道自己在给哪个市场选品） */
+const SITE_NAMES: Record<string, string> = {
+  MLM: '墨西哥',
+  MLB: '巴西',
+  MLC: '智利',
+  MCO: '哥伦比亚',
+};
+
+/**
+ * 把站内热搜「泛词」用 LLM 扩写成具体商品词，作为扫描种子。
+ *
+ * 为什么需要：ML /trends 给的热搜词往往很泛（如 `audifonos`、`mochila`），
+ * 直接映射类目后取 /highlights Top8，拿到的是该类目常青爆款，未必是趋势
+ * 真正指向的商品。先扩成具体长尾商品词再做种子，命中精度更高。
+ *
+ * 鲁棒性约定（重要）：LLM 未配置 / 超时 / 返回格式不对，一律返回空对象，
+ * 调用方回退用原始热搜词 —— 热搜词本身已经是可用的种子，绝不让 LLM 阻塞扫描。
+ *
+ * @param site      站点代码（决定输出语言：MLB 葡语，其余西语）
+ * @param keywords  原始热搜词
+ * @param siteName  站点中文名，用于 prompt
+ * @returns { 原热搜词: [具体商品词...] }，只包含扩写成功的词
+ */
+async function expandTrendKeywords(
+  site: string,
+  keywords: string[],
+  siteName: string
+): Promise<Record<string, string[]>> {
+  const out: Record<string, string[]> = {};
+  if (!keywords.length) return out;
+  const maxPer = Math.max(1, Math.min(3, Number(process.env.TREND_EXPAND_MAX ?? 3)));
+  try {
+    const { llmGenerate, getLlmConfig } = await import('./aiService.js');
+    if (!getLlmConfig()) {
+      console.log('[expandTrendKeywords] LLM 未配置，回退使用原始热搜词');
+      return out;
+    }
+    const lang = site === 'MLB' ? '巴西葡萄牙语' : '拉美西班牙语';
+    const prompt = `你是 Mercado Libre ${siteName}站（${site}）的跨境电商选品专家。
+
+下面这些是当地买家正在搜索的热搜词，但都很宽泛。请把每个词改写成 2~3 个【具体可购买的商品名】：
+
+1. 用${lang}输出，必须是当地买家真实会搜的词
+2. 要具体到品类特征（材质 / 用途 / 规格 / 使用场景），不要再返回大类词
+3. 只保留适合跨境卖家跟卖的实物商品，排除服务、虚拟商品、本地生活、纯新闻人物
+4. 每个扩写词不超过 6 个单词
+
+只返回 JSON，不要解释、不要 markdown 代码块。
+格式：{"原词":["具体商品词1","具体商品词2"]}
+
+热搜词：${JSON.stringify(keywords)}`;
+
+    const raw = await llmGenerate({
+      prompt,
+      systemPrompt: '你是跨境电商选品专家，擅长把宽泛搜索词改写成具体可购买的商品词。只输出 JSON。',
+      timeoutMs: Number(process.env.TREND_EXPAND_TIMEOUT_MS ?? 30000),
+      jsonMode: true,
+      temperature: 0.4,
+    });
+
+    // 轻量容错：模型偶尔会包 ```json 代码块或加前后缀说明
+    const cleaned = String(raw || '').replace(/```json?/gi, '').replace(/```/g, '').trim();
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start < 0 || end <= start) return out;
+    const parsed = JSON.parse(cleaned.slice(start, end + 1)) as Record<string, unknown>;
+    for (const k of keywords) {
+      const v = parsed[k];
+      if (!Array.isArray(v)) continue;
+      const list = v
+        .filter((x): x is string => typeof x === 'string' && x.trim().length > 1)
+        .map((x) => x.trim())
+        .slice(0, maxPer);
+      if (list.length) out[k] = list;
+    }
+    console.log(`[expandTrendKeywords] ${site} 扩写成功 ${Object.keys(out).length}/${keywords.length} 个热搜词`);
+  } catch (err: any) {
+    console.warn('[expandTrendKeywords] 扩写失败，回退原始热搜词：', err?.message || String(err));
+  }
+  return out;
+}
+
 /**
  * 模式 A（零代理）：官方趋势词「上升品」扫描。
  * 流程：取 /trends 热搜词（数据中心 IP 可访问，200）→ 用可访问的类目森林 predictCategory
@@ -255,6 +337,8 @@ async function scanByTrends(
 ): Promise<{ candidates: RawCandidate[]; totalScanned: number; errors: string[] }> {
   const sites = opts.sites || DEFAULT_SITES;
   const trendLimit = opts.trendLimit ?? 20;
+  // 热搜词 LLM 商品化扩写开关（默认开；设 TREND_EXPAND=0 可关闭，回退纯原词逻辑）
+  const trendExpand = process.env.TREND_EXPAND !== '0';
   // 每个热搜词映射到的类目，最终取前 N 个类目扫描 highlights（控制请求量）
   const maxCategories = Math.min(opts.limitPerCategory ?? 12, 12);
   const perCategoryItems = 8;
@@ -276,23 +360,38 @@ async function scanByTrends(
       ctx.report(`[${site}] 无趋势词（可能 token 未授权 / 该站点不支持），跳过`);
       continue;
     }
+    // 1) LLM 商品化扩写：泛词 → 具体商品词（失败/未配置则沿用原词，不阻塞扫描）
+    let expanded: Record<string, string[]> = {};
+    if (trendExpand) {
+      ctx.report(`[${site}] LLM 把 ${trends.length} 个热搜泛词扩写成具体商品词...`);
+      expanded = await expandTrendKeywords(site, trends.map((t) => t.keyword), SITE_NAMES[site] || site);
+      ctx.report(`[${site}] 扩写命中 ${Object.keys(expanded).length}/${trends.length} 个词`);
+    }
+
     ctx.report(`[${site}] 共 ${trends.length} 个趋势词，映射到类目（不调用 /search）...`);
 
-    // 1) 趋势词 → 类目 映射（predictCategory 基于可访问的类目森林做名称匹配，纯内存，仅首次拉取一次类目树）
+    // 2) 趋势词 → 类目 映射（predictCategory 基于可访问的类目森林做名称匹配，纯内存，仅首次拉取一次类目树）
     const catKeywordMap = new Map<string, { cat: { id: string; name: string }; keywords: { kw: string; rank: number }[] }>();
     for (const t of trends) {
-      try {
-        const cats = await predictCategory(site, t.keyword);
-        if (cats.length) {
-          const top = cats[0];
-          const entry = catKeywordMap.get(top.id) || { cat: top, keywords: [] };
-          entry.keywords.push({ kw: t.keyword, rank: t.index });
-          catKeywordMap.set(top.id, entry);
+      // 有扩写词就用扩写词做种子（更具体，类目命中更准），否则退回原热搜词
+      const seeds = expanded[t.keyword]?.length ? expanded[t.keyword] : [t.keyword];
+      for (const seed of seeds) {
+        try {
+          const cats = await predictCategory(site, seed);
+          if (cats.length) {
+            const top = cats[0];
+            const entry = catKeywordMap.get(top.id) || { cat: top, keywords: [] };
+            // 记录原始热搜词（展示/评分用），同一词被多个种子命中时只记一次
+            if (!entry.keywords.some((x) => x.kw === t.keyword)) {
+              entry.keywords.push({ kw: t.keyword, rank: t.index });
+            }
+            catKeywordMap.set(top.id, entry);
+          }
+        } catch (err: any) {
+          console.warn(`[SourcingScanner] [${site}] 趋势词「${seed}」类目预测失败: ${err?.message?.slice(0, 100)}`);
         }
-      } catch (err: any) {
-        console.warn(`[SourcingScanner] [${site}] 趋势词「${t.keyword}」类目预测失败: ${err?.message?.slice(0, 100)}`);
+        await sleep(120);
       }
-      await sleep(120);
     }
 
     const chosen = [...catKeywordMap.values()].slice(0, maxCategories);
