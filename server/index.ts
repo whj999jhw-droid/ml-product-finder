@@ -93,6 +93,199 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+/* ---------- 天气：多国主要城市 15 天预报（Open-Meteo 代理 + 内存缓存） ----------
+ * GET /api/weather?group=cn|mx|br|cl|co|aruy
+ * 数据源 api.open-meteo.com（免费无 key），服务端统一拉取并缓存 2 小时，
+ * 避免客户端直连国外 API 在国内网络下偶发失败。 */
+const WEATHER_GROUPS: Record<string, {
+  name: string;
+  cities: { id: string; name: string; lat: number; lon: number; hemi: 'N' | 'S' | 'EQ' }[];
+}> = {
+  cn: {
+    name: '中国',
+    cities: [
+      { id: 'zhengzhou', name: '郑州', lat: 34.7466, lon: 113.6254, hemi: 'N' },
+      { id: 'yiwu', name: '义乌', lat: 29.3068, lon: 120.0758, hemi: 'N' },
+      { id: 'dongguan', name: '东莞', lat: 23.0207, lon: 113.7518, hemi: 'N' },
+    ],
+  },
+  mx: {
+    name: '墨西哥',
+    cities: [
+      { id: 'cdmx', name: '墨西哥城', lat: 19.4326, lon: -99.1332, hemi: 'N' },
+      { id: 'gdl', name: '瓜达拉哈拉', lat: 20.6597, lon: -103.3496, hemi: 'N' },
+      { id: 'mty', name: '蒙特雷', lat: 25.6866, lon: -100.3161, hemi: 'N' },
+      { id: 'tij', name: '蒂华纳', lat: 32.5149, lon: -117.0382, hemi: 'N' },
+    ],
+  },
+  br: {
+    name: '巴西',
+    cities: [
+      { id: 'sao', name: '圣保罗', lat: -23.5505, lon: -46.6333, hemi: 'S' },
+      { id: 'rio', name: '里约热内卢', lat: -22.9068, lon: -43.1729, hemi: 'S' },
+      { id: 'bsb', name: '巴西利亚', lat: -15.7939, lon: -47.8828, hemi: 'S' },
+      { id: 'mao', name: '玛瑙斯', lat: -3.119, lon: -60.0217, hemi: 'EQ' },
+      { id: 'bh', name: '贝洛奥里藏特', lat: -19.9167, lon: -43.9345, hemi: 'S' },
+      { id: 'poa', name: '阿雷格里港', lat: -30.0346, lon: -51.2177, hemi: 'S' },
+    ],
+  },
+  cl: {
+    name: '智利',
+    cities: [
+      { id: 'scl', name: '圣地亚哥', lat: -33.4489, lon: -70.6693, hemi: 'S' },
+      { id: 'vlp', name: '瓦尔帕莱索', lat: -33.0472, lon: -71.6127, hemi: 'S' },
+      { id: 'ccp', name: '康塞普西翁', lat: -36.8201, lon: -73.0444, hemi: 'S' },
+      { id: 'anf', name: '安托法加斯塔', lat: -23.6509, lon: -70.3975, hemi: 'S' },
+      { id: 'pnt', name: '蓬塔阿雷纳斯', lat: -53.1638, lon: -70.9171, hemi: 'S' },
+    ],
+  },
+  co: {
+    name: '哥伦比亚',
+    cities: [
+      { id: 'bog', name: '波哥大', lat: 4.711, lon: -74.0721, hemi: 'EQ' },
+      { id: 'mde', name: '麦德林', lat: 6.2442, lon: -75.5812, hemi: 'EQ' },
+      { id: 'clo', name: '卡利', lat: 3.4516, lon: -76.532, hemi: 'EQ' },
+      { id: 'baq', name: '巴兰基亚', lat: 10.9685, lon: -74.7813, hemi: 'N' },
+      { id: 'ctg', name: '卡塔赫纳', lat: 10.391, lon: -75.4794, hemi: 'N' },
+    ],
+  },
+  aruy: {
+    name: '阿根廷/乌拉圭',
+    cities: [
+      { id: 'bue', name: '布宜诺斯艾利斯', lat: -34.6037, lon: -58.3816, hemi: 'S' },
+      { id: 'cor', name: '科尔多瓦', lat: -31.4201, lon: -64.1888, hemi: 'S' },
+      { id: 'ros', name: '罗萨里奥', lat: -32.9442, lon: -60.6505, hemi: 'S' },
+      { id: 'mdz', name: '门多萨', lat: -32.8895, lon: -68.8458, hemi: 'S' },
+      { id: 'mvd', name: '蒙得维的亚', lat: -34.9011, lon: -56.1645, hemi: 'S' },
+      { id: 'sau', name: '萨尔托', lat: -31.3872, lon: -57.9644, hemi: 'S' },
+    ],
+  },
+};
+
+// WMO 天气码 -> [中文描述, emoji]
+const WMO_TEXT: Record<number, [string, string]> = {
+  0: ['晴', '☀️'], 1: ['基本晴', '🌤️'], 2: ['多云', '⛅'], 3: ['阴', '☁️'],
+  45: ['雾', '🌫️'], 48: ['雾凇', '🌫️'],
+  51: ['毛毛雨', '🌦️'], 53: ['毛毛雨', '🌦️'], 55: ['浓毛毛雨', '🌧️'],
+  56: ['冻毛毛雨', '🌧️'], 57: ['冻毛毛雨', '🌧️'],
+  61: ['小雨', '🌦️'], 63: ['中雨', '🌧️'], 65: ['大雨', '🌧️'],
+  66: ['冻雨', '🌧️'], 67: ['强冻雨', '🌧️'],
+  71: ['小雪', '🌨️'], 73: ['中雪', '🌨️'], 75: ['大雪', '❄️'], 77: ['雪粒', '🌨️'],
+  80: ['阵雨', '🌦️'], 81: ['阵雨', '🌧️'], 82: ['强阵雨', '🌧️'],
+  85: ['阵雪', '🌨️'], 86: ['强阵雪', '❄️'],
+  95: ['雷暴', '⛈️'], 96: ['雷暴伴冰雹', '⛈️'], 99: ['强雷暴伴冰雹', '⛈️'],
+};
+
+// 按半球算季节：北半球标准；南半球相反；赤道型（哥伦比亚高原/玛瑙斯）用雨旱季
+function weatherSeason(hemi: string, month: number): string {
+  if (hemi === 'EQ') {
+    return (month === 4 || month === 5 || month === 10 || month === 11) ? '雨季·全年如春' : '旱季·全年如春';
+  }
+  const north = ['冬', '冬', '春', '春', '春', '夏', '夏', '夏', '秋', '秋', '秋', '冬'];
+  const m = north[month - 1];
+  if (hemi === 'S') return ({ 春: '秋', 夏: '冬', 秋: '春', 冬: '夏' } as Record<string, string>)[m];
+  return m;
+}
+
+const WEATHER_CACHE_TTL = 2 * 60 * 60 * 1000; // 2 小时
+const weatherCache = new Map<string, { ts: number; data: any }>();
+
+app.get('/api/weather', async (req, res) => {
+  const groupId = String(req.query.group || 'cn');
+  const group = WEATHER_GROUPS[groupId];
+  if (!group) return res.status(400).json({ ok: false, error: 'unknown group: ' + groupId });
+
+  const cached = weatherCache.get(groupId);
+  if (cached && Date.now() - cached.ts < WEATHER_CACHE_TTL) {
+    return res.json({ ok: true, cached: true, updatedAt: new Date(cached.ts).toISOString(), ...cached.data });
+  }
+
+  try {
+    const lats = group.cities.map((c) => c.lat).join(',');
+    const lons = group.cities.map((c) => c.lon).join(',');
+    const url = 'https://api.open-meteo.com/v1/forecast'
+      + '?latitude=' + lats + '&longitude=' + lons
+      + '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max'
+      + '&timezone=auto&forecast_days=15';
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 20000);
+    const resp = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (!resp.ok) throw new Error('open-meteo http ' + resp.status);
+    let json: any = await resp.json();
+    if (!Array.isArray(json)) json = [json];
+
+    const cities = group.cities.map((c, i) => {
+      const d = json[i] && json[i].daily ? json[i].daily : null;
+      const days: any[] = [];
+      if (d && Array.isArray(d.time)) {
+        for (let k = 0; k < d.time.length; k++) {
+          const dt = new Date(d.time[k] + 'T12:00:00');
+          const code = Number((d.weather_code && d.weather_code[k] != null) ? d.weather_code[k] : -1);
+          const wt = WMO_TEXT[code] || ['—', '🌡️'];
+          days.push({
+            date: d.time[k],
+            season: weatherSeason(c.hemi, dt.getMonth() + 1),
+            code,
+            text: wt[0],
+            icon: wt[1],
+            tmax: (d.temperature_2m_max && d.temperature_2m_max[k] != null) ? d.temperature_2m_max[k] : null,
+            tmin: (d.temperature_2m_min && d.temperature_2m_min[k] != null) ? d.temperature_2m_min[k] : null,
+            pop: (d.precipitation_probability_max && d.precipitation_probability_max[k] != null) ? d.precipitation_probability_max[k] : null,
+            precip: (d.precipitation_sum && d.precipitation_sum[k] != null) ? d.precipitation_sum[k] : null,
+            wind: (d.wind_speed_10m_max && d.wind_speed_10m_max[k] != null) ? d.wind_speed_10m_max[k] : null,
+          });
+        }
+      }
+      return { id: c.id, name: c.name, days };
+    });
+
+    const data = { group: groupId, name: group.name, cities };
+    weatherCache.set(groupId, { ts: Date.now(), data });
+    return res.json({ ok: true, cached: false, updatedAt: new Date().toISOString(), ...data });
+  } catch (e: any) {
+    // 拉取失败但有旧缓存 -> 返回旧数据兜底
+    if (cached) {
+      return res.json({ ok: true, cached: true, stale: true, updatedAt: new Date(cached.ts).toISOString(), ...cached.data });
+    }
+    return res.status(502).json({ ok: false, error: String((e && e.message) || e) });
+  }
+});
+
+
+/* 定时预热：北京时间每天 04:00 / 10:00 / 16:00 / 22:00 各刷新一次
+ * （服务器为 UTC 时区，对应 UTC 20/02/08/14 点；每天最早一次为北京 04:00） */
+const WEATHER_PREWARM_UTC_HOURS = [20, 2, 8, 14];
+let weatherPrewarmTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleWeatherPrewarm() {
+  if (weatherPrewarmTimer) clearTimeout(weatherPrewarmTimer);
+  const now = new Date();
+  const next = new Date(now);
+  next.setUTCMinutes(0, 0, 0);
+  let nextHour: number | undefined = WEATHER_PREWARM_UTC_HOURS.find((h) => h > now.getUTCHours());
+  if (nextHour === undefined) {
+    nextHour = WEATHER_PREWARM_UTC_HOURS[0];
+    next.setUTCDate(next.getUTCDate() + 1);
+  }
+  next.setUTCHours(nextHour);
+  const delay = next.getTime() - now.getTime();
+  console.log(`[Weather] 下次定时预热: ${next.toISOString()} (${Math.round(delay / 60000)} 分钟后)`);
+  weatherPrewarmTimer = setTimeout(() => {
+    (async () => {
+      for (const gid of Object.keys(WEATHER_GROUPS)) {
+        try {
+          await fetch(`http://127.0.0.1:${PORT}/api/weather?group=${gid}`);
+          console.log(`[Weather] 定时预热完成: ${gid}`);
+        } catch (e: any) {
+          console.log(`[Weather] 定时预热失败 ${gid}: ${e && e.message}`);
+        }
+      }
+    })().finally(scheduleWeatherPrewarm);
+  }, delay);
+}
+scheduleWeatherPrewarm();
+
+
 // 用户认证路由（注册/登录/登出/me）
 app.use('/api/auth', authRouter);
 

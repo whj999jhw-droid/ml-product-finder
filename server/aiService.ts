@@ -1169,6 +1169,10 @@ async function probeOcrProvider(provider: LlmProvider): Promise<{ success: boole
 
 async function probeEmbeddingProvider(provider: LlmProvider): Promise<{ success: boolean; sample?: Record<string, string>; raw?: string; error?: string }> {
   const url = normalizeBaseUrl(provider.baseUrl);
+  // 火山方舟多模态 embedding 官方规则：input 必须是 content 数组（[{type:"text",text:...}]），
+  // 不接受 OpenAI 文本 embedding 的字符串 input（会报 400 InvalidParameter）。
+  const isArkMultimodal = /volces\.com|multimodal/.test(provider.baseUrl.toLowerCase())
+    || /vision/.test(provider.model.toLowerCase());
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -1176,11 +1180,11 @@ async function probeEmbeddingProvider(provider: LlmProvider): Promise<{ success:
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${provider.apiKey}`,
       },
-      body: JSON.stringify({
-        model: provider.model,
-        input: 'test',
-        encoding_format: 'float',
-      }),
+      body: JSON.stringify(
+        isArkMultimodal
+          ? { model: provider.model, input: [{ type: 'text', text: '测试文本' }] }
+          : { model: provider.model, input: 'test', encoding_format: 'float' },
+      ),
       signal: AbortSignal.timeout(30000),
     });
     const text = await res.text();

@@ -74,12 +74,14 @@ const FEATURES: { id: string; name: string; group: string }[] = [
   { id: 'rules',     name: '运费规则', group: 'tab' },
   { id: 'accounting', name: '记账',    group: 'tab' },
   { id: 'orders',    name: '订单',     group: 'tab' },
+  { id: 'weather',   name: '天气',     group: 'tab' },
   { id: 'system',    name: '系统',     group: 'tab' },
   { id: 'news',      name: '资讯',     group: 'sys' },
   { id: 'aiRadar',   name: 'AI活动雷达', group: 'sys' },
   { id: 'store',     name: '店铺管理', group: 'sys' },
   { id: 'pdkyc',     name: '跑得快',   group: 'sys' },
   { id: 'video',     name: '视频管理', group: 'sys' },
+  { id: 'review',    name: '复习进度', group: 'sys' },
   { id: 'codes',     name: '授权码',   group: 'sys' },
   { id: 'look',      name: '外观',     group: 'sys' }
 ];
