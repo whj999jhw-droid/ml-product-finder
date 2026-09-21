@@ -285,15 +285,11 @@ async function buildQueue(): Promise<{ added: number; skipped: number; reason: s
     });
   }
 
-  // 同款去重：同一件商品被换标题重复上架时 SKU 相同，留最新一条
-  const first = new Map<string, number>();
-  const keyOf = (r: any) => String((r as any).dupKey || `id:${r.itemId}`);
-  for (const r of rows as any[]) {
-    const k = keyOf(r);
-    if (first.has(k)) continue;
-    first.set(k, 1);
-  }
+  // 同款去重：**按店铺分别去重**——两个店铺的同款商品都保留（各排一条），
+  // 第二个店铺在生成阶段会自动复用第一个店铺的同款备份（findReusableBackup），只上传不重新生成。
+  // 店铺内同一件商品被换标题重复上架时 SKU 相同，仍只留一条。
   const seen = new Set<string>();
+  const keyOf = (r: any) => `${r.storeId}|${String((r as any).dupKey || `id:${r.itemId}`)}`;
   const dedup = rows.filter((r: any) => {
     const k = keyOf(r);
     if (seen.has(k)) return false;

@@ -460,6 +460,39 @@ export function backupFilePath(rec: Pick<VideoRecord, 'backupFile'>): string {
   return rec.backupFile ? path.join(BACKUP_DIR, rec.backupFile) : '';
 }
 
+/**
+ * 跨店铺复用同款视频：在全部视频记录中查找「标题同款」且备份文件仍在磁盘上的其他店铺记录。
+ * ML 不做同文件去重（同一文件上传到不同商品/店铺都允许，见 processAndUploadVideo 注释），
+ * 因此另一个店铺的同款商品可直接复用这份备份上传，省掉一次 AI 生成/源视频转换。
+ * 标题匹配口径与链接索引一致：归一化后前 30 字符完全相等（防配错源视频）。
+ * 返回备份文件名（不带 .mp4），调用方塞进 altBackupKeys 即可。
+ */
+export function findReusableBackup(opts: {
+  title: string;
+  /** 排除自己（storeId + detailId 组合） */
+  excludeStoreId?: string;
+  excludeDetailId?: string;
+}): string | null {
+  const norm = (s: string) => (s || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '');
+  const t = norm(opts.title).slice(0, 30);
+  if (!t) return null;
+  for (const r of Object.values(vrCache.records)) {
+    if (opts.excludeStoreId && opts.excludeDetailId && r.storeId === opts.excludeStoreId && r.detailId === opts.excludeDetailId) continue;
+    if (!r.backupFile) continue;
+    const rt = norm(r.title || '').slice(0, 30);
+    if (!rt || rt !== t) continue;
+    const p = path.join(BACKUP_DIR, r.backupFile);
+    try {
+      if (fs.existsSync(p) && fs.statSync(p).size > 10_000) {
+        return r.backupFile.replace(/\.mp4$/i, '');
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
 // ============ ML Clips 状态查询 ============
 
 /**

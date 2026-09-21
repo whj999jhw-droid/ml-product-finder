@@ -35,6 +35,7 @@ import {
   getVideoRecords,
   listVideoRecordsSorted,
   backupFilePath,
+  findReusableBackup,
   overallReview,
   saveVideoRecord,
 } from './videoClips.js';
@@ -1451,7 +1452,21 @@ export async function runItemVideo(
     mainImageUrl: ctx.mainImageUrl,
     imageUrls: ctx.pictures,
     enableSlideshowFallback: opts.enableSlideshowFallback !== false,
-    altBackupKeys: ctx.detailId ? [ctx.detailId, ctx.itemId] : [ctx.itemId],
+    // 跨店铺复用：另一个店铺的同款商品若已有备份视频，直接复用上传（省一次 AI 生成/转换）
+    altBackupKeys: (() => {
+      const keys = ctx.detailId ? [ctx.detailId, ctx.itemId] : [ctx.itemId];
+      const sibling = findReusableBackup({
+        title: ctx.title,
+        excludeStoreId: ctx.storeId,
+        // 记录键与 processAndUploadVideo 一致：rec.detailId = recordKey
+        excludeDetailId: ctx.recordKey,
+      });
+      if (sibling) {
+        console.log(`[runItemVideo] ${ctx.itemId} 复用同款其他店铺备份 ${sibling}.mp4`);
+        return [...keys, sibling];
+      }
+      return keys;
+    })(),
     reuseBackup: true,
     force: !!opts.force,
     miaoshouDetailId: ctx.detailId,
