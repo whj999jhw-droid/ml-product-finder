@@ -273,6 +273,9 @@ async function buildQueue(): Promise<{ added: number; skipped: number; reason: s
       page: 1,
       pageSize: 20000,
       onSale: config.onlyOnSale ? 'yes' : 'all',
+      // 禁售硬排除：只要有站点被美客多禁止（forbidden/blocked/suspended）就不生成视频，
+      // 与 onlyOnSale 开关无关 —— 给不可售的商品做视频纯属浪费 AI 额度。
+      blocked: 'none',
     }).items;
     for (const r of items) rows.push({
       storeId,
@@ -432,6 +435,8 @@ async function tick(): Promise<void> {
           sites: config.sites,
           disabledAi,
           enableSlideshowFallback: config.enableSlideshowFallback,
+          enableAiFallback: config.enableAiFallback,
+          aiPromptMode: config.aiPromptMode,
         });
         if (r.ok) {
           if (r.stage === 'generated') {

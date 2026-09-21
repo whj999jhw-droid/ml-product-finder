@@ -1397,6 +1397,10 @@ export async function runItemVideo(
     mode?: 'generate' | 'upload' | 'both';
     /** 是否允许「图集运镜视频」兜底（默认允许） */
     enableSlideshowFallback?: boolean;
+    /** 是否允许 AI 图生视频兜底（默认允许；autoVideo 定时任务会把页面配置透传进来） */
+    enableAiFallback?: boolean;
+    /** AI 动作指令模式：auto=LLM 生成场景描述（失败降级品类规则）；rule=只用品类规则 */
+    aiPromptMode?: 'auto' | 'rule';
   },
 ): Promise<{ ok: boolean; skipped?: boolean; skipReason?: string; stage?: string; error?: string; sourceKind?: string; clipUuid?: string; siteStatuses?: Record<string, string> }> {
   const sites = (opts.sites && opts.sites.length ? opts.sites : ['MLM']).filter(Boolean);
@@ -1452,6 +1456,9 @@ export async function runItemVideo(
     mainImageUrl: ctx.mainImageUrl,
     imageUrls: ctx.pictures,
     enableSlideshowFallback: opts.enableSlideshowFallback !== false,
+    // autoVideo 定时任务传来的 AI 配置之前漏转发，导致页面开关/模式实际失效
+    enableAiFallback: opts.enableAiFallback !== false,
+    aiPromptMode: opts.aiPromptMode || 'auto',
     // 跨店铺复用：另一个店铺的同款商品若已有备份视频，直接复用上传（省一次 AI 生成/转换）
     altBackupKeys: (() => {
       const keys = ctx.detailId ? [ctx.detailId, ctx.itemId] : [ctx.itemId];

@@ -433,6 +433,16 @@ async function processOneCandidate(
   // 2.1 补充详情（重量/尺寸/图片）
   const enriched = await enrichCandidate(raw, scanToken);
 
+  // 2.1.1 超重淘汰：>1kg 直接淘汰（跨境头程运费翻倍，不划算）。
+  // weightKg 拿不到(undefined)时放行，不误杀；阈值可用 MAX_WEIGHT_KG 热调。
+  const maxWeightKg = Number(process.env.MAX_WEIGHT_KG ?? 1);
+  if (enriched.weightKg != null && enriched.weightKg > maxWeightKg) {
+    const reason = `超重(${enriched.weightKg.toFixed(2)}kg>${maxWeightKg}kg)，头程运费不划算`;
+    console.log(`[SourcingPipeline] 候选 ${raw.itemId} 淘汰: ${reason}`);
+    insertCandidate(buildCandidateRow(runId, enriched, { status: 'rejected', rejectReason: reason }));
+    return { result: null, reason, sourceOrigin: null };
+  }
+
   // 2.2 优先走牛顿 NL 寻源；未配置/超时/无结果则回退 1688-shopkeeper 关键词搜索
   let sourceOrigin: 'newton' | '1688-shopkeeper' | null = null;
   let searchQuery = build1688SearchQuery(enriched.title);
