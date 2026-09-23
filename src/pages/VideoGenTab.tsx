@@ -260,6 +260,9 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
   const [building, setBuilding] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [aiProviders, setAiProviders] = useState<Array<{ name: string; model: string; platform: string }>>([]);
+  const [providerPlatformFilter, setProviderPlatformFilter] = useState<string>('all');
+  const [providerPage, setProviderPage] = useState(1);
+  const PROVIDER_PAGE_SIZE = 5;
   const [checkClip, setCheckClip] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<Record<string, boolean>>({});
@@ -814,14 +817,52 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
         )}
 
       {aiProviders.length > 0 && (
-        <div className="mb-2 text-xs text-gray-500">
-          AI 图生视频可用平台：
-          {aiProviders.map((p) => (
-            <Tag key={`${p.platform}:${p.model}`} size="small" variant="outline" className="mr-1">
-              {p.platform} · {p.model}
-            </Tag>
-          ))}
-          <span className="text-gray-400">（按配置顺序尝试，第一个成功即用；账号欠费/限流会在失败原因里写明）</span>
+        <div className="mb-2">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-xs text-gray-500">AI 图生视频可用平台（共 {aiProviders.length} 个）：</span>
+            <Select
+              value={providerPlatformFilter}
+              onChange={(v) => { setProviderPlatformFilter(v as string); setProviderPage(1); }}
+              options={[
+                { label: '全部', value: 'all' },
+                ...Array.from(new Set(aiProviders.map((p) => p.platform))).map((pl) => ({ label: pl, value: pl })),
+              ]}
+              style={{ width: 160 }}
+              size="small"
+            />
+          </div>
+          {(() => {
+            const filtered = providerPlatformFilter === 'all'
+              ? aiProviders
+              : aiProviders.filter((p) => p.platform === providerPlatformFilter);
+            const totalPages = Math.ceil(filtered.length / PROVIDER_PAGE_SIZE) || 1;
+            if (providerPage > totalPages) setProviderPage(totalPages);
+            const pageItems = filtered.slice((providerPage - 1) * PROVIDER_PAGE_SIZE, providerPage * PROVIDER_PAGE_SIZE);
+            return (
+              <>
+                <div className="flex flex-wrap gap-1 mb-1">
+                  {pageItems.map((p) => (
+                    <Tag key={`${p.platform}:${p.model}`} size="small" variant="outline" className="mr-1">
+                      {p.platform} · {p.model}
+                    </Tag>
+                  ))}
+                </div>
+                <div className="flex items-center justify-between text-gray-400">
+                  <span className="text-xs">（按配置顺序尝试，第一个成功即用；账号欠费/限流会在失败原因里写明）</span>
+                  {totalPages > 1 && (
+                    <Pagination
+                      current={providerPage}
+                      total={filtered.length}
+                      pageSize={PROVIDER_PAGE_SIZE}
+                      onChange={(page) => setProviderPage(page)}
+                      showPageSizeSelector={false}
+                      simple
+                    />
+                  )}
+                </div>
+              </>
+            );
+          })()}
         </div>
       )}
 
