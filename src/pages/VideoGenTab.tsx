@@ -854,9 +854,8 @@ export function VideoGenTab({ stores }: { stores: Store[] }) {
                       current={providerPage}
                       total={filtered.length}
                       pageSize={PROVIDER_PAGE_SIZE}
-                      onChange={(page) => setProviderPage(page)}
+                      onChange={(page) => setProviderPage(Number(page))}
                       showPageSizeSelector={false}
-                      simple
                     />
                   )}
                 </div>

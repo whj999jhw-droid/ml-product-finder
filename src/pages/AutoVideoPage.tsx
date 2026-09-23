@@ -392,7 +392,7 @@ export function AutoVideoPage() {
           <Input
             placeholder="按商品名/ID/店铺名筛选（留空显示全部）"
             value={titleFilter}
-            onChange={(v) => { setTitleFilter(v); }}
+            onChange={(v) => setTitleFilter(v as string)}
             allowClear
             style={{ maxWidth: 360 }}
           />
