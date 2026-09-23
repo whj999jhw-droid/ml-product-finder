@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import {
   Button,
   Card,
@@ -12,10 +12,9 @@ import {
   InputNumber,
   Collapse,
   Tooltip,
-  Input,
 } from 'tdesign-react';
 import type { PrimaryTableCol } from 'tdesign-react';
-import { PlayCircleIcon, PauseCircleIcon, StopIcon, RefreshIcon, TimeIcon, SearchIcon } from 'tdesign-icons-react';
+import { PlayCircleIcon, PauseCircleIcon, StopIcon, RefreshIcon, TimeIcon } from 'tdesign-icons-react';
 
 type Phase = 'stopped' | 'running' | 'paused' | 'finished';
 type Order = 'newest' | 'sold' | 'random';
@@ -124,11 +123,10 @@ const DEFAULT_CONFIG: AutoVideoConfig = {
 export function AutoVideoPage() {
   const [config, setConfig] = useState<AutoVideoConfig>(DEFAULT_CONFIG);
   const [status, setStatus] = useState<StatusResp | null>(null);
-  const [rawQueue, setRawQueue] = useState<QueueItem[]>([]);
+  const [queue, setQueue] = useState<QueueItem[]>([]);
   const [stores, setStores] = useState<{ id: string; nickname: string }[]>([]);
   const [busy, setBusy] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState(false);
-  const [titleFilter, setTitleFilter] = useState('');
   const timerRef = useRef<number | null>(null);
 
   const api = useCallback(async (url: string, opts?: { method?: string; body?: any }) => {
@@ -158,7 +156,7 @@ export function AutoVideoPage() {
   const loadQueue = useCallback(async () => {
     try {
       const q = (await api('/api/ml/auto-video/queue?limit=300')) as { items: QueueItem[] };
-      setRawQueue(q.items || []);
+      setQueue(q.items || []);
     } catch {
       /* ignore */
     }
@@ -216,25 +214,6 @@ export function AutoVideoPage() {
   };
 
   const patchConfig = (p: Partial<AutoVideoConfig>) => setConfig((c) => ({ ...c, ...p }));
-
-  // 筛选 + 排序：默认按完成时间倒序，标题筛选模糊匹配
-  const filteredQueue = useMemo(() => {
-    let rows = rawQueue;
-    if (titleFilter.trim()) {
-      const kw = titleFilter.trim().toLowerCase();
-      rows = rows.filter((r) =>
-        (r.title || '').toLowerCase().includes(kw) ||
-        (r.itemId || '').toLowerCase().includes(kw) ||
-        (r.storeNick || '').toLowerCase().includes(kw),
-      );
-    }
-    // 默认按 uploadedAt 倒序（完成时间最近在前），无完成时间的放后面
-    return [...rows].sort((a, b) => {
-      const aTime = a.uploadedAt || a.generatedAt || 0;
-      const bTime = b.uploadedAt || b.generatedAt || 0;
-      return bTime - aTime;
-    });
-  }, [rawQueue, titleFilter]);
 
   const columns: PrimaryTableCol<QueueItem>[] = [
     { colKey: 'title', title: '商品', width: 320, ellipsis: true, cell: ({ row }) => (
@@ -387,24 +366,13 @@ export function AutoVideoPage() {
 
       {/* 队列卡 */}
       <Card title="队列明细" bordered>
-        <div className="mb-3 flex items-center gap-2">
-          <SearchIcon className="text-gray-400" size={16} />
-          <Input
-            placeholder="按商品名/ID/店铺名筛选（留空显示全部）"
-            value={titleFilter}
-            onChange={(v) => setTitleFilter(v as string)}
-            allowClear
-            style={{ maxWidth: 360 }}
-          />
-          <span className="text-xs text-gray-400">默认按完成时间倒序 · 共 {filteredQueue.length} 条</span>
-        </div>
         <Table
-          data={filteredQueue}
+          data={queue}
           columns={columns}
           rowKey="key"
           size="small"
           maxHeight={520}
-          pagination={{ defaultPageSize: 20, total: filteredQueue.length }}
+          pagination={{ defaultPageSize: 20, total: queue.length }}
           loading={busy}
         />
       </Card>

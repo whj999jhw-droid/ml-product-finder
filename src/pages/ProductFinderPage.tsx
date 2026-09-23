@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Button, Card, Tag, Progress, Table, NotificationPlugin, Radio, Switch, Checkbox, Input, InputGroup } from 'tdesign-react';
 import { confirmDialog } from '../utils/dialog';
 import {
@@ -184,11 +184,20 @@ export function ProductFinderPage() {
     }
   }, []);
 
-  // 文件名筛选（模糊匹配，留空显示全部；默认按创建时间倒序）
+  // 文件名筛选（模糊匹配，留空显示全部；统一按创建时间倒序）
   const filteredFiles = useMemo(() => {
-    if (!fileNameFilter.trim()) return files;
-    const q = fileNameFilter.toLowerCase();
-    return files.filter((f) => f.fileName.toLowerCase().includes(q));
+    let list = [...files];
+    // 默认按创建时间倒序（不依赖后端顺序）
+    list.sort((a, b) => {
+      const ta = new Date(a.createdAt).getTime();
+      const tb = new Date(b.createdAt).getTime();
+      return (isNaN(tb) ? 0 : tb) - (isNaN(ta) ? 0 : ta);
+    });
+    if (fileNameFilter.trim()) {
+      const q = fileNameFilter.trim().toLowerCase();
+      list = list.filter((f) => f.fileName.toLowerCase().includes(q));
+    }
+    return list;
   }, [files, fileNameFilter]);
 
   // 获取 token 状态
@@ -1620,7 +1629,15 @@ export function ProductFinderPage() {
             products={products}
             isFetching={isFetching}
             onExportSelected={handleExportSelected}
-            onFilteredChange={(filtered) => setSavedFilterResults(filtered)}
+            onFilteredChange={(filtered) => {
+              // 只在「确实筛过」（结果比全量少）时保留，避免与主表格重复
+              if (filtered.length > 0 && filtered.length < products.length) {
+                setSavedFilterResults(filtered);
+              } else if (filtered.length === products.length && products.length > 0) {
+                // 未筛选（全部命中）→ 清空保留区
+                setSavedFilterResults([]);
+              }
+            }}
           />
         </Card>
 
@@ -1684,7 +1701,7 @@ export function ProductFinderPage() {
               placeholder="按文件名筛选（留空显示全部）"
               value={fileNameFilter}
               onChange={(v: string) => setFileNameFilter(v)}
-              allowClear
+              clearable
               style={{ maxWidth: 320 }}
             />
             <span className="text-xs text-gray-400">
@@ -1704,12 +1721,12 @@ export function ProductFinderPage() {
             <div style={{ overflowX: 'auto' }}>
             <Table
               data={filteredFiles.map((f, i) => ({
-                key: f.filePath,
+                key: f.fileName,
                 index: i + 1,
                 fileName: f.fileName,
                 size: formatSize(f.size),
                 createdAt: formatDate(f.createdAt),
-                operation: f.filePath,
+                operation: f.fileName,
               }))}
               columns={[
                 { colKey: 'index', title: '#', width: 60 },

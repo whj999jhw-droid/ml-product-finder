@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { Card, Tabs, Tag, Button, Loading, MessagePlugin, Space, Input } from 'tdesign-react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { Card, Tabs, Tag, Button, Loading, MessagePlugin, Space, Input, Pagination, Select } from 'tdesign-react';
 import { RefreshIcon, CopyIcon, SearchIcon, AddIcon, DeleteIcon, ChevronUpIcon, ChevronDownIcon } from 'tdesign-icons-react';
 
 interface TrendItem {
@@ -157,6 +157,9 @@ export function TrendsPage() {
     model: '',
   });
   const [llmProviders, setLlmProviders] = useState<LlmProviderForm[]>([emptyProvider()]);
+  const [llmPlatformFilter, setLlmPlatformFilter] = useState<string>('all');
+  const [llmPage, setLlmPage] = useState(1);
+  const LLM_PAGE_SIZE = 5;
   const [llmConfigured, setLlmConfigured] = useState(false);
   const [llmSaving, setLlmSaving] = useState(false);
   const [llmTesting, setLlmTesting] = useState(false);
@@ -345,66 +348,110 @@ export function TrendsPage() {
             <b>一个平台不通自动降级到下一个</b>。baseUrl 填到 /v1 或不带 /v1 均可。
           </div>
 
-          {llmProviders.map((p, idx) => (
-            <div
-              key={p.id}
-              className="p-3 rounded border"
-              style={{ backgroundColor: 'var(--td-bg-color-secondarycontainer)' }}
-            >
-              <div className="flex items-center justify-between mb-2">
-                <div className="text-sm font-medium">平台 {idx + 1}</div>
-                <div className="flex items-center gap-1">
-                  <Button
-                    size="small"
-                    variant="outline"
-                    icon={<ChevronUpIcon />}
-                    disabled={idx === 0}
-                    onClick={() => moveProvider(idx, -1)}
-                    title="上移"
-                  />
-                  <Button
-                    size="small"
-                    variant="outline"
-                    icon={<ChevronDownIcon />}
-                    disabled={idx === llmProviders.length - 1}
-                    onClick={() => moveProvider(idx, 1)}
-                    title="下移"
-                  />
-                  <Button
-                    size="small"
-                    variant="outline"
-                    icon={<DeleteIcon />}
-                    disabled={llmProviders.length <= 1}
-                    onClick={() => removeProvider(idx)}
-                    title="删除"
-                  />
-                </div>
-              </div>
-              <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
-                <Input
-                  value={p.name}
-                  onChange={(v: string) => updateProvider(idx, 'name', v)}
-                  placeholder="平台名称（如：硅基流动）"
-                />
-                <Input
-                  value={p.baseUrl}
-                  onChange={(v: string) => updateProvider(idx, 'baseUrl', v)}
-                  placeholder="https://api.siliconflow.cn"
-                />
-                <Input
-                  value={p.apiKey}
-                  type="password"
-                  onChange={(v: string) => updateProvider(idx, 'apiKey', v)}
-                  placeholder={llmConfigured ? 'Api Key（留空=不修改）' : 'Api Key'}
-                />
-                <Input
-                  value={p.model}
-                  onChange={(v: string) => updateProvider(idx, 'model', v)}
-                  placeholder="Model，如 Qwen/Qwen2.5-7B-Instruct"
-                />
-              </div>
+          {/* 平台筛选 + 分页 */}
+          {llmProviders.length > LLM_PAGE_SIZE && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <Select
+                value={llmPlatformFilter}
+                onChange={(v: any) => { setLlmPlatformFilter(String(v)); setLlmPage(1); }}
+                options={[
+                  { label: '全部平台', value: 'all' },
+                  ...Array.from(new Set(llmProviders.map((p) => p.name.trim()).filter(Boolean))).map((n) => ({ label: n, value: n })),
+                ]}
+                style={{ width: 180 }}
+                size="small"
+              />
+              <span className="text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>
+                每页 {LLM_PAGE_SIZE} 个 · 共 {llmProviders.length} 个平台
+              </span>
             </div>
-          ))}
+          )}
+
+          {(() => {
+            const filtered = llmPlatformFilter === 'all'
+              ? llmProviders
+              : llmProviders.filter((p) => p.name.trim() === llmPlatformFilter);
+            const totalPages = Math.max(1, Math.ceil(filtered.length / LLM_PAGE_SIZE));
+            const safePage = Math.min(llmPage, totalPages);
+            const pageItems = filtered.slice((safePage - 1) * LLM_PAGE_SIZE, safePage * LLM_PAGE_SIZE);
+            return (
+              <>
+                {pageItems.map((p, localIdx) => {
+                  const idx = filtered.indexOf(p);
+                  return (
+                    <div
+                      key={p.id}
+                      className="p-3 rounded border"
+                      style={{ backgroundColor: 'var(--td-bg-color-secondarycontainer)' }}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="text-sm font-medium">平台 {idx + 1}</div>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            size="small"
+                            variant="outline"
+                            icon={<ChevronUpIcon />}
+                            disabled={idx === 0}
+                            onClick={() => moveProvider(idx, -1)}
+                            title="上移"
+                          />
+                          <Button
+                            size="small"
+                            variant="outline"
+                            icon={<ChevronDownIcon />}
+                            disabled={idx === llmProviders.length - 1}
+                            onClick={() => moveProvider(idx, 1)}
+                            title="下移"
+                          />
+                          <Button
+                            size="small"
+                            variant="outline"
+                            icon={<DeleteIcon />}
+                            disabled={llmProviders.length <= 1}
+                            onClick={() => removeProvider(idx)}
+                            title="删除"
+                          />
+                        </div>
+                      </div>
+                      <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
+                        <Input
+                          value={p.name}
+                          onChange={(v: string) => updateProvider(idx, 'name', v)}
+                          placeholder="平台名称（如：硅基流动）"
+                        />
+                        <Input
+                          value={p.baseUrl}
+                          onChange={(v: string) => updateProvider(idx, 'baseUrl', v)}
+                          placeholder="https://api.siliconflow.cn"
+                        />
+                        <Input
+                          value={p.apiKey}
+                          type="password"
+                          onChange={(v: string) => updateProvider(idx, 'apiKey', v)}
+                          placeholder={llmConfigured ? 'Api Key（留空=不修改）' : 'Api Key'}
+                        />
+                        <Input
+                          value={p.model}
+                          onChange={(v: string) => updateProvider(idx, 'model', v)}
+                          placeholder="Model，如 Qwen/Qwen2.5-7B-Instruct"
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {totalPages > 1 && (
+                  <Pagination
+                    current={safePage}
+                    total={filtered.length}
+                    pageSize={LLM_PAGE_SIZE}
+                    showPageSize={false}
+                    onChange={({ current: c }: any) => setLlmPage(c)}
+                  />
+                )}
+              </>
+            );
+          })()}
 
           <div className="flex flex-wrap gap-2 items-center">
             <Button variant="outline" icon={<AddIcon />} onClick={addProvider}>
