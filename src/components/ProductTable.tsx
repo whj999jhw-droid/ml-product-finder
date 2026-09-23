@@ -43,6 +43,7 @@ interface ProductTableProps {
   products: ProductItem[];
   isFetching: boolean;
   onExportSelected: (products: ProductItem[]) => void;
+  onFilteredChange?: (filtered: ProductItem[]) => void;
 }
 
 // 格式化货币
@@ -152,6 +153,12 @@ export function ProductTable({ products, isFetching, onExportSelected }: Product
 
     return result;
   }, [products, searchText, priceMin, priceMax, minSales, selectedSites, selectedCategories, sortKey, sortDir]);
+
+  // 通知父组件筛选结果变化（用于保存到「筛选历史」）
+  const { onFilteredChange } = props;
+  useEffect(() => {
+    if (onFilteredChange) onFilteredChange(filteredProducts);
+  }, [filteredProducts, onFilteredChange]);
 
   // ===== 汇总统计 =====
   const stats = useMemo(() => {

@@ -64,6 +64,8 @@ export function ProductFinderPage() {
   const [fetchedCount, setFetchedCount] = useState(0); // 后端已抓取商品总数（权威计数）
   const fetchPollRef = useRef<ReturnType<typeof setInterval> | null>(null); // 抓取进度轮询定时器
   const [files, setFiles] = useState<ExportedFile[]>([]);
+  const [fileNameFilter, setFileNameFilter] = useState('');
+  const [savedFilterResults, setSavedFilterResults] = useState<ProductItem[]>([]);
   const [selectedSites, setSelectedSites] = useState<string[]>(['MLM', 'MLB', 'MLC', 'MCO']);
   const logEndRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null); // token 轮询定时器
@@ -181,6 +183,13 @@ export function ProductFinderPage() {
       console.error('获取文件列表失败:', err);
     }
   }, []);
+
+  // 文件名筛选（模糊匹配，留空显示全部；默认按创建时间倒序）
+  const filteredFiles = useMemo(() => {
+    if (!fileNameFilter.trim()) return files;
+    const q = fileNameFilter.toLowerCase();
+    return files.filter((f) => f.fileName.toLowerCase().includes(q));
+  }, [files, fileNameFilter]);
 
   // 获取 token 状态
   const fetchTokenStatus = useCallback(async () => {
@@ -1611,13 +1620,77 @@ export function ProductFinderPage() {
             products={products}
             isFetching={isFetching}
             onExportSelected={handleExportSelected}
+            onFilteredChange={(filtered) => setSavedFilterResults(filtered)}
           />
         </Card>
+
+        {/* 筛选结果历史 */}
+        {savedFilterResults.length > 0 && (
+          <Card title={`📋 筛选结果历史（${savedFilterResults.length} 条）`} bordered>
+            <div className="mb-2 text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>
+              最近一次商品列表的筛选结果，方便后续查看或重新导出
+            </div>
+            <div style={{ overflowX: 'auto' }}>
+              <Table
+                data={savedFilterResults.map((p, i) => ({ key: p.itemId, ...p }))}
+                columns={[
+                  { colKey: 'site', title: '站点', width: 70 },
+                  { colKey: 'categoryId', title: '分类', width: 120 },
+                  { colKey: 'rank', title: '排名', width: 60 },
+                  {
+                    colKey: 'title',
+                    title: '商品标题',
+                    ellipsis: true,
+                    render: ({ row }: any) => (
+                      <div className="flex items-center gap-2">
+                        {row.thumbnail && (
+                          <img src={row.thumbnail} alt="" className="w-8 h-8 object-cover rounded" />
+                        )}
+                        <span className="text-sm">{row.title}</span>
+                      </div>
+                    ),
+                  },
+                  { colKey: 'priceUSD', title: 'USD价', width: 80, cell: ({ row }: any) => `$${row.priceUSD.toFixed(2)}` },
+                  { colKey: 'soldQuantity', title: '销量', width: 80 },
+                  {
+                    colKey: 'permalink',
+                    title: '操作',
+                    width: 100,
+                    cell: ({ row }: any) => (
+                      <a href={row.permalink} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">
+                        查看
+                      </a>
+                    ),
+                  },
+                ]}
+                rowKey="key"
+                bordered
+                size="small"
+                pagination={{ defaultPageSize: 20, total: savedFilterResults.length }}
+              />
+            </div>
+          </Card>
+        )}
 
         {/* 已导出文件列表 */}
         <Card title="已导出文件" bordered>
           <div className="mb-3 text-xs leading-relaxed" style={{ color: 'var(--td-text-color-secondary)' }}>
             带 <Tag theme="warning" size="small" variant="light">妙手素材包</Tag> 标记的 <b>*.zip</b>（含产品导入表格.xlsx + 产品图片/货号/主图·SKU图·详情图·证书·尺寸图·视频目录树）可直接拖入妙手「素材包导入」走 采集箱→认领→发布；<b>*.xlsx</b> 为 16 列明细（对齐格式2模板 + 类目ID/站点/物流方式）。两者下载按钮通用。
+          </div>
+          {/* 文件名搜索框 */}
+          <div className="mb-3 flex items-center gap-2">
+            <SearchIcon className="text-gray-400" size={16} />
+            <Input
+              placeholder="按文件名筛选（留空显示全部）"
+              value={fileNameFilter}
+              onChange={(v: string) => setFileNameFilter(v)}
+              allowClear
+              style={{ maxWidth: 320 }}
+            />
+            <span className="text-xs text-gray-400">
+              默认按创建时间倒序 · 共 {files.length} 条
+              {fileNameFilter && `，筛选后 ${filteredFiles.length} 条`}
+            </span>
           </div>
           {files.length === 0 ? (
             <div
@@ -1630,13 +1703,13 @@ export function ProductFinderPage() {
           ) : (
             <div style={{ overflowX: 'auto' }}>
             <Table
-              data={files.map((f, i) => ({
-                key: i,
+              data={filteredFiles.map((f, i) => ({
+                key: f.filePath,
                 index: i + 1,
                 fileName: f.fileName,
                 size: formatSize(f.size),
                 createdAt: formatDate(f.createdAt),
-                operation: f.fileName,
+                operation: f.filePath,
               }))}
               columns={[
                 { colKey: 'index', title: '#', width: 60 },
