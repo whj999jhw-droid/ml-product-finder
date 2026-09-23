@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useEffect } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import { Table, Button, Input, Tag, Checkbox, Select, Tooltip, MessagePlugin } from 'tdesign-react';
 import {
   DownloadIcon,
@@ -43,7 +43,6 @@ interface ProductTableProps {
   products: ProductItem[];
   isFetching: boolean;
   onExportSelected: (products: ProductItem[]) => void;
-  onFilteredChange?: (filtered: ProductItem[]) => void;
 }
 
 // 格式化货币
@@ -67,8 +66,7 @@ const siteNames: Record<string, string> = {
   MCO: '哥伦比亚',
 };
 
-export function ProductTable(props: ProductTableProps) {
-  const { products, isFetching, onExportSelected, onFilteredChange } = props;
+export function ProductTable({ products, isFetching, onExportSelected }: ProductTableProps) {
   // ===== 筛选状态 =====
   const [searchText, setSearchText] = useState('');
   const [priceMin, setPriceMin] = useState<string>('');
@@ -154,11 +152,6 @@ export function ProductTable(props: ProductTableProps) {
 
     return result;
   }, [products, searchText, priceMin, priceMax, minSales, selectedSites, selectedCategories, sortKey, sortDir]);
-
-  // 通知父组件筛选结果变化（用于保存到「筛选历史」）
-  useEffect(() => {
-    if (onFilteredChange) onFilteredChange(filteredProducts);
-  }, [filteredProducts, onFilteredChange]);
 
   // ===== 汇总统计 =====
   const stats = useMemo(() => {

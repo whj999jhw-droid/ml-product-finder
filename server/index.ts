@@ -941,6 +941,7 @@ import {
   loadCheckpoint,
   saveCheckpoint,
   deleteCheckpoint,
+  getFileProducts,
   type FetchCheckpoint,
 } from './mercadolibre.js';
 import { sendXlsxResult, sendTestEmail, getEmailConfig, saveEmailConfig, loadEmailConfig } from './email.js';
@@ -1957,6 +1958,24 @@ app.get('/api/ml/files', (req, res) => {
   }
 });
 
+// 按「导出文件名」取对应的商品快照（文件↔商品联动查看）
+app.get('/api/ml/file-products/:filename', (req, res) => {
+  try {
+    const { filename } = req.params;
+    if (!filename || filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+      return res.status(400).json({ success: false, error: '文件名无效' });
+    }
+    const products = getFileProducts(filename);
+    if (products === null) {
+      return res.json({ success: true, fileName: filename, products: [], hasSnapshot: false });
+    }
+    res.json({ success: true, fileName: filename, products, hasSnapshot: true });
+  } catch (error: any) {
+    console.error('[ML FileProducts] Error:', error);
+    res.status(500).json({ success: false, error: error?.message || '读取文件商品失败' });
+  }
+});
+
 // 删除已导出的文件
 app.delete('/api/ml/files/:filename', (req, res) => {
   try {
@@ -1977,6 +1996,11 @@ app.delete('/api/ml/files/:filename', (req, res) => {
     }
 
     fs.unlinkSync(filePath);
+    // 联动删除对应的商品快照（<fileName>.products.json）
+    const snapshotPath = path.join(exportDir, `${filename}.products.json`);
+    if (fs.existsSync(snapshotPath)) {
+      try { fs.unlinkSync(snapshotPath); } catch { /* ignore */ }
+    }
     console.log(`[ML Files] 已删除导出文件: ${filename}`);
     res.json({ success: true, message: `已删除 ${filename}` });
   } catch (error: any) {

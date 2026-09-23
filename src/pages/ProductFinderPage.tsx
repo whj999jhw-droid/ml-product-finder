@@ -65,7 +65,9 @@ export function ProductFinderPage() {
   const fetchPollRef = useRef<ReturnType<typeof setInterval> | null>(null); // 抓取进度轮询定时器
   const [files, setFiles] = useState<ExportedFile[]>([]);
   const [fileNameFilter, setFileNameFilter] = useState('');
-  const [savedFilterResults, setSavedFilterResults] = useState<ProductItem[]>([]);
+  // 正在查看的「导出文件 ↔ 商品」联动：选中某个导出文件后，商品列表显示该文件对应的商品
+  const [fileView, setFileView] = useState<{ fileName: string; products: ProductItem[] } | null>(null);
+  const [fileViewLoading, setFileViewLoading] = useState(false);
   const [selectedSites, setSelectedSites] = useState<string[]>(['MLM', 'MLB', 'MLC', 'MCO']);
   const logEndRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null); // token 轮询定时器
@@ -199,6 +201,58 @@ export function ProductFinderPage() {
     }
     return list;
   }, [files, fileNameFilter]);
+
+  // 后端商品快照字段 → 前端 ProductItem（缺的字段补默认值，防止 ProductTable 内筛选/渲染崩）
+  const toProductItems = useCallback((arr: any[]): ProductItem[] =>
+    (arr || []).map((p: any) => ({
+      site: p.site || '',
+      siteName: p.siteName || '',
+      categoryId: p.categoryId || '',
+      categoryName: p.categoryName || '',
+      rank: p.rank || 0,
+      itemId: p.itemId || '',
+      title: p.title || '',
+      price: p.price || 0,
+      currency: p.currency || '',
+      priceUSD: p.priceUSD || 0,
+      permalink: p.permalink || '',
+      thumbnail: p.thumbnail || '',
+      pictures: p.pictures || [],
+      soldQuantity: p.soldQuantity || 0,
+      availableQuantity: p.availableQuantity || 0,
+      condition: p.condition || '',
+      weight: p.weight || '',
+      height: p.height || '',
+      width: p.width || '',
+      length: p.length || '',
+      sellerName: p.sellerName || '',
+      sellerLink: p.sellerLink || '',
+      brand: p.brand || '',
+      model: p.model || '',
+    })), []);
+
+  // 查看某个导出文件对应的商品（用导出文件名筛出商品，显示在上方商品列表）
+  const handleViewFileProducts = useCallback(async (fileName: string) => {
+    setFileViewLoading(true);
+    try {
+      const res = await fetch(`/api/ml/file-products/${encodeURIComponent(fileName)}`);
+      const data = await res.json();
+      if (!data.success) {
+        NotificationPlugin.error({ title: '读取失败', content: data.error || '' });
+        return;
+      }
+      if (!data.hasSnapshot || !data.products?.length) {
+        NotificationPlugin.warning({ title: '该文件没有商品快照', content: '此文件生成于「文件↔商品对应」功能上线之前，无法查看商品明细' });
+        return;
+      }
+      setFileView({ fileName, products: toProductItems(data.products) });
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (err: any) {
+      NotificationPlugin.error({ title: '读取失败', content: err?.message || String(err) });
+    } finally {
+      setFileViewLoading(false);
+    }
+  }, [toProductItems]);
 
   // 获取 token 状态
   const fetchTokenStatus = useCallback(async () => {
@@ -819,6 +873,8 @@ export function ProductFinderPage() {
       const data = await res.json();
       if (data.success) {
         NotificationPlugin.success({ title: '已删除', content: data.message });
+        // 若删除的是正在查看的文件，联动退出查看模式
+        if (fileView?.fileName === fileName) setFileView(null);
         fetchFiles();
       } else {
         NotificationPlugin.warning({ title: '删除失败', content: data.error || '' });
@@ -826,7 +882,7 @@ export function ProductFinderPage() {
     } catch (err: any) {
       NotificationPlugin.error({ title: '删除失败', content: err?.message || '' });
     }
-  }, [fetchFiles]);
+  }, [fetchFiles, fileView]);
 
   // 导出选中商品
   const handleExportSelected = useCallback(async (selectedProducts: ProductItem[]) => {
@@ -1625,69 +1681,28 @@ export function ProductFinderPage() {
             ) : undefined
           }
         >
-          <ProductTable
-            products={products}
-            isFetching={isFetching}
-            onExportSelected={handleExportSelected}
-            onFilteredChange={(filtered) => {
-              // 只在「确实筛过」（结果比全量少）时保留，避免与主表格重复
-              if (filtered.length > 0 && filtered.length < products.length) {
-                setSavedFilterResults(filtered);
-              } else if (filtered.length === products.length && products.length > 0) {
-                // 未筛选（全部命中）→ 清空保留区
-                setSavedFilterResults([]);
-              }
-            }}
-          />
-        </Card>
-
-        {/* 筛选结果历史 */}
-        {savedFilterResults.length > 0 && (
-          <Card title={`📋 筛选结果历史（${savedFilterResults.length} 条）`} bordered>
-            <div className="mb-2 text-xs" style={{ color: 'var(--td-text-color-placeholder)' }}>
-              最近一次商品列表的筛选结果，方便后续查看或重新导出
-            </div>
-            <div style={{ overflowX: 'auto' }}>
-              <Table
-                data={savedFilterResults.map((p, i) => ({ key: p.itemId, ...p }))}
-                columns={[
-                  { colKey: 'site', title: '站点', width: 70 },
-                  { colKey: 'categoryId', title: '分类', width: 120 },
-                  { colKey: 'rank', title: '排名', width: 60 },
-                  {
-                    colKey: 'title',
-                    title: '商品标题',
-                    ellipsis: true,
-                    render: ({ row }: any) => (
-                      <div className="flex items-center gap-2">
-                        {row.thumbnail && (
-                          <img src={row.thumbnail} alt="" className="w-8 h-8 object-cover rounded" />
-                        )}
-                        <span className="text-sm">{row.title}</span>
-                      </div>
-                    ),
-                  },
-                  { colKey: 'priceUSD', title: 'USD价', width: 80, cell: ({ row }: any) => `$${row.priceUSD.toFixed(2)}` },
-                  { colKey: 'soldQuantity', title: '销量', width: 80 },
-                  {
-                    colKey: 'permalink',
-                    title: '操作',
-                    width: 100,
-                    cell: ({ row }: any) => (
-                      <a href={row.permalink} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">
-                        查看
-                      </a>
-                    ),
-                  },
-                ]}
-                rowKey="key"
-                bordered
-                size="small"
-                pagination={{ defaultPageSize: 20, total: savedFilterResults.length }}
+          {fileView ? (
+            <>
+              <div className="mb-2 flex items-center gap-2 flex-wrap">
+                <Tag theme="primary" variant="light">正在查看导出文件</Tag>
+                <span className="text-sm font-medium">{fileView.fileName}</span>
+                <span className="text-xs text-gray-400">共 {fileView.products.length} 条 · 可用下方筛选器继续筛选</span>
+                <Button size="small" variant="outline" onClick={() => setFileView(null)}>返回实时列表</Button>
+              </div>
+              <ProductTable
+                products={fileView.products}
+                isFetching={false}
+                onExportSelected={handleExportSelected}
               />
-            </div>
-          </Card>
-        )}
+            </>
+          ) : (
+            <ProductTable
+              products={products}
+              isFetching={isFetching}
+              onExportSelected={handleExportSelected}
+            />
+          )}
+        </Card>
 
         {/* 已导出文件列表 */}
         <Card title="已导出文件" bordered>
@@ -1750,9 +1765,19 @@ export function ProductFinderPage() {
                 {
                   colKey: 'operation',
                   title: '操作',
-                  width: 180,
+                  width: 250,
                   render: ({ row }: any) => (
                     <div className="flex gap-2">
+                      <Button
+                        size="small"
+                        theme={fileView?.fileName === row.operation ? 'primary' : 'default'}
+                        variant="outline"
+                        icon={<SearchIcon />}
+                        loading={fileViewLoading && fileView?.fileName === row.operation}
+                        onClick={() => row.operation && handleViewFileProducts(row.operation)}
+                      >
+                        商品
+                      </Button>
                       <Button
                         size="small"
                         theme="primary"

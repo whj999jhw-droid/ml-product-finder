@@ -2542,7 +2542,21 @@ export async function fetchAllProductsAndExport(
   });
 
   // 持久化完整商品数据供 M2（货源匹配 / 利润测算）消费
-  await dumpLatestProducts(allProducts);
+  const productJson = await dumpLatestProducts(allProducts);
+
+  // 按「导出文件名」持久化商品数据，实现 文件↔商品 对应查看（前端「查看商品」用）
+  try {
+    if (result.fileName && productJson.length > 0) {
+      const exportDir = path.join(__dirname, '..', 'data', 'exports');
+      fs.writeFileSync(
+        path.join(exportDir, `${result.fileName}.products.json`),
+        JSON.stringify(productJson),
+      );
+      console.log(`[ML Export] 已按文件持久化 ${productJson.length} 个商品到 ${result.fileName}.products.json`);
+    }
+  } catch (err: any) {
+    console.error('[ML Export] 按文件持久化商品数据失败:', err?.message || err);
+  }
 
   return { ...result, zipPath, zipName, totalCount: allProducts.length, siteStats };
 }
@@ -2551,8 +2565,9 @@ export async function fetchAllProductsAndExport(
  * 持久化最近一次抓取的完整商品数据到 data/exports/latest_products.json（供 M2 使用）。
  * 与「妙手产品导入」Sheet 解耦：妙手 Sheet 只保留上架必需字段；
  * 这里保留 M2 需要的全部字段（permalink / 重量 / 品牌 / 成色 / 销量 / 图片等），并预计算 priceUSD。
+ * 返回构建好的商品 JSON 数组（调用方可另存为「按文件名」的商品快照）。
  */
-export async function dumpLatestProducts(products: MLProduct[]): Promise<void> {
+export async function dumpLatestProducts(products: MLProduct[]): Promise<any[]> {
   try {
     const exportDir = path.join(__dirname, '..', 'data', 'exports');
     if (!fs.existsSync(exportDir)) fs.mkdirSync(exportDir, { recursive: true });
@@ -2591,8 +2606,27 @@ export async function dumpLatestProducts(products: MLProduct[]): Promise<void> {
     }
     fs.writeFileSync(path.join(exportDir, 'latest_products.json'), JSON.stringify(out, null, 2));
     console.log(`[ML Export] 已持久化 ${out.length} 个商品到 latest_products.json（供 M2 货源匹配/利润测算）`);
+    return out;
   } catch (err: any) {
     console.error('[ML Export] 持久化 latest_products.json 失败:', err?.message || err);
+    return [];
+  }
+}
+
+/**
+ * 按「导出文件名」读取对应的商品快照（data/exports/<fileName>.products.json）。
+ * 用于前端「用导出文件名筛出对应商品」的联动查看。
+ */
+export function getFileProducts(fileName: string): any[] | null {
+  try {
+    if (!fileName || fileName.includes('..') || fileName.includes('/') || fileName.includes('\\')) return null;
+    const p = path.join(__dirname, '..', 'data', 'exports', `${fileName}.products.json`);
+    if (!fs.existsSync(p)) return null;
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf-8'));
+    return Array.isArray(parsed) ? parsed : null;
+  } catch (err: any) {
+    console.error('[ML Files] 读取文件商品快照失败:', err?.message || err);
+    return null;
   }
 }
 
